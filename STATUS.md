@@ -29,3 +29,5 @@ All further changes follow:
 - Files: `migrations/20260226_001_action_tokens_pending_op.sql`, `migrations/20260226_002_action_tokens_ttl_cleanup.sql`.
 
 - Added emergency migration for schema drift: `migrations/20260226_003_action_tokens_expires_at_hotfix.sql`.
+
+- Added PR#2 integration contract doc for pending_op UI/handlers flow: `docs/PR2_PENDING_OP_UI_INTEGRATION.md`.
