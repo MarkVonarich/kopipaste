@@ -22,3 +22,4 @@ migrations:
   latest_migrations:
     - 20260226_001_action_tokens_pending_op.sql
     - 20260226_002_action_tokens_ttl_cleanup.sql
+    - 20260226_003_action_tokens_expires_at_hotfix.sql
