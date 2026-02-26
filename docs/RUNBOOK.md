@@ -63,3 +63,46 @@ sudo journalctl -u finuchet -n 120 --no-pager
 - Schema changes must be delivered as SQL files in `migrations/`.
 - Apply migrations explicitly on VPS and verify service logs after restart.
 - Avoid destructive migrations without explicit rollback plan.
+
+## 6) Apply DB migrations on VPS (for this PR)
+```bash
+cd /root/bot_finuchet
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_001_action_tokens_pending_op.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_002_action_tokens_ttl_cleanup.sql
+```
+
+
+## Stage 1.2 / PR1 — week fields schema
+Week fields convention used by runtime and trigger:
+- `weekday`: ISO 1..7 (Mon..Sun)
+- `week_start`: ISO week Monday date
+- `iso_year`/`iso_week`: ISO week pair
+
+Apply migration:
+```bash
+cd /root/bot_finuchet
+set -a
+. /root/bot_finuchet/.env
+set +a
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_004_week_fields_schema.sql
+```
+
+
+## Stage 1.2 / PR2 — week fields backfill
+Run backfill in DB-safe batches (legacy `week_range` remains untouched):
+
+```bash
+cd /root/bot_finuchet
+set -a
+. /root/bot_finuchet/.env
+set +a
+
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_005_week_fields_backfill.sql
+# optional: python helper for repeatable batched runs
+python3 tools/backfill_week_fields.py --batch-size 5000 --sleep-ms 30
+```
+
+Post-check:
+```bash
+psql "$DATABASE_URL" -c "SELECT COUNT(*) AS missing_week_fields FROM public.operations WHERE week_start IS NULL OR iso_year IS NULL OR iso_week IS NULL OR weekday IS NULL;"
+```

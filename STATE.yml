@@ -17,3 +17,8 @@ notes:
   - Keep environment secrets only in /root/bot_finuchet/.env and/or /root/.env
   - Apply changes via branch -> PR -> merge
   - Any DB schema change must be added as a SQL file in migrations/
+
+migrations:
+  latest_migrations:
+    - 20260226_001_action_tokens_pending_op.sql
+    - 20260226_002_action_tokens_ttl_cleanup.sql

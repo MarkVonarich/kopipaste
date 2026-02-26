@@ -22,3 +22,8 @@ All further changes follow:
 ## Notes
 - Keep secret values only in server `.env` files.
 - Keep `.env.example` with key names only.
+
+
+## Current DB work
+- Added migration baseline for subtask 1.1: action tokens/pending operation and TTL cleanup.
+- Files: `migrations/20260226_001_action_tokens_pending_op.sql`, `migrations/20260226_002_action_tokens_ttl_cleanup.sql`.

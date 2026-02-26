@@ -12,7 +12,7 @@ from cache.global_dict import global_suggestions, bump_global_popularity
 from routers.helpers import prompt_type_menu
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from db.queries import update_user_field, create_action_token, merge_action_token_payload
+from db.queries import update_user_field
 import logging
 
 log = logging.getLogger(__name__)
@@ -45,7 +45,6 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             base, dt = split_wo_date(text)
             base = base.strip() or "операция"
             context.user_data['pending'] = {'merch': norm_text(base), 'time': dt}
-            context.user_data['pending_mode'] = 'await_amount'
             context.user_data['await_amount'] = True
             return await emsg.reply_text(f"Введите сумму для «{base}» (например, 250):")
         if reason == "bad_amount":
@@ -71,11 +70,6 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         type_guess = guess_type_from_pairs(pairs)
         # Сохраняем pending только под ЭТОТ кусок; raw_text заберём из batch_item_text
         context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': type_guess, 'note': note}
-        context.user_data.pop('pending_mode', None)
-        if not context.user_data.get('pending_token_id'):
-            token_id = create_action_token(cid, cid, {'stage':'type_select','raw_text': merch, 'amount': int(amt_final), 'op_type': type_guess})
-            if token_id:
-                context.user_data['pending_token_id'] = token_id
         rows = [[InlineKeyboardButton(f"{c}", callback_data=f"sugg_use_cat|{c}|{t}")]
                 for (c,t) in pairs]
         rows.append([
@@ -91,11 +85,6 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
 
     # нет алиаса и нет готовых пар — переходим в "выбор типа"
     context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': None, 'note': note}
-    context.user_data.pop('pending_mode', None)
-    if not context.user_data.get('pending_token_id'):
-        token_id = create_action_token(cid, cid, {'stage':'type_select','raw_text': merch, 'amount': int(amt_final)})
-        if token_id:
-            context.user_data['pending_token_id'] = token_id
     context.user_data['batch_item_text'] = text
     return await prompt_type_menu(update, context)
 
@@ -170,26 +159,22 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
         return await emsg.reply_text(f"✅ Месячный бюджет: {int(text)}", reply_markup=kb)
 
-    if context.user_data.get('pending_mode') == 'awaiting_category_name' or context.user_data.get('adding_category'):
+    if context.user_data.get('adding_category'):
         p = context.user_data.get('pending', {})
         new_cat = (text or "").strip()
         if not new_cat:
             return await emsg.reply_text("⚠️ Введите название категории")
         context.user_data.pop('adding_category', None)
-        context.user_data.pop('pending_mode', None)
         typ = p.get('type') or 'Расходы'
         merch = p.get('merch', 'операция')
         amt = p.get('amt', 0)
         dt  = p.get('time', datetime.now())
         note = p.get('note')
-        token_id = context.user_data.get('pending_token_id')
         from db.queries import upsert_user_alias
         upsert_user_alias(cid, merch, typ, new_cat)
         bump_global_popularity(merch, typ, new_cat, 1)
-        if token_id:
-            merge_action_token_payload(int(token_id), {'stage':'category_named','category_name': new_cat, 'op_type': typ})
-        context.user_data['batch_item_text'] = p.get('merch', text)
-        return await record_operation(new_cat, amt, dt, typ, update, context, note, token_id=token_id, raw_text=merch)
+        context.user_data['batch_item_text'] = text
+        return await record_operation(new_cat, amt, dt, typ, update, context, note)
 
     if context.user_data.pop('await_amount', False):
         src_curr = detect_currency_token(text or "")
@@ -217,7 +202,6 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             from services.records import guess_type_from_pairs
             type_guess = guess_type_from_pairs(pairs)
             context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': type_guess, 'note': note}
-            context.user_data.pop('pending_mode', None)
             rows = [[InlineKeyboardButton(f"{c}", callback_data=f"sugg_use_cat|{c}|{t}")]
                     for (c,t) in pairs]
             rows.append([
@@ -231,7 +215,6 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': None, 'note': note}
-        context.user_data.pop('pending_mode', None)
         context.user_data['batch_item_text'] = text
         return await prompt_type_menu(update, context)
 

@@ -18,15 +18,14 @@ async def prompt_type_menu(update, context: ContextTypes.DEFAULT_TYPE):
     merch_disp = _shorten(merch)
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('➖ Расход',    callback_data='type|Расходы')],
-        [InlineKeyboardButton('➕ Доход',     callback_data='type|Доходы')],
+        [InlineKeyboardButton('💸 Расходы',    callback_data='type|Расходы')],
+        [InlineKeyboardButton('💰 Доходы',     callback_data='type|Доходы')],
         [InlineKeyboardButton('📈 Инвестиции', callback_data='type|Инвестиции')],
         [InlineKeyboardButton('💾 Сбережения', callback_data='type|Сбережения')],
         [InlineKeyboardButton('◀️ Назад',      callback_data='start_main')],
     ])
 
-    amt = p.get('amt', 0)
-    title = f"{amt} ₽ • {_md_escape(merch_disp or 'операция')}\nВыбери тип:"
+    title = 'Выберите тип операции:'
     if merch_disp:
         title = f"Выберите тип операции для *{_md_escape(merch_disp)}*"
 
@@ -44,14 +43,12 @@ async def prompt_category_menu(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat.id
     cats = list_categories_for_type(cid, typ)
 
-    rows = []
+    rows = [[InlineKeyboardButton('➕ Добавить категорию', callback_data='add_cat')]]
     for c in cats:
         rows.append([InlineKeyboardButton(c, callback_data=f"use_cat|{c}")])
-    rows.append([InlineKeyboardButton('➕ Новая категория', callback_data='add_cat')])
-    rows.append([InlineKeyboardButton('✖️ Отмена', callback_data='start_main')])
+    rows.append([InlineKeyboardButton('◀️ Назад', callback_data='start_main')])
 
-    amt = p.get('amt', 0)
-    title = f"{amt} ₽ • {_md_escape(merch_disp or 'операция')}\nКатегория:"
+    title = 'Выберите категорию ⬇️'
     if merch_disp:
         title = f"Выберите категорию для *{_md_escape(merch_disp)}*"
 
