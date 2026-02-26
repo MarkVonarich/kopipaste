@@ -1,0 +1,12 @@
+project: finuchet
+repository_state:
+  git_workflow: enforced
+  secrets_in_git: false
+  db_data_in_git: false
+  backup_artifacts_in_git: false
+runtime:
+  server_path: /root/bot_finuchet
+  service: finuchet.service
+notes:
+  - Keep environment secrets only in /root/bot_finuchet/.env and/or /root/.env
+  - Apply changes via branch -> PR -> merge

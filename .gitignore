@@ -1,0 +1,27 @@
+# Secrets
+.env
+*.env
+/root/.env
+
+# Python cache/artifacts
+__pycache__/
+*.pyc
+
+# Backups/snapshots/archives
+_backups/
+_snapshots/
+*.tgz
+*.tar.gz
+
+# Logs
+*.log
+logs/
+
+# Virtual environments
+.venv/
+venv/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
