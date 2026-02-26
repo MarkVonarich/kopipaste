@@ -22,3 +22,21 @@ migrations:
   latest_migrations:
     - 20260226_001_action_tokens_pending_op.sql
     - 20260226_002_action_tokens_ttl_cleanup.sql
+    - 20260226_007_ml_observations.sql
+
+stage_2_0:
+  added_files:
+    - services/ml_prep.py
+    - migrations/20260226_007_ml_observations.sql
+  db_tables:
+    - public.ml_observations
+  db_api:
+    - db.queries.insert_ml_observation
+    - db.queries.update_ml_observation_choice
+  observation_actions:
+    - suggest_shown
+    - pick_cat
+    - toggle_type
+    - other_category
+    - fallback_direct_write
+    - parse_failed

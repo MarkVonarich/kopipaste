@@ -12,7 +12,8 @@ from cache.global_dict import global_suggestions, bump_global_popularity
 from routers.helpers import prompt_type_menu
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from db.queries import update_user_field
+from db.queries import update_user_field, insert_ml_observation
+from services.ml_prep import normalize_for_ml
 import logging
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,18 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             context.user_data['pending'] = {'merch': norm_text(base), 'time': dt}
             context.user_data['await_amount'] = True
             return await emsg.reply_text(f"Введите сумму для «{base}» (например, 250):")
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=text,
+                normalized_text=normalize_for_ml(text),
+                detected_type='Расходы',
+                action='parse_failed',
+                meta={'source': 'telegram', 'error': reason},
+            )
+        except Exception:
+            pass
         if reason == "bad_amount":
             return await emsg.reply_text("⚠️ Неверная сумма. Пример: «пицца 450 вчера».")
         return await emsg.reply_text("⚠️ Не понял сумму. Пример: «пицца 450 вчера». Нажмите «Примеры» в меню.")
@@ -91,6 +104,20 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         typ, cat = alias
         # Чтобы raw_text в операции был ровно этот кусок
         context.user_data['batch_item_text'] = text
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=text,
+                normalized_text=normalize_for_ml(text),
+                detected_type=typ,
+                action='fallback_direct_write',
+                chosen_category=cat,
+                chosen_type=typ,
+                meta={'source': 'telegram', 'flow': 'alias_hit'},
+            )
+        except Exception:
+            pass
         return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
     op_type = 'Расходы'
@@ -104,6 +131,22 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         'ml_cat1': cat1,
         'ml_cat2': cat2,
     }
+    suggested_top2 = [{'cat': cat1, 'score': None}, {'cat': cat2, 'score': None}]
+    try:
+        insert_ml_observation(
+            user_id=cid,
+            chat_id=cid,
+            raw_text=text,
+            normalized_text=normalize_for_ml(text),
+            detected_type=op_type,
+            action='suggest_shown',
+            suggested_top2=suggested_top2,
+            confidence_top1=None,
+            meta={'source': 'telegram', 'merchant': merch, 'currency_detected': src_curr},
+        )
+    except Exception:
+        pass
+
     msg = await _safe_reply(
         emsg,
         f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
@@ -220,6 +263,20 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         if alias:
             typ, cat = alias
             context.user_data['batch_item_text'] = text
+            try:
+                insert_ml_observation(
+                    user_id=cid,
+                    chat_id=cid,
+                    raw_text=text,
+                    normalized_text=normalize_for_ml(text),
+                    detected_type=typ,
+                    action='fallback_direct_write',
+                    chosen_category=cat,
+                    chosen_type=typ,
+                    meta={'source': 'telegram', 'flow': 'await_amount_alias_hit'},
+                )
+            except Exception:
+                pass
             return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
         op_type = 'Расходы'
@@ -233,6 +290,22 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             'ml_cat1': cat1,
             'ml_cat2': cat2,
         }
+        suggested_top2 = [{'cat': cat1, 'score': None}, {'cat': cat2, 'score': None}]
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=text,
+                normalized_text=normalize_for_ml(text),
+                detected_type=op_type,
+                action='suggest_shown',
+                suggested_top2=suggested_top2,
+                confidence_top1=None,
+                meta={'source': 'telegram', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount'},
+            )
+        except Exception:
+            pass
+
         msg = await _safe_reply(
             emsg,
             f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
@@ -258,6 +331,18 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         return await _process_free_text(update, context, text)
     except Exception as e:
         log.exception("handle_text failed: user=%s text=%r err=%s", cid, text, e)
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=text,
+                normalized_text=normalize_for_ml(text),
+                detected_type='Расходы',
+                action='parse_failed',
+                meta={'source': 'telegram', 'error': str(e)[:200]},
+            )
+        except Exception:
+            pass
         return await emsg.reply_text("Не получилось обработать сообщение. Попробуй ещё раз.")
 
 

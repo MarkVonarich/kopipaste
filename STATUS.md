@@ -27,3 +27,10 @@ All further changes follow:
 ## Current DB work
 - Added migration baseline for subtask 1.1: action tokens/pending operation and TTL cleanup.
 - Files: `migrations/20260226_001_action_tokens_pending_op.sql`, `migrations/20260226_002_action_tokens_ttl_cleanup.sql`.
+
+
+## Stage 2.0 — Data foundation
+- Added text normalization utility for ML features: `services/ml_prep.py::normalize_for_ml` (lowercase, trim/collapse spaces, emoji stripping, conservative punctuation cleanup, numbers -> `<num>` token, currency symbols preserved).
+- Added migration `migrations/20260226_007_ml_observations.sql` with table `public.ml_observations` and indexes for user timeline + recent events + JSONB suggestions lookup.
+- Added DB APIs in `db/queries.py`: `insert_ml_observation(...)` and `update_ml_observation_choice(...)`.
+- Embedded observation logging into Stage 1.3 flow: `suggest_shown`, `pick_cat`, `toggle_type`, `other_category`, `fallback_direct_write`, `parse_failed`.

@@ -6,11 +6,12 @@ from db.queries import (
     upsert_user_alias, update_user_field, set_budget,
     get_user_currency, get_user_budgets, delete_last_operation,
     set_category_limit, get_category_limit, list_category_limits, delete_category_limit,
-    get_user_tz, log_category_feedback
+    get_user_tz, log_category_feedback, insert_ml_observation
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from services.analytics import build_report
+from services.ml_prep import normalize_for_ml
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
@@ -516,6 +517,21 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         p = context.user_data.get('pending', {})
         p['from_ml_decline'] = True
         context.user_data['pending'] = p
+        raw_text = context.user_data.get('batch_item_text') or p.get('merch', '')
+        suggested_top2 = [{'cat': p.get('ml_cat1', ''), 'score': None}, {'cat': p.get('ml_cat2', ''), 'score': None}]
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=raw_text,
+                normalized_text=normalize_for_ml(raw_text),
+                detected_type=p.get('type') or 'Расходы',
+                action='other_category',
+                suggested_top2=suggested_top2,
+                meta={'source': 'telegram', 'merchant': p.get('merch', '')},
+            )
+        except Exception:
+            pass
         try:
             log_category_feedback(
                 user_id=cid,
@@ -549,6 +565,22 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             cat1, cat2 = cats[0], cats[1]
         p.update({'type': new_type, 'ml_cat1': cat1, 'ml_cat2': cat2})
         context.user_data['pending'] = p
+        raw_text = context.user_data.get('batch_item_text') or merch
+        suggested_top2 = [{'cat': cat1, 'score': None}, {'cat': cat2, 'score': None}]
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=raw_text,
+                normalized_text=normalize_for_ml(raw_text),
+                detected_type=new_type,
+                action='toggle_type',
+                suggested_top2=suggested_top2,
+                chosen_type=new_type,
+                meta={'source': 'telegram', 'merchant': merch},
+            )
+        except Exception:
+            pass
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"✅ {cat1}", callback_data=f"ml_pick|{cat1}"),
              InlineKeyboardButton(f"✅ {cat2}", callback_data=f"ml_pick|{cat2}")],
@@ -565,6 +597,22 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         amt = p.get('amt', 0)
         dt = p.get('time', datetime.now())
         note = p.get('note')
+        raw_text = context.user_data.get('batch_item_text') or merch
+        try:
+            insert_ml_observation(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=raw_text,
+                normalized_text=normalize_for_ml(raw_text),
+                detected_type=typ,
+                action='pick_cat',
+                chosen_category=cat,
+                chosen_type=typ,
+                suggested_top2=[{'cat': p.get('ml_cat1', ''), 'score': None}, {'cat': p.get('ml_cat2', ''), 'score': None}],
+                meta={'source': 'telegram', 'merchant': merch},
+            )
+        except Exception:
+            pass
         upsert_user_alias(cid, merch, typ, cat)
         bump_global_popularity(merch, typ, cat, 1)
         if p.get('from_ml_decline'):

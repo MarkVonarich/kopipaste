@@ -2,6 +2,8 @@
 __version__ = "2025.08.30-limits"
 
 from typing import Optional, Tuple, List
+from datetime import date
+from psycopg2.extras import Json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
 
@@ -275,3 +277,45 @@ def log_category_feedback(user_id: int, chat_id: int, raw_text: str, norm_text: 
           (user_id, chat_id, raw_text, norm_text, suggested_cat, chosen_cat, op_type, event_type)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     """, (user_id, chat_id, raw_text, norm_text, suggested_cat, chosen_cat, op_type, event_type))
+
+
+def insert_ml_observation(
+    user_id: int,
+    chat_id: int,
+    raw_text: str,
+    normalized_text: str,
+    detected_type: str,
+    action: str,
+    suggested_top2=None,
+    chosen_category: str | None = None,
+    chosen_type: str | None = None,
+    confidence_top1=None,
+    meta=None,
+):
+    pg_exec("""
+        INSERT INTO public.ml_observations
+          (user_id, chat_id, raw_text, normalized_text, detected_type, suggested_top2,
+           chosen_category, chosen_type, action, confidence_top1, meta)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        user_id,
+        chat_id,
+        raw_text or '',
+        normalized_text or '',
+        detected_type or 'Расходы',
+        Json(suggested_top2) if suggested_top2 is not None else None,
+        chosen_category,
+        chosen_type,
+        action,
+        confidence_top1,
+        Json(meta) if meta is not None else None,
+    ))
+
+
+def update_ml_observation_choice(observation_id: int, chosen_category: str | None = None, chosen_type: str | None = None):
+    pg_exec("""
+        UPDATE public.ml_observations
+           SET chosen_category=COALESCE(%s, chosen_category),
+               chosen_type=COALESCE(%s, chosen_type)
+         WHERE id=%s
+    """, (chosen_category, chosen_type, observation_id))
