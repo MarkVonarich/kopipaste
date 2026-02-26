@@ -289,7 +289,26 @@ async def record_operation(cat: str, amt: int, dt,
     if reply_to_msg_id:
         kwargs["reply_to_message_id"] = reply_to_msg_id
 
-    await context.bot.send_message(**kwargs)
+    try:
+        await context.bot.send_message(**kwargs)
+    except Exception as e:
+        log.warning("final confirmation send failed (markdown), fallback plain text: %s", e)
+        plain_parts = [
+            f"{name} {verb} {amt} {cur_symbol} на {cat}",
+            line2,
+        ]
+        if batch_piece:
+            plain_parts.append(batch_piece)
+        elif orig_text and not _is_bot_hint(orig_text):
+            plain_parts.append(orig_text)
+        if note and not _is_bot_hint(note):
+            plain_parts.append(note)
+        await context.bot.send_message(
+            chat_id=cid,
+            text="\n".join(plain_parts),
+            reply_markup=kb,
+            reply_to_message_id=reply_to_msg_id if reply_to_msg_id else None,
+        )
 
     # Очистим batch_item_text, чтобы не «липло»
     context.user_data["batch_item_text"] = ""
