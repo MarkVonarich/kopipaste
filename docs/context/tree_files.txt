@@ -11,7 +11,14 @@ __pycache__/__init__.cpython-310.pyc
 __pycache__/logging_config.cpython-310.pyc
 __pycache__/main.cpython-310.pyc
 __pycache__/settings.cpython-310.pyc
+_codex_context_20260226_141823/db_action_tokens_desc.txt
+_codex_context_20260226_141823/db_columns.txt
+_codex_context_20260226_141823/db_tables.txt
+_codex_context_20260226_141823/finuchet.service.txt
+_codex_context_20260226_141823/pip_freeze.txt
+_codex_context_20260226_141823/python_version.txt
 _codex_context_20260226_141823/tree_files.txt
+_codex_context_20260226_142247/tree_files.txt
 _local_before_git_20260226_111928/STATE.yml
 _local_before_git_20260226_111928/STATUS.md
 ai/__init__.py
@@ -37,6 +44,11 @@ docs/ARCHITECTURE.md
 docs/PR2_PENDING_OP_UI_INTEGRATION.md
 docs/RUNBOOK.md
 docs/SUBTASK_1_1_PENDING_OP.md
+docs/context/db_action_tokens_desc.txt
+docs/context/db_columns.txt
+docs/context/db_tables.txt
+docs/context/finuchet.service.txt
+docs/context/tree_files.txt
 jobs/__init__.py
 jobs/__pycache__/__init__.cpython-310.pyc
 jobs/__pycache__/daily.cpython-310.pyc
