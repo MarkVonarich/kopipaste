@@ -529,7 +529,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        return await prompt_category_menu(update, context)
+        return await prompt_category_menu(update, context, include_add_button=False)
 
     if data == 'ml_toggle_income':
         p = context.user_data.get('pending', {})

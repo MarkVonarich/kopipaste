@@ -34,7 +34,7 @@ async def prompt_type_menu(update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data['type_menu_id'] = msg.message_id
 
-async def prompt_category_menu(update, context: ContextTypes.DEFAULT_TYPE):
+async def prompt_category_menu(update, context: ContextTypes.DEFAULT_TYPE, include_add_button: bool = True):
     p = context.user_data.get('pending', {})
     typ = p.get('type') or 'Расходы'
     merch = p.get('merch') or ""
@@ -43,7 +43,9 @@ async def prompt_category_menu(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat.id
     cats = list_categories_for_type(cid, typ)
 
-    rows = [[InlineKeyboardButton('➕ Добавить категорию', callback_data='add_cat')]]
+    rows = []
+    if include_add_button:
+        rows.append([InlineKeyboardButton('➕ Добавить категорию', callback_data='add_cat')])
     for c in cats:
         rows.append([InlineKeyboardButton(c, callback_data=f"use_cat|{c}")])
     rows.append([InlineKeyboardButton('◀️ Назад', callback_data='start_main')])
