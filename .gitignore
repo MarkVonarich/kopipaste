@@ -7,6 +7,10 @@
 __pycache__/
 *.pyc
 
+# Runtime state / reports
+.state/
+_reports/
+
 # Backups/snapshots/archives
 _backups/
 _snapshots/
@@ -25,19 +29,3 @@ venv/
 .DS_Store
 .vscode/
 .idea/
-
-# --- local/runtime artifacts (do not commit) ---
-.env.bak_*
-.state/
-_reports/
-_local_before_git_*/
-*.log
-
-# --- editor/backup files ---
-*.bak
-*.bak.*
-*.bak-*
-*.panic-*
-*.sos-*
-*.broken-*
-*.pre-fix-*
