@@ -63,3 +63,10 @@ sudo journalctl -u finuchet -n 120 --no-pager
 - Schema changes must be delivered as SQL files in `migrations/`.
 - Apply migrations explicitly on VPS and verify service logs after restart.
 - Avoid destructive migrations without explicit rollback plan.
+
+## 6) Apply DB migrations on VPS (for this PR)
+```bash
+cd /root/bot_finuchet
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_001_action_tokens_pending_op.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_002_action_tokens_ttl_cleanup.sql
+```
