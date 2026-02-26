@@ -3,6 +3,7 @@
 __version__ = "2025.08.26-batch-05"
 
 import re
+from urllib.parse import quote
 from datetime import datetime
 from telegram import ReplyKeyboardRemove
 from telegram.ext import ContextTypes
@@ -13,7 +14,7 @@ from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from db.queries import update_user_field, insert_ml_observation
+from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key
 from services.ml_prep import normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
 import logging
@@ -30,6 +31,19 @@ BATCH_MAX = 25  # ограничение длины списка на один �
 def _md_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`")
 
+
+
+
+def _parse_amount_input(text: str) -> int | None:
+    t = (text or '').strip().replace(' ', '').replace(',', '.')
+    m = re.search(r"\d+(?:\.\d+)?", t)
+    if not m:
+        return None
+    try:
+        val = float(m.group(0))
+    except Exception:
+        return None
+    return int(val)
 
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
     """Reply in markdown, fallback to plain text if telegram rejects entities."""
@@ -185,6 +199,27 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     cid  = update.effective_chat.id
     emsg = update.effective_message
+
+    if context.user_data.get('lim_edit_amount'):
+        st = context.user_data.get('lim_edit_amount') or {}
+        amount = _parse_amount_input(text)
+        if amount is None:
+            return await emsg.reply_text('⚠️ Введите сумму числом, например: 25000')
+        if amount <= 0 or amount >= 1_000_000_000:
+            return await emsg.reply_text('⚠️ Сумма должна быть больше 0 и меньше 1 000 000 000')
+        period = st.get('period')
+        category = st.get('category')
+        try:
+            row = update_limit_amount(cid, period, category, amount)
+        except Exception as e:
+            log.exception('edit_amount failed user=%s period=%s cat=%s err=%s', cid, period, category, e)
+            return await emsg.reply_text('Не смог сохранить, попробуй ещё раз.')
+        context.user_data.pop('lim_edit_amount', None)
+        if not row:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('📌 Мои лимиты', callback_data='lim_list')]])
+            return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data=f"lim_open|{period}|{quote(category, safe='')}")]])
+        return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
 
     # ----- настройки и прочие ветки (без изменений) -----
     if context.user_data.pop('await_reminder_custom', False):

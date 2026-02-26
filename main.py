@@ -17,7 +17,7 @@ from telegram.ext import (
 from logging_config import setup_logging
 from settings import TELEGRAM_TOKEN
 
-from routers.commands import cmd_start, cmd_settings, cmd_budget, cmd_export, cmd_about, cmd_mlstats, cmd_mltrain, on_startup
+from routers.commands import cmd_start, cmd_settings, cmd_budget, cmd_export, cmd_about, cmd_limits, cmd_mlstats, cmd_mltrain, on_startup
 from routers.callbacks import callback_handler
 from routers.messages import handle_text, handle_location
 from jobs.scheduler import register_jobs
@@ -56,6 +56,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("budget", cmd_budget))
+    app.add_handler(CommandHandler("limits", cmd_limits))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CommandHandler("mlstats", cmd_mlstats))

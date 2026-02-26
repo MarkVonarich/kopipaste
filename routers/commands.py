@@ -24,6 +24,7 @@ async def on_startup(app):
         BotCommand('start', 'Главное меню / онбординг'),
         BotCommand('settings', 'Настройки'),
         BotCommand('budget', 'Показать бюджеты'),
+        BotCommand('limits', 'Мои лимиты'),
         BotCommand('export', 'Экспорт XLSX/CSV'),
         BotCommand('about', 'О боте и зачем он нужен'),
         BotCommand('mlstats', 'ML-статистика top1/top2'),
@@ -158,3 +159,10 @@ async def cmd_mltrain(update, context: ContextTypes.DEFAULT_TYPE):
         f"• holdout top1/top2: {report.get('holdout_top1')} / {report.get('holdout_top2')}\n"
         f"• train_sec: {report.get('train_sec')}"
     )
+
+
+async def cmd_limits(update, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📌 Мои лимиты', callback_data='lim_list')],
+    ])
+    await update.message.reply_text('📌 Управление лимитами', reply_markup=kb)

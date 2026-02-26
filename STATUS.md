@@ -56,3 +56,10 @@ All further changes follow:
 - Added train/infer pipeline: `services/ml_train.py`, `services/ml_infer.py`, `services/ml_model.py`; artifacts stored in `_ml_artifacts/`.
 - Updated `services/ml_suggest.py` to prefer fresh model predictions (<=7 days), then apply user bias, then fallback to baseline.
 - Added `/mltrain` (admin-only) and expanded `/mlstats` with overall + baseline/model top1/top2 split.
+
+
+## Stage 2.4 — Limits CRUD UX v1
+- Added `/limits` entry point and list-first UX for category limits (`list -> card -> edit/delete`).
+- Implemented limit card actions: edit amount (input + validation), change period with conflict resolution, delete with confirmation.
+- Added idempotent handling for stale callbacks/missing limits with safe return to list and concise user messages.
+- Added query helpers for limits CRUD/conflict merge and action logging in callbacks (`list/open/edit/delete/conflict_resolution`).

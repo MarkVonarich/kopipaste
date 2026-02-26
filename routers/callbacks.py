@@ -1,3 +1,5 @@
+import logging
+from urllib.parse import quote, unquote
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from db.database import get_conn, pg_fetchall
 from datetime import datetime, timedelta, date
@@ -6,7 +8,9 @@ from db.queries import (
     upsert_user_alias, update_user_field, set_budget,
     get_user_currency, get_user_budgets, delete_last_operation,
     set_category_limit, get_category_limit, list_category_limits, delete_category_limit,
-    get_user_tz, log_category_feedback, insert_ml_observation
+    get_user_tz, log_category_feedback, insert_ml_observation,
+    list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
+    resolve_limit_conflict_replace, delete_limit_by_key
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
@@ -14,6 +18,8 @@ from ui.keyboards import ml_top2_kb
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
+
+log = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
@@ -62,6 +68,76 @@ async def _cl_render_amount_screen(q, period: str, category: str, amount: int, c
         await q.edit_message_text(text, parse_mode='Markdown', reply_markup=_cl_amount_kb())
     except Exception:
         await q.message.reply_text(text, parse_mode='Markdown', reply_markup=_cl_amount_kb())
+
+
+
+def _lim_period_label(p: str) -> str:
+    return 'Неделя' if p == 'week' else 'Месяц'
+
+
+def _lim_key(period: str, category: str) -> str:
+    return f"{period}|{quote(category, safe='')}"
+
+
+def _lim_parse_key(payload: str):
+    period, enc_cat = payload.split('|', 1)
+    return period, unquote(enc_cat)
+
+
+def _lim_card_kb(period: str, category: str):
+    key = _lim_key(period, category)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('✏️ Изменить сумму', callback_data=f'lim_edit_amount|{key}')],
+        [InlineKeyboardButton('🗓 Неделя', callback_data=f'lim_edit_period|{key}|week'),
+         InlineKeyboardButton('🗓 Месяц', callback_data=f'lim_edit_period|{key}|month')],
+        [InlineKeyboardButton('🗑 Удалить', callback_data=f'lim_del|{key}')],
+        [InlineKeyboardButton('🔕 Mute (скоро)', callback_data='lim_mute_soon')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='lim_list')],
+    ])
+
+
+async def _lim_show_list(q, user_id: int):
+    rows = list_user_limits(user_id)
+    log.info('list_limits user=%s count=%s', user_id, len(rows))
+    if not rows:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('➕ Добавить лимит', callback_data='cl_set')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+        ])
+        return await q.edit_message_text('Лимитов пока нет.', reply_markup=kb)
+
+    lines = ['📌 *Мои лимиты*']
+    btns = []
+    for i, r in enumerate(rows, start=1):
+        lines.append(f"{i}. {_lim_period_label(r['period'])} • {_md_escape(r['category'])} • {r['amount']} {r['currency']}")
+        btns.append([
+            InlineKeyboardButton(
+                f"Открыть: {_lim_period_label(r['period'])} / {r['category']}",
+                callback_data=f"lim_open|{_lim_key(r['period'], r['category'])}"
+            )
+        ])
+    btns.append([InlineKeyboardButton('➕ Добавить лимит', callback_data='cl_set')])
+    btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
+    await q.edit_message_text('\n'.join(lines), parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
+
+
+async def _lim_show_card(q, user_id: int, period: str, category: str, note: str = ''):
+    row = get_limit_by_key(user_id, period, category)
+    if not row:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К списку', callback_data='lim_list')]])
+        return await q.edit_message_text('Лимит не найден или уже изменён.', reply_markup=kb)
+
+    log.info('open_limit user=%s period=%s category=%s amount=%s', user_id, period, category, row['amount'])
+    text = (
+        f"📌 *Лимит*\n"
+        f"Категория: *{_md_escape(row['category'])}*\n"
+        f"Период: *{_lim_period_label(row['period'])}*\n"
+        f"Сумма: *{row['amount']} {row['currency']}*"
+    )
+    if note:
+        text += f"\n\n{note}"
+    await q.edit_message_text(text, parse_mode='Markdown', reply_markup=_lim_card_kb(row['period'], row['category']))
+
 
 async def _cl_show_list(q, user_id: int):
     rows = list_category_limits(user_id)  # [(period, amount, currency, category), ...]
@@ -438,6 +514,98 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     # ──────────────────────────────────────────────────────────────────────────
     # Лимиты по категориям — ветки
     # ──────────────────────────────────────────────────────────────────────────
+
+    # Limits UX v1
+    if data == 'lim_list':
+        return await _lim_show_list(q, cid)
+
+    if data.startswith('lim_open|'):
+        period, category = _lim_parse_key(data.split('|', 1)[1])
+        return await _lim_show_card(q, cid, period, category)
+
+    if data.startswith('lim_edit_amount|'):
+        period, category = _lim_parse_key(data.split('|', 1)[1])
+        row = get_limit_by_key(cid, period, category)
+        if not row:
+            return await _lim_show_list(q, cid)
+        context.user_data['lim_edit_amount'] = {'period': period, 'category': category}
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('Отмена', callback_data=f'lim_open|{_lim_key(period, category)}')]])
+        return await q.edit_message_text(
+            f"Введи новую сумму для {_md_escape(category)} ({_lim_period_label(period)}):",
+            parse_mode='Markdown',
+            reply_markup=kb,
+        )
+
+    if data.startswith('lim_edit_period|'):
+        rest = data.split('|', 1)[1]
+        payload, new_period = rest.rsplit('|', 1)
+        period, category = _lim_parse_key(payload)
+        if period == new_period:
+            return await _lim_show_card(q, cid, period, category, note='Период уже выбран.')
+        try:
+            res = update_limit_period(cid, period, category, new_period)
+            log.info('edit_period user=%s cat=%s old=%s new=%s status=%s', cid, category, period, new_period, res.get('status'))
+        except Exception:
+            log.exception('edit_period failed user=%s cat=%s old=%s new=%s', cid, category, period, new_period)
+            return await _lim_show_card(q, cid, period, category, note='Не смог сохранить, попробуй ещё раз.')
+
+        if res.get('status') == 'ok':
+            return await _lim_show_card(q, cid, new_period, category, note='✅ Период обновлён.')
+        if res.get('status') == 'conflict':
+            context.user_data['lim_conflict'] = {'old_period': period, 'new_period': new_period, 'category': category}
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Заменить существующий', callback_data='lim_conflict_replace')],
+                [InlineKeyboardButton('Отмена', callback_data=f'lim_open|{_lim_key(period, category)}')],
+            ])
+            return await q.edit_message_text(
+                f"У тебя уже есть лимит для категории *{_md_escape(category)}* на период *{_lim_period_label(new_period)}*. Что сделать?",
+                parse_mode='Markdown', reply_markup=kb,
+            )
+        return await _lim_show_list(q, cid)
+
+    if data == 'lim_conflict_replace':
+        c = context.user_data.get('lim_conflict') or {}
+        if not c:
+            return await _lim_show_list(q, cid)
+        try:
+            res = resolve_limit_conflict_replace(cid, c.get('old_period','week'), c.get('new_period','month'), c.get('category',''))
+            log.info('conflict_resolution user=%s cat=%s old=%s new=%s status=%s', cid, c.get('category'), c.get('old_period'), c.get('new_period'), res.get('status'))
+        except Exception:
+            log.exception('conflict_resolution failed user=%s data=%s', cid, c)
+            return await _lim_show_list(q, cid)
+        context.user_data.pop('lim_conflict', None)
+        if res.get('status') == 'ok':
+            return await _lim_show_card(q, cid, c.get('new_period','month'), c.get('category',''), note='✅ Лимит объединён и обновлён.')
+        return await _lim_show_list(q, cid)
+
+    if data.startswith('lim_del|'):
+        period, category = _lim_parse_key(data.split('|', 1)[1])
+        row = get_limit_by_key(cid, period, category)
+        if not row:
+            return await _lim_show_list(q, cid)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Да', callback_data=f'lim_del_yes|{_lim_key(period, category)}'),
+             InlineKeyboardButton('Нет', callback_data=f'lim_open|{_lim_key(period, category)}')],
+        ])
+        return await q.edit_message_text(
+            f"Удалить лимит {_md_escape(category)} / {_lim_period_label(period)} / {row['amount']} {row['currency']}?",
+            parse_mode='Markdown',
+            reply_markup=kb,
+        )
+
+    if data.startswith('lim_del_yes|'):
+        period, category = _lim_parse_key(data.split('|', 1)[1])
+        try:
+            delete_limit_by_key(cid, period, category)
+            log.info('delete_limit user=%s period=%s cat=%s', cid, period, category)
+        except Exception:
+            log.exception('delete_limit failed user=%s period=%s cat=%s', cid, period, category)
+            return await _lim_show_list(q, cid)
+        return await _lim_show_list(q, cid)
+
+    if data == 'lim_mute_soon':
+        return await q.answer('Скоро в Stage 2.5', show_alert=False)
+
     if data == 'cl_menu':
         return await _cl_show_menu(q)
 

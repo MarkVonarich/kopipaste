@@ -318,6 +318,87 @@ def delete_category_limit(user_id: int, period: str, category: str):
          WHERE user_id=%s AND period=%s AND category=%s
     """, (user_id, period, category))
 
+
+
+def list_user_limits(user_id: int):
+    rows = pg_fetchall("""
+        SELECT period, category, amount, currency
+          FROM public.category_limits
+         WHERE user_id=%s
+         ORDER BY period, category
+    """, (user_id,))
+    return [
+        {
+            'period': r[0],
+            'category': r[1],
+            'amount': int(r[2]),
+            'currency': r[3],
+        }
+        for r in rows
+    ]
+
+
+def get_limit_by_key(user_id: int, period: str, category: str):
+    row = pg_fetchall("""
+        SELECT period, category, amount, currency
+          FROM public.category_limits
+         WHERE user_id=%s AND period=%s AND category=%s
+         LIMIT 1
+    """, (user_id, period, category))
+    if not row:
+        return None
+    r = row[0]
+    return {'period': r[0], 'category': r[1], 'amount': int(r[2]), 'currency': r[3]}
+
+
+def update_limit_amount(user_id: int, period: str, category: str, amount: int):
+    pg_exec("""
+        UPDATE public.category_limits
+           SET amount=%s, updated_at=now()
+         WHERE user_id=%s AND period=%s AND category=%s
+    """, (int(amount), user_id, period, category))
+    return get_limit_by_key(user_id, period, category)
+
+
+def update_limit_period(user_id: int, old_period: str, category: str, new_period: str):
+    current = get_limit_by_key(user_id, old_period, category)
+    if not current:
+        return {'status': 'not_found'}
+    target = get_limit_by_key(user_id, new_period, category)
+    if target:
+        return {'status': 'conflict', 'current': current, 'target': target}
+    pg_exec("""
+        UPDATE public.category_limits
+           SET period=%s, updated_at=now()
+         WHERE user_id=%s AND period=%s AND category=%s
+    """, (new_period, user_id, old_period, category))
+    return {'status': 'ok', 'limit': get_limit_by_key(user_id, new_period, category)}
+
+
+def resolve_limit_conflict_replace(user_id: int, old_period: str, new_period: str, category: str):
+    current = get_limit_by_key(user_id, old_period, category)
+    target = get_limit_by_key(user_id, new_period, category)
+    if not current or not target:
+        return {'status': 'not_found'}
+    # переносим сумму из текущего в целевой и удаляем исходный
+    pg_exec("""
+        UPDATE public.category_limits
+           SET amount=%s, currency=%s, updated_at=now()
+         WHERE user_id=%s AND period=%s AND category=%s
+    """, (current['amount'], current['currency'], user_id, new_period, category))
+    pg_exec("""
+        DELETE FROM public.category_limits
+         WHERE user_id=%s AND period=%s AND category=%s
+    """, (user_id, old_period, category))
+    return {'status': 'ok', 'limit': get_limit_by_key(user_id, new_period, category)}
+
+
+def delete_limit_by_key(user_id: int, period: str, category: str):
+    pg_exec("""
+        DELETE FROM public.category_limits
+         WHERE user_id=%s AND period=%s AND category=%s
+    """, (user_id, period, category))
+
 def get_limit_state(user_id: int, period: str, category: str) -> Tuple[int, Optional[str]]:
     rows = pg_fetchall("""
         SELECT last_band, to_char(updated_at, 'YYYY-MM-DD')

@@ -97,3 +97,22 @@ stage_2_3:
   commands:
     - /mlstats
     - /mltrain
+
+stage_2_4:
+  updated_files:
+    - routers/commands.py
+    - routers/callbacks.py
+    - routers/messages.py
+    - db/queries.py
+    - main.py
+  limits_ux:
+    - /limits
+    - list -> card -> edit/delete
+    - period conflict resolution (merge/replace)
+  callbacks:
+    - lim_list
+    - lim_open
+    - lim_edit_amount
+    - lim_edit_period
+    - lim_conflict_replace
+    - lim_del / lim_del_yes
