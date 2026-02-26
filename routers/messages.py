@@ -3,7 +3,6 @@
 __version__ = "2025.08.26-batch-05"
 
 import re
-from urllib.parse import quote
 from datetime import datetime
 from telegram import ReplyKeyboardRemove
 from telegram.ext import ContextTypes
@@ -218,7 +217,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         if not row:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton('📌 Мои лимиты', callback_data='lim_list')]])
             return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data=f"lim_open|{period}|{quote(category, safe='')}")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
 
     # ----- настройки и прочие ветки (без изменений) -----
