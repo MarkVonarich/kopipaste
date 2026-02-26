@@ -1,0 +1,42 @@
+project: finuchet
+repository_state:
+  git_workflow: enforced
+  secrets_in_git: false
+  db_data_in_git: false
+  backup_artifacts_in_git: false
+  docs_inventory:
+    readme: true
+    architecture_doc: true
+    runbook_doc: true
+    env_example: true
+runtime:
+  server_path: /root/bot_finuchet
+  service: finuchet.service
+  database: postgresql
+notes:
+  - Keep environment secrets only in /root/bot_finuchet/.env and/or /root/.env
+  - Apply changes via branch -> PR -> merge
+  - Any DB schema change must be added as a SQL file in migrations/
+
+migrations:
+  latest_migrations:
+    - 20260226_001_action_tokens_pending_op.sql
+    - 20260226_002_action_tokens_ttl_cleanup.sql
+    - 20260226_007_ml_observations.sql
+
+stage_2_0:
+  added_files:
+    - services/ml_prep.py
+    - migrations/20260226_007_ml_observations.sql
+  db_tables:
+    - public.ml_observations
+  db_api:
+    - db.queries.insert_ml_observation
+    - db.queries.update_ml_observation_choice
+  observation_actions:
+    - suggest_shown
+    - pick_cat
+    - toggle_type
+    - other_category
+    - fallback_direct_write
+    - parse_failed
