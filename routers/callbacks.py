@@ -1,6 +1,7 @@
 import logging
 from urllib.parse import quote, unquote
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.error import BadRequest
 from db.database import get_conn, pg_fetchall
 from datetime import datetime, timedelta, date
 from telegram.ext import ContextTypes
@@ -25,6 +26,18 @@ log = logging.getLogger(__name__)
 # Вспомогалки для меню лимитов
 # ──────────────────────────────────────────────────────────────────────────────
 
+
+
+async def _safe_edit_or_reply(q, text: str, reply_markup=None, parse_mode: str | None = None):
+    try:
+        return await q.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except BadRequest as e:
+        msg = str(e).lower()
+        if ('message is not modified' in msg) or ("message can't be edited" in msg) or ('query is too old' in msg):
+            log.warning('limits_ui edit fallback: %s', e)
+            return await q.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        log.warning('limits_ui bad request: %s', e)
+        raise
 def _cl_period_label(p: str) -> str:
     return "неделя" if p == "week" else "месяц"
 
@@ -104,7 +117,8 @@ async def _lim_show_list(q, user_id: int):
             [InlineKeyboardButton('➕ Добавить лимит', callback_data='cl_set')],
             [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
         ])
-        return await q.edit_message_text('Лимитов пока нет.', reply_markup=kb)
+        log.info('list_limits: rendering via edit_message_text len=%s buttons=%s', len('Лимитов пока нет.'), 2)
+        return await _safe_edit_or_reply(q, 'Лимитов пока нет.', reply_markup=kb)
 
     lines = ['📌 *Мои лимиты*']
     btns = []
@@ -118,7 +132,13 @@ async def _lim_show_list(q, user_id: int):
         ])
     btns.append([InlineKeyboardButton('➕ Добавить лимит', callback_data='cl_set')])
     btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
-    await q.edit_message_text('\n'.join(lines), parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
+    text = '\n'.join(lines)
+    log.info('list_limits: rendering via edit_message_text len=%s buttons=%s', len(text), len(btns))
+    try:
+        return await _safe_edit_or_reply(q, text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(btns))
+    except Exception:
+        log.exception('list_limits render failed user=%s', user_id)
+        raise
 
 
 async def _lim_show_card(q, user_id: int, period: str, category: str, note: str = ''):
@@ -517,6 +537,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     # Limits UX v1
     if data == 'lim_list':
+        try:
+            await q.answer()
+        except Exception:
+            pass
         return await _lim_show_list(q, cid)
 
     if data.startswith('lim_open|'):
