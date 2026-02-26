@@ -6,7 +6,7 @@ from db.queries import (
     upsert_user_alias, update_user_field, set_budget,
     get_user_currency, get_user_budgets, delete_last_operation,
     set_category_limit, get_category_limit, list_category_limits, delete_category_limit,
-    get_user_tz
+    get_user_tz, log_category_feedback
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
@@ -511,6 +511,92 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     # Ветки sugg_* — обрабатываются в другом роутере (как было)
 
+
+    if data == 'ml_other':
+        p = context.user_data.get('pending', {})
+        p['from_ml_decline'] = True
+        context.user_data['pending'] = p
+        try:
+            log_category_feedback(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=p.get('merch', ''),
+                norm_text=p.get('merch', ''),
+                suggested_cat=p.get('ml_cat1', ''),
+                chosen_cat='',
+                op_type=p.get('type') or 'Расходы',
+                event_type='decline',
+            )
+        except Exception:
+            pass
+        return await prompt_category_menu(update, context)
+
+    if data == 'ml_toggle_income':
+        p = context.user_data.get('pending', {})
+        merch = p.get('merch', 'операция')
+        amt = int(p.get('amt', 0) or 0)
+        curr_type = p.get('type') or 'Расходы'
+        new_type = 'Доходы' if curr_type == 'Расходы' else 'Расходы'
+        sign = '➕' if new_type == 'Доходы' else '➖'
+        from cache.global_dict import global_suggestions
+        pairs = global_suggestions(merch)
+        cats = [c for (c,t) in pairs if t == new_type]
+        if len(cats) == 0:
+            cat1, cat2 = 'Продукты', 'Другое'
+        elif len(cats) == 1:
+            cat1, cat2 = cats[0], 'Другое'
+        else:
+            cat1, cat2 = cats[0], cats[1]
+        p.update({'type': new_type, 'ml_cat1': cat1, 'ml_cat2': cat2})
+        context.user_data['pending'] = p
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ {cat1}", callback_data=f"ml_pick|{cat1}"),
+             InlineKeyboardButton(f"✅ {cat2}", callback_data=f"ml_pick|{cat2}")],
+            [InlineKeyboardButton("🗂 Другая категория", callback_data="ml_other"),
+             InlineKeyboardButton("↔️ Это доход", callback_data="ml_toggle_income")],
+        ])
+        return await q.edit_message_text(f"Категория?\n{sign} {amt} ₽ • {merch}", parse_mode='Markdown', reply_markup=kb)
+
+    if data.startswith('ml_pick|'):
+        cat = data.split('|', 1)[1]
+        p = context.user_data.pop('pending', {})
+        typ = p.get('type') or 'Расходы'
+        merch = p.get('merch', 'операция')
+        amt = p.get('amt', 0)
+        dt = p.get('time', datetime.now())
+        note = p.get('note')
+        upsert_user_alias(cid, merch, typ, cat)
+        bump_global_popularity(merch, typ, cat, 1)
+        if p.get('from_ml_decline'):
+            try:
+                log_category_feedback(
+                    user_id=cid,
+                    chat_id=cid,
+                    raw_text=merch,
+                    norm_text=merch,
+                    suggested_cat=p.get('ml_cat1', ''),
+                    chosen_cat=cat,
+                    op_type=typ,
+                    event_type='decline',
+                )
+            except Exception:
+                pass
+        try:
+            log_category_feedback(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=merch,
+                norm_text=merch,
+                suggested_cat=cat,
+                chosen_cat=cat,
+                op_type=typ,
+                event_type='accept',
+            )
+        except Exception:
+            pass
+        from services.records import record_operation
+        return await record_operation(cat, amt, dt, typ, update, context, note)
+
     # Выбор типа/категории вручную И/ИЛИ в режиме лимитов
     if data.startswith('type|'):
         typ = data.split('|', 1)[1]
@@ -544,6 +630,19 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
         upsert_user_alias(cid, merch, typ, cat)
         bump_global_popularity(merch, typ, cat, 1)
+        try:
+            log_category_feedback(
+                user_id=cid,
+                chat_id=cid,
+                raw_text=merch,
+                norm_text=merch,
+                suggested_cat=cat,
+                chosen_cat=cat,
+                op_type=typ,
+                event_type='accept',
+            )
+        except Exception:
+            pass
 
         from services.records import record_operation
         if context.user_data.pop('edit_mode', False):

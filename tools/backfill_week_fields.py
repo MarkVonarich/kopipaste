@@ -2,6 +2,14 @@
 """Stage 1.2 helper: backfill operations.week_* fields in controllable batches."""
 
 import argparse
+import sys
+from pathlib import Path
+
+# Allow running as: python3 tools/backfill_week_fields.py
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from db.database import get_conn
 
 

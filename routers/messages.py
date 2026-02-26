@@ -28,6 +28,25 @@ def _md_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`")
 
 
+def _ml_keyboard(cat1: str, cat2: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✅ {cat1}", callback_data=f"ml_pick|{cat1}"),
+         InlineKeyboardButton(f"✅ {cat2}", callback_data=f"ml_pick|{cat2}")],
+        [InlineKeyboardButton('🗂 Другая категория', callback_data='ml_other'),
+         InlineKeyboardButton('↔️ Это доход', callback_data='ml_toggle_income')],
+    ])
+
+
+def _ml_top2(merch: str, op_type: str) -> tuple[str, str]:
+    pairs = global_suggestions(merch)
+    cats = [c for (c, t) in pairs if t == op_type]
+    if len(cats) == 0:
+        return 'Продукты', 'Другое'
+    if len(cats) == 1:
+        return cats[0], 'Другое'
+    return cats[0], cats[1]
+
+
 async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_text: str):
     """
     Одна строка → тот же старый флоу.
@@ -64,29 +83,25 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         context.user_data['batch_item_text'] = text
         return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
-    pairs = global_suggestions(merch)
-    if pairs:
-        from services.records import guess_type_from_pairs
-        type_guess = guess_type_from_pairs(pairs)
-        # Сохраняем pending только под ЭТОТ кусок; raw_text заберём из batch_item_text
-        context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': type_guess, 'note': note}
-        rows = [[InlineKeyboardButton(f"{c}", callback_data=f"sugg_use_cat|{c}|{t}")]
-                for (c,t) in pairs]
-        rows.append([
-            InlineKeyboardButton('🔁 Другая категория', callback_data='sugg_change_type'),
-            InlineKeyboardButton('✖️ Отмена',          callback_data='sugg_cancel')
-        ])
-        title = f"🟦 Думаю, это: *{_md_escape(type_guess)}*\nВыберите категорию для *{_md_escape(merch_display)}* или поменяйте тип."
-        msg = await emsg.reply_text(title, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(rows))
-        context.user_data['suggest_msg_id'] = msg.message_id
-        # Важно: помним сырой текущий элемент для финального сообщения
-        context.user_data['batch_item_text'] = text
-        return
-
-    # нет алиаса и нет готовых пар — переходим в "выбор типа"
-    context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': None, 'note': note}
+    op_type = 'Расходы'
+    cat1, cat2 = _ml_top2(merch, op_type)
+    context.user_data['pending'] = {
+        'merch': merch,
+        'amt': amt_final,
+        'time': dt,
+        'type': op_type,
+        'note': note,
+        'ml_cat1': cat1,
+        'ml_cat2': cat2,
+    }
+    msg = await emsg.reply_text(
+        f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
+        parse_mode='Markdown',
+        reply_markup=_ml_keyboard(cat1, cat2),
+    )
+    context.user_data['suggest_msg_id'] = msg.message_id
     context.user_data['batch_item_text'] = text
-    return await prompt_type_menu(update, context)
+    return
 
 
 # ─────────────────────────────────────────────
@@ -197,26 +212,25 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['batch_item_text'] = text
             return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
-        pairs = global_suggestions(merch)
-        if pairs:
-            from services.records import guess_type_from_pairs
-            type_guess = guess_type_from_pairs(pairs)
-            context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': type_guess, 'note': note}
-            rows = [[InlineKeyboardButton(f"{c}", callback_data=f"sugg_use_cat|{c}|{t}")]
-                    for (c,t) in pairs]
-            rows.append([
-                InlineKeyboardButton('🔁 Другая категория', callback_data='sugg_change_type'),
-                InlineKeyboardButton('✖️ Отмена',          callback_data='sugg_cancel')
-            ])
-            title = f"🟦 Думаю, это: *{_md_escape(type_guess)}*\nВыберите категорию для *{_md_escape(merch)}* или поменяйте тип."
-            msg = await emsg.reply_text(title, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(rows))
-            context.user_data['suggest_msg_id'] = msg.message_id
-            context.user_data['batch_item_text'] = text
-            return
-
-        context.user_data['pending'] = {'merch': merch, 'amt': amt_final, 'time': dt, 'type': None, 'note': note}
+        op_type = 'Расходы'
+        cat1, cat2 = _ml_top2(merch, op_type)
+        context.user_data['pending'] = {
+            'merch': merch,
+            'amt': amt_final,
+            'time': dt,
+            'type': op_type,
+            'note': note,
+            'ml_cat1': cat1,
+            'ml_cat2': cat2,
+        }
+        msg = await emsg.reply_text(
+            f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
+            parse_mode='Markdown',
+            reply_markup=_ml_keyboard(cat1, cat2),
+        )
+        context.user_data['suggest_msg_id'] = msg.message_id
         context.user_data['batch_item_text'] = text
-        return await prompt_type_menu(update, context)
+        return
 
     # ─────────── батч (последовательно) ───────────
     items = parse_day_list(text)
@@ -258,4 +272,3 @@ async def handle_location(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_tz')]])
         return await emsg.reply_text("⚠️ Не удалось определить. Выберите вручную.", reply_markup=kb)
-

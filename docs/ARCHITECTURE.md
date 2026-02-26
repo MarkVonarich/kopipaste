@@ -23,3 +23,10 @@ When source code is present, document and keep updated:
 5. Scheduled/background jobs.
 
 Any structural change must be mirrored in this file and in `STATE.yml`/`STATUS.md`.
+
+
+## Stage 1.3 ML v1 suggestions (PR1)
+- Input `<text> <amount>` defaults to expense and opens 2x2 category suggestion screen.
+- Buttons: `✅ cat1`, `✅ cat2`, `🗂 Другая категория`, `↔️ Это доход`.
+- `↔️ Это доход` toggles type (`Расходы` <-> `Доходы`) and redraws same message.
+- Suggestions source: `global_aliases` by popularity for selected op type; fallback: `Продукты`, `Другое`.

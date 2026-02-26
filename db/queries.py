@@ -266,3 +266,12 @@ def get_global_alias(text: str):
          LIMIT 1
     """, (nt,))
     return (rows[0][0], rows[0][1]) if rows else None
+
+
+def log_category_feedback(user_id: int, chat_id: int, raw_text: str, norm_text: str,
+                          suggested_cat: str, chosen_cat: str, op_type: str, event_type: str):
+    pg_exec("""
+        INSERT INTO public.category_feedback
+          (user_id, chat_id, raw_text, norm_text, suggested_cat, chosen_cat, op_type, event_type)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (user_id, chat_id, raw_text, norm_text, suggested_cat, chosen_cat, op_type, event_type))
