@@ -2,6 +2,7 @@
 __version__ = "2025.08.30-limits"
 
 from typing import Optional, Tuple, List
+import json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
 
@@ -259,3 +260,118 @@ def get_global_alias(text: str):
          LIMIT 1
     """, (nt,))
     return (rows[0][0], rows[0][1]) if rows else None
+
+
+# ─────────────────────────────
+# Action tokens (pending op)
+# ─────────────────────────────
+
+def create_action_token(user_id: int, chat_id: int, payload: dict) -> Optional[int]:
+    """Create pending action token; returns token id or None if DB object is absent."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.action_tokens (user_id, chat_id, payload, status)
+                VALUES (%s, %s, %s::jsonb, 'pending')
+                RETURNING id
+                """,
+                (user_id, chat_id, json.dumps(payload, ensure_ascii=False)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return int(row[0]) if row else None
+    except Exception:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def merge_action_token_payload(token_id: int, patch: dict) -> bool:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.action_tokens
+                   SET payload = COALESCE(payload, '{}'::jsonb) || %s::jsonb
+                 WHERE id=%s AND status='pending'
+                """,
+                (json.dumps(patch, ensure_ascii=False), token_id),
+            )
+            ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def mark_action_token_used(token_id: int, op_id: Optional[int] = None) -> dict:
+    """Idempotent token finalize. changed=False means already committed/expired/missing."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.action_tokens
+                   SET status='used',
+                       used_at=now(),
+                       op_id=COALESCE(%s, op_id)
+                 WHERE id=%s AND status='pending'
+                 RETURNING op_id
+                """,
+                (op_id, token_id),
+            )
+            row = cur.fetchone()
+            if row:
+                conn.commit()
+                return {"changed": True, "status": "used", "op_id": row[0]}
+
+            cur.execute("SELECT status, op_id FROM public.action_tokens WHERE id=%s", (token_id,))
+            row2 = cur.fetchone()
+            conn.commit()
+            if not row2:
+                return {"changed": False, "status": "missing", "op_id": None}
+            return {"changed": False, "status": row2[0], "op_id": row2[1]}
+    except Exception:
+        conn.rollback()
+        return {"changed": False, "status": "error", "op_id": None}
+    finally:
+        conn.close()
+
+
+def cleanup_action_tokens(ttl_minutes: int = 10, hard_delete_days: int = 7) -> dict:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.action_tokens
+                   SET status='expired', used_at=now()
+                 WHERE status='pending'
+                   AND created_at < now() - (%s || ' minutes')::interval
+                """,
+                (ttl_minutes,),
+            )
+            expired = cur.rowcount
+            cur.execute(
+                """
+                DELETE FROM public.action_tokens
+                 WHERE status IN ('used','expired')
+                   AND created_at < now() - (%s || ' days')::interval
+                """,
+                (hard_delete_days,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        return {"expired": int(expired), "deleted": int(deleted)}
+    except Exception:
+        conn.rollback()
+        return {"expired": 0, "deleted": 0}
+    finally:
+        conn.close()

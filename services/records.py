@@ -11,7 +11,8 @@ from telegram.ext import ContextTypes
 
 from db.queries import (
     list_user_aliases, upsert_user_alias, insert_operation,
-    get_user_budgets, get_user_currency, get_user_tz
+    get_user_budgets, get_user_currency, get_user_tz,
+    mark_action_token_used
 )
 from cache.global_dict import bump_global_popularity, global_suggestions
 from utils.text import norm_text, format_date_ru_with_weekday
@@ -168,7 +169,9 @@ async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, co
 async def record_operation(cat: str, amt: int, dt,
                            typ: str, update: Update,
                            context: ContextTypes.DEFAULT_TYPE,
-                           note: Optional[str] = None):
+                           note: Optional[str] = None,
+                           token_id: Optional[int] = None,
+                           raw_text: Optional[str] = None):
     """
     Финальная фиксация операции + ответ пользователю.
     Важные моменты:
@@ -192,6 +195,8 @@ async def record_operation(cat: str, amt: int, dt,
     reply_to_msg_id: Optional[int] = None
 
     batch_piece = context.user_data.get("batch_item_text")
+    if raw_text:
+        orig_text = str(raw_text)
     if batch_piece:
         orig_text = str(batch_piece)
 
@@ -219,6 +224,15 @@ async def record_operation(cat: str, amt: int, dt,
         if ut and not _is_bot_hint(ut):
             orig_text = ut
 
+    # Идемпотентность по action_tokens
+    if token_id:
+        state = mark_action_token_used(int(token_id), None)
+        if not state.get("changed") and state.get("status") in ("used", "committed"):
+            sign = "➖" if typ == "Расходы" else "➕"
+            cur_symbol = get_user_currency(cid)
+            await context.bot.send_message(chat_id=cid, text=f"✅ Уже записано: {sign} {amt} {cur_symbol} • {cat}")
+            return
+
     # Сохраняем операцию в БД
     insert_operation(cid, dt.date(), typ, cat, amt, 'From Telegram')
 
@@ -239,6 +253,18 @@ async def record_operation(cat: str, amt: int, dt,
             conn.commit(); conn.close()
         except Exception as e:
             log.warning("raw_text UPDATE failed: %s", e)
+
+    # Привяжем op_id к токену (если токен задан)
+    if token_id:
+        try:
+            conn = get_conn(); cur = conn.cursor()
+            cur.execute("SELECT id FROM public.operations WHERE chat_id=%s ORDER BY id DESC LIMIT 1", (cid,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                mark_action_token_used(int(token_id), int(row[0]))
+        except Exception as e:
+            log.debug("token finalize failed: %s", e)
 
     # Кнопки
     if typ == 'Расходы':

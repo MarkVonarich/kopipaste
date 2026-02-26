@@ -6,7 +6,7 @@ from db.queries import (
     upsert_user_alias, update_user_field, set_budget,
     get_user_currency, get_user_budgets, delete_last_operation,
     set_category_limit, get_category_limit, list_category_limits, delete_category_limit,
-    get_user_tz
+    get_user_tz, merge_action_token_payload
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
@@ -520,7 +520,12 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'add_cat':
         p = context.user_data.get('pending', {})
         merch = p.get('merch') or 'операция'
-        return await q.edit_message_text(f'Введите название новой категории для "{merch}":')
+        context.user_data['adding_category'] = True
+        context.user_data['pending_mode'] = 'awaiting_category_name'
+        token_id = context.user_data.get('pending_token_id')
+        if token_id:
+            merge_action_token_payload(int(token_id), {'stage':'awaiting_category_name'})
+        return await q.edit_message_text('Напиши название категории одним словом (например: "Спорт")')
 
     if data.startswith('use_cat|'):
         # если находимся в мастере лимитов — переходим к набору суммы, НЕ пишем операцию
@@ -551,7 +556,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 delete_last_operation(cid)
             except Exception:
                 pass
-        return await record_operation(cat, amt, dt, typ, update, context, note)
+        token_id = context.user_data.get('pending_token_id')
+        if token_id:
+            merge_action_token_payload(int(token_id), {'stage':'category_selected','category_name':cat,'op_type':typ})
+        return await record_operation(cat, amt, dt, typ, update, context, note, token_id=token_id, raw_text=merch)
 
     # Отчёты
     if data == 'menu_report':
