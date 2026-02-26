@@ -530,7 +530,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 detected_type=p.get('type') or 'Расходы',
                 action='other_category',
                 suggested_top2=suggested_top2,
-                meta={'source': 'baseline', 'stage': '2.2', 'merchant': p.get('merch', '')},
+                meta={'source': p.get('ml_source', 'baseline'), 'stage': '2.3', 'merchant': p.get('merch', ''), 'model_version': p.get('ml_model_version')},
             )
         except Exception:
             pass
@@ -561,7 +561,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if len(top2) < 2:
             top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
         cat1, cat2 = top2[0]['cat'], top2[1]['cat']
-        p.update({'type': new_type, 'ml_cat1': cat1, 'ml_cat2': cat2, 'ml_top2': top2})
+        p.update({'type': new_type, 'ml_cat1': cat1, 'ml_cat2': cat2, 'ml_top2': top2, 'ml_source': sugg_meta.get('source', 'baseline'), 'ml_model_version': sugg_meta.get('model_version')})
         context.user_data['pending'] = p
         suggested_top2 = top2
         try:
@@ -574,7 +574,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 action='toggle_type',
                 suggested_top2=suggested_top2,
                 chosen_type=new_type,
-                meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'suggest': sugg_meta},
+                meta={'source': sugg_meta.get('source', 'baseline'), 'stage': '2.3', 'merchant': merch, 'suggest': sugg_meta, 'model_version': sugg_meta.get('model_version'), 'trained_at': sugg_meta.get('trained_at')},
             )
         except Exception:
             pass
@@ -601,7 +601,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 chosen_category=cat,
                 chosen_type=typ,
                 suggested_top2=p.get('ml_top2') or [{'cat': p.get('ml_cat1', ''), 'score': None}, {'cat': p.get('ml_cat2', ''), 'score': None}],
-                meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'picked': cat},
+                meta={'source': p.get('ml_source', 'baseline'), 'stage': '2.3', 'merchant': merch, 'picked': cat, 'model_version': p.get('ml_model_version')},
             )
         except Exception:
             pass

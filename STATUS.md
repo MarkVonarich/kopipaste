@@ -48,3 +48,11 @@ All further changes follow:
 - Updated `services/ml_suggest.get_top2_suggestions` to apply bias after baseline and return suggestion metadata (`reason`, `stage=2.2`, bias info).
 - Added DB helpers `get_recent_choices_for_text(...)` and `get_ml_stats(...)` in `db/queries.py` for bias + top1/top2 quality metrics.
 - Added `/mlstats` command in bot commands to show 30-day top1/top2 hit rates from `ml_observations`.
+
+
+## Stage 2.3 — ML model v2 (TF-IDF + LogisticRegression)
+- Added connection pool in `db/database.py` (`ThreadedConnectionPool 1..10`, `application_name=finuchet`) to reduce DB connection storms.
+- Added resilience for reminder jobs on `OperationalError: too many clients` with fast backoff/exit.
+- Added train/infer pipeline: `services/ml_train.py`, `services/ml_infer.py`, `services/ml_model.py`; artifacts stored in `_ml_artifacts/`.
+- Updated `services/ml_suggest.py` to prefer fresh model predictions (<=7 days), then apply user bias, then fallback to baseline.
+- Added `/mltrain` (admin-only) and expanded `/mlstats` with overall + baseline/model top1/top2 split.

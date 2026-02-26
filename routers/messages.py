@@ -118,6 +118,8 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         'ml_cat1': cat1,
         'ml_cat2': cat2,
         'ml_top2': top2,
+        'ml_source': sugg_meta.get('source', 'baseline'),
+        'ml_model_version': sugg_meta.get('model_version'),
     }
     try:
         insert_ml_observation(
@@ -129,7 +131,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             action='suggest_shown',
             suggested_top2=top2,
             confidence_top1=top2[0].get('score'),
-            meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'currency_detected': src_curr, 'suggest': sugg_meta},
+            meta={'source': sugg_meta.get('source', 'baseline'), 'stage': '2.3', 'merchant': merch, 'currency_detected': src_curr, 'suggest': sugg_meta, 'model_version': sugg_meta.get('model_version'), 'trained_at': sugg_meta.get('trained_at')},
         )
     except Exception:
         pass
@@ -292,7 +294,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 action='suggest_shown',
                 suggested_top2=top2,
                 confidence_top1=top2[0].get('score'),
-                meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount', 'suggest': sugg_meta},
+                meta={'source': sugg_meta.get('source', 'baseline'), 'stage': '2.3', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount', 'suggest': sugg_meta, 'model_version': sugg_meta.get('model_version'), 'trained_at': sugg_meta.get('trained_at')},
             )
         except Exception:
             pass

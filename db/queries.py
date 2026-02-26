@@ -182,7 +182,25 @@ def get_ml_stats(user_id: int, days: int = 30):
               suggested_top2->0->>'cat',
               suggested_top2->1->>'cat'
             )
-          )::int AS top2_hit
+          )::int AS top2_hit,
+          COUNT(*) FILTER (WHERE COALESCE(meta->>'source','baseline')='baseline')::int AS baseline_picks,
+          COUNT(*) FILTER (
+            WHERE COALESCE(meta->>'source','baseline')='baseline'
+              AND chosen_category = (suggested_top2->0->>'cat')
+          )::int AS baseline_top1_hit,
+          COUNT(*) FILTER (
+            WHERE COALESCE(meta->>'source','baseline')='baseline'
+              AND chosen_category IN (suggested_top2->0->>'cat', suggested_top2->1->>'cat')
+          )::int AS baseline_top2_hit,
+          COUNT(*) FILTER (WHERE COALESCE(meta->>'source','baseline')='model')::int AS model_picks,
+          COUNT(*) FILTER (
+            WHERE COALESCE(meta->>'source','baseline')='model'
+              AND chosen_category = (suggested_top2->0->>'cat')
+          )::int AS model_top1_hit,
+          COUNT(*) FILTER (
+            WHERE COALESCE(meta->>'source','baseline')='model'
+              AND chosen_category IN (suggested_top2->0->>'cat', suggested_top2->1->>'cat')
+          )::int AS model_top2_hit
         FROM public.ml_observations
         WHERE user_id=%s
           AND action='pick_cat'
@@ -191,9 +209,32 @@ def get_ml_stats(user_id: int, days: int = 30):
           AND created_at >= now() - (%s || ' days')::interval
     """, (user_id, int(days)))
     if not rows:
-        return {'picks': 0, 'top1_hit': 0, 'top2_hit': 0}
-    picks, top1, top2 = rows[0]
-    return {'picks': int(picks or 0), 'top1_hit': int(top1 or 0), 'top2_hit': int(top2 or 0)}
+        return {}
+    keys = [
+        'picks','top1_hit','top2_hit',
+        'baseline_picks','baseline_top1_hit','baseline_top2_hit',
+        'model_picks','model_top1_hit','model_top2_hit'
+    ]
+    vals = rows[0]
+    return {k: int(v or 0) for k, v in zip(keys, vals)}
+
+
+
+def get_ml_training_rows(days: int = 180, op_type: str = 'Расходы', limit: int = 20000):
+    rows = pg_fetchall("""
+        SELECT normalized_text, chosen_category, chosen_type
+          FROM public.ml_observations
+         WHERE action='pick_cat'
+           AND normalized_text IS NOT NULL
+           AND normalized_text<>''
+           AND chosen_category IS NOT NULL
+           AND chosen_category<>''
+           AND created_at >= now() - (%s || ' days')::interval
+           AND COALESCE(chosen_type, 'Расходы')=%s
+         ORDER BY created_at DESC
+         LIMIT %s
+    """, (int(days), op_type, int(limit)))
+    return rows
 
 def get_last_operation(user_id: int):
     """Return last operation for user as dict with keys: id, op_date, type, category, amount."""

@@ -74,3 +74,26 @@ stage_2_2:
     - top2_hit
   command:
     - /mlstats
+
+stage_2_3:
+  added_files:
+    - services/ml_model.py
+    - services/ml_train.py
+    - services/ml_infer.py
+  updated_files:
+    - db/database.py
+    - db/queries.py
+    - services/ml_suggest.py
+    - routers/messages.py
+    - routers/callbacks.py
+    - routers/commands.py
+    - jobs/daily.py
+    - main.py
+    - settings.py
+  model:
+    - tfidf_vectorizer
+    - logistic_regression
+  artifacts_dir: _ml_artifacts
+  commands:
+    - /mlstats
+    - /mltrain

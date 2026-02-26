@@ -14,6 +14,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from telegram.error import Forbidden, BadRequest
+from psycopg2 import OperationalError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -199,6 +200,11 @@ def _log_sent(user_id: int, kind: str, tmpl_id: int|None, tag: str|None):
     """,(user_id, _local_today(user_id), kind, tmpl_id, tag))
     conn.commit(); conn.close()
 
+
+
+def _is_too_many_clients(err: Exception) -> bool:
+    return 'too many clients' in str(err).lower()
+
 async def _user_name(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
     try:
         chat = await context.bot.get_chat(user_id)
@@ -240,6 +246,11 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
                 log.info("morning: skip %s: %s", uid, e)
             except Exception as e:
                 log.exception("morning: send error for %s: %s", uid, e)
+    except OperationalError as e:
+        if _is_too_many_clients(e):
+            log.warning("day_nudge_job backoff: %s", e)
+            return
+        log.exception("day_nudge_job db error: %s", e)
     except Exception as e:
         log.exception("day_nudge_job error: %s", e)
 
@@ -274,5 +285,10 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                 log.info("evening: skip %s: %s", uid, e)
             except Exception as e:
                 log.exception("evening: send error for %s: %s", uid, e)
+    except OperationalError as e:
+        if _is_too_many_clients(e):
+            log.warning("evening_reminder_job backoff: %s", e)
+            return
+        log.exception("evening_reminder_job db error: %s", e)
     except Exception as e:
         log.exception("evening_reminder_job error: %s", e)
