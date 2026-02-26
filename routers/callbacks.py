@@ -10,8 +10,10 @@ from db.queries import (
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
+from ui.keyboards import ml_top2_kb
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml
+from services.ml_suggest import get_top2_suggestions
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
@@ -528,7 +530,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 detected_type=p.get('type') or 'Расходы',
                 action='other_category',
                 suggested_top2=suggested_top2,
-                meta={'source': 'telegram', 'merchant': p.get('merch', '')},
+                meta={'source': 'baseline', 'stage': '2.1', 'merchant': p.get('merch', '')},
             )
         except Exception:
             pass
@@ -554,19 +556,14 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         curr_type = p.get('type') or 'Расходы'
         new_type = 'Доходы' if curr_type == 'Расходы' else 'Расходы'
         sign = '➕' if new_type == 'Доходы' else '➖'
-        from cache.global_dict import global_suggestions
-        pairs = global_suggestions(merch)
-        cats = [c for (c,t) in pairs if t == new_type]
-        if len(cats) == 0:
-            cat1, cat2 = 'Продукты', 'Другое'
-        elif len(cats) == 1:
-            cat1, cat2 = cats[0], 'Другое'
-        else:
-            cat1, cat2 = cats[0], cats[1]
-        p.update({'type': new_type, 'ml_cat1': cat1, 'ml_cat2': cat2})
-        context.user_data['pending'] = p
         raw_text = context.user_data.get('batch_item_text') or merch
-        suggested_top2 = [{'cat': cat1, 'score': None}, {'cat': cat2, 'score': None}]
+        top2 = get_top2_suggestions(cid, normalize_for_ml(raw_text), new_type)
+        if len(top2) < 2:
+            top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
+        cat1, cat2 = top2[0]['cat'], top2[1]['cat']
+        p.update({'type': new_type, 'ml_cat1': cat1, 'ml_cat2': cat2, 'ml_top2': top2})
+        context.user_data['pending'] = p
+        suggested_top2 = top2
         try:
             insert_ml_observation(
                 user_id=cid,
@@ -577,16 +574,11 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 action='toggle_type',
                 suggested_top2=suggested_top2,
                 chosen_type=new_type,
-                meta={'source': 'telegram', 'merchant': merch},
+                meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch},
             )
         except Exception:
             pass
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"✅ {cat1}", callback_data=f"ml_pick|{cat1}"),
-             InlineKeyboardButton(f"✅ {cat2}", callback_data=f"ml_pick|{cat2}")],
-            [InlineKeyboardButton("🗂 Другая категория", callback_data="ml_other"),
-             InlineKeyboardButton("↔️ Это доход", callback_data="ml_toggle_income")],
-        ])
+        kb = ml_top2_kb(cat1, cat2)
         return await q.edit_message_text(f"Категория?\n{sign} {amt} ₽ • {merch}", parse_mode='Markdown', reply_markup=kb)
 
     if data.startswith('ml_pick|'):
@@ -608,8 +600,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 action='pick_cat',
                 chosen_category=cat,
                 chosen_type=typ,
-                suggested_top2=[{'cat': p.get('ml_cat1', ''), 'score': None}, {'cat': p.get('ml_cat2', ''), 'score': None}],
-                meta={'source': 'telegram', 'merchant': merch},
+                suggested_top2=p.get('ml_top2') or [{'cat': p.get('ml_cat1', ''), 'score': None}, {'cat': p.get('ml_cat2', ''), 'score': None}],
+                meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch, 'picked': cat},
             )
         except Exception:
             pass

@@ -130,6 +130,27 @@ def bump_global_alias(norm_text: str, typ: str, category: str, inc: int = 1):
                updated_at = now()
     """, (norm_text, typ, category, inc))
 
+
+
+def get_user_top_categories(user_id: int, op_type: str = 'Расходы', lookback_ops: int = 50, top_n: int = 2) -> List[str]:
+    rows = pg_fetchall("""
+        WITH recent AS (
+            SELECT category
+              FROM public.operations
+             WHERE user_id=%s
+               AND type=%s
+               AND category IS NOT NULL
+             ORDER BY id DESC
+             LIMIT %s
+        )
+        SELECT category, COUNT(*) c
+          FROM recent
+         GROUP BY category
+         ORDER BY c DESC, category ASC
+         LIMIT %s
+    """, (user_id, op_type, lookback_ops, top_n))
+    return [r[0] for r in rows if r and r[0]]
+
 def get_last_operation(user_id: int):
     """Return last operation for user as dict with keys: id, op_date, type, category, amount."""
     with get_conn() as conn:

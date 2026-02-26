@@ -34,3 +34,10 @@ All further changes follow:
 - Added migration `migrations/20260226_007_ml_observations.sql` with table `public.ml_observations` and indexes for user timeline + recent events + JSONB suggestions lookup.
 - Added DB APIs in `db/queries.py`: `insert_ml_observation(...)` and `update_ml_observation_choice(...)`.
 - Embedded observation logging into Stage 1.3 flow: `suggest_shown`, `pick_cat`, `toggle_type`, `other_category`, `fallback_direct_write`, `parse_failed`.
+
+
+## Stage 2.1 — ML suggestions v1
+- Added baseline top-2 suggester `services/ml_suggest.py::get_top2_suggestions` (local/global alias hit first, then user frequency prior over last operations).
+- Wired free-text category prompt to baseline top-2 with UI buttons: `✅ cat1`, `✅ cat2`, `✍️ Другая категория`, `🔁 Доход/Расход`.
+- Kept fallback behavior safe (default categories when baseline misses) and preserved existing operation write flow on `ml_pick`.
+- Extended `ml_observations` event payloads for stage 2.1 via `meta` and `suggested_top2` (`suggest_shown` + `pick_cat` compatibility).

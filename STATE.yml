@@ -40,3 +40,21 @@ stage_2_0:
     - other_category
     - fallback_direct_write
     - parse_failed
+
+stage_2_1:
+  added_files:
+    - services/ml_suggest.py
+  updated_files:
+    - routers/messages.py
+    - routers/callbacks.py
+    - db/queries.py
+    - ui/keyboards.py
+  baseline_logic:
+    - local_alias
+    - global_alias
+    - user_frequency_prior_last_50_ops
+  ui_buttons:
+    - "✅ <cat1>"
+    - "✅ <cat2>"
+    - "✍️ Другая категория"
+    - "🔁 Доход/Расход"

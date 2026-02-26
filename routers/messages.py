@@ -4,16 +4,18 @@ __version__ = "2025.08.26-batch-05"
 
 import re
 from datetime import datetime
-from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import ReplyKeyboardRemove
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
 from services.records import get_user_alias, record_operation
-from cache.global_dict import global_suggestions, bump_global_popularity
+from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu
+from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
 from db.queries import update_user_field, insert_ml_observation
 from services.ml_prep import normalize_for_ml
+from services.ml_suggest import get_top2_suggestions
 import logging
 
 log = logging.getLogger(__name__)
@@ -27,25 +29,6 @@ BATCH_MAX = 25  # ограничение длины списка на один �
 
 def _md_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`")
-
-
-def _ml_keyboard(cat1: str, cat2: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"✅ {cat1}", callback_data=f"ml_pick|{cat1}"),
-         InlineKeyboardButton(f"✅ {cat2}", callback_data=f"ml_pick|{cat2}")],
-        [InlineKeyboardButton('🗂 Другая категория', callback_data='ml_other'),
-         InlineKeyboardButton('↔️ Это доход', callback_data='ml_toggle_income')],
-    ])
-
-
-def _ml_top2(merch: str, op_type: str) -> tuple[str, str]:
-    pairs = global_suggestions(merch)
-    cats = [c for (c, t) in pairs if t == op_type]
-    if len(cats) == 0:
-        return 'Продукты', 'Другое'
-    if len(cats) == 1:
-        return cats[0], 'Другое'
-    return cats[0], cats[1]
 
 
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
@@ -121,7 +104,11 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
     op_type = 'Расходы'
-    cat1, cat2 = _ml_top2(merch, op_type)
+    normalized = normalize_for_ml(text)
+    top2 = get_top2_suggestions(cid, normalized, op_type)
+    if len(top2) < 2:
+        top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
+    cat1, cat2 = top2[0]['cat'], top2[1]['cat']
     context.user_data['pending'] = {
         'merch': merch,
         'amt': amt_final,
@@ -130,19 +117,19 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         'note': note,
         'ml_cat1': cat1,
         'ml_cat2': cat2,
+        'ml_top2': top2,
     }
-    suggested_top2 = [{'cat': cat1, 'score': None}, {'cat': cat2, 'score': None}]
     try:
         insert_ml_observation(
             user_id=cid,
             chat_id=cid,
             raw_text=text,
-            normalized_text=normalize_for_ml(text),
+            normalized_text=normalized,
             detected_type=op_type,
             action='suggest_shown',
-            suggested_top2=suggested_top2,
-            confidence_top1=None,
-            meta={'source': 'telegram', 'merchant': merch, 'currency_detected': src_curr},
+            suggested_top2=top2,
+            confidence_top1=top2[0].get('score'),
+            meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch, 'currency_detected': src_curr},
         )
     except Exception:
         pass
@@ -150,7 +137,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
     msg = await _safe_reply(
         emsg,
         f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
-        reply_markup=_ml_keyboard(cat1, cat2),
+        reply_markup=ml_top2_kb(cat1, cat2),
     )
     context.user_data['suggest_msg_id'] = msg.message_id
     context.user_data['batch_item_text'] = text
@@ -280,7 +267,11 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
         op_type = 'Расходы'
-        cat1, cat2 = _ml_top2(merch, op_type)
+        normalized = normalize_for_ml(text)
+        top2 = get_top2_suggestions(cid, normalized, op_type)
+        if len(top2) < 2:
+            top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
+        cat1, cat2 = top2[0]['cat'], top2[1]['cat']
         context.user_data['pending'] = {
             'merch': merch,
             'amt': amt_final,
@@ -289,19 +280,19 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             'note': note,
             'ml_cat1': cat1,
             'ml_cat2': cat2,
+            'ml_top2': top2,
         }
-        suggested_top2 = [{'cat': cat1, 'score': None}, {'cat': cat2, 'score': None}]
         try:
             insert_ml_observation(
                 user_id=cid,
                 chat_id=cid,
                 raw_text=text,
-                normalized_text=normalize_for_ml(text),
+                normalized_text=normalized,
                 detected_type=op_type,
                 action='suggest_shown',
-                suggested_top2=suggested_top2,
-                confidence_top1=None,
-                meta={'source': 'telegram', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount'},
+                suggested_top2=top2,
+                confidence_top1=top2[0].get('score'),
+                meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount'},
             )
         except Exception:
             pass
@@ -309,7 +300,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         msg = await _safe_reply(
             emsg,
             f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
-            reply_markup=_ml_keyboard(cat1, cat2),
+            reply_markup=ml_top2_kb(cat1, cat2),
         )
         context.user_data['suggest_msg_id'] = msg.message_id
         context.user_data['batch_item_text'] = text
