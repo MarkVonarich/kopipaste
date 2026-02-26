@@ -1,0 +1,47 @@
+# /etc/systemd/system/finuchet.service
+[Unit]
+Description=Telegram Finance Bot (Finuchet)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=root
+WorkingDirectory=/root/bot_finuchet
+EnvironmentFile=/root/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u /root/bot_finuchet/main.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/finuchet.service.d/oom-protect.conf
+[Service]
+# Делаем процесс «последним кандидатом» для OOM-killer
+OOMScoreAdjust=-900
+
+# /etc/systemd/system/finuchet.service.d/override.conf
+[Unit]
+# Жёстких Requires не делаем
+Requires=
+# Мягкие зависимости: сеть и (если есть) обобщённый postgresql.service
+Wants=network-online.target postgresql.service
+After=network-online.target postgresql.service
+
+[Service]
+WorkingDirectory=/root/bot_finuchet
+EnvironmentFile=-/root/.env
+EnvironmentFile=-/root/bot_finuchet/.env
+Environment=PYTHONPATH=/root/bot_finuchet
+# Не блокируем старт, даже если pg ещё не готов (логика ретраев в коде)
+ExecStartPre=
+
+# /etc/systemd/system/finuchet.service.d/py-path.conf
+[Service]
+WorkingDirectory=/root/bot_finuchet
+Environment=PYTHONPATH=/root/bot_finuchet
