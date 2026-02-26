@@ -87,20 +87,3 @@ set +a
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_001_action_tokens_pending_op.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_002_action_tokens_ttl_cleanup.sql
 ```
-
-
-## 8) Emergency DB fix for `expires_at` errors
-If migration 001/002 fails with `column "expires_at" does not exist`, run this hotfix first:
-
-```bash
-cd /root/bot_finuchet
-git switch main
-git pull --ff-only origin main
-
-set -a
-. /root/bot_finuchet/.env
-set +a
-
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_003_action_tokens_expires_at_hotfix.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/20260226_002_action_tokens_ttl_cleanup.sql
-```
