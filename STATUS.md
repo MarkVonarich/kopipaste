@@ -41,3 +41,10 @@ All further changes follow:
 - Wired free-text category prompt to baseline top-2 with UI buttons: `✅ cat1`, `✅ cat2`, `✍️ Другая категория`, `🔁 Доход/Расход`.
 - Kept fallback behavior safe (default categories when baseline misses) and preserved existing operation write flow on `ml_pick`.
 - Extended `ml_observations` event payloads for stage 2.1 via `meta` and `suggested_top2` (`suggest_shown` + `pick_cat` compatibility).
+
+
+## Stage 2.2 — Personal bias + ML stats
+- Added personal bias layer `services/ml_bias.py::apply_user_bias` using recent `pick_cat` history for same/prefix normalized text (90 days).
+- Updated `services/ml_suggest.get_top2_suggestions` to apply bias after baseline and return suggestion metadata (`reason`, `stage=2.2`, bias info).
+- Added DB helpers `get_recent_choices_for_text(...)` and `get_ml_stats(...)` in `db/queries.py` for bias + top1/top2 quality metrics.
+- Added `/mlstats` command in bot commands to show 30-day top1/top2 hit rates from `ml_observations`.

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 import pandas as pd
 from datetime import datetime
 from db.database import get_conn
-from db.queries import ensure_user, get_user_budgets, get_user_currency
+from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats
 from ui.keyboards import main_menu_kb
 from services.onboarding import onboarding_welcome
 
@@ -22,6 +22,7 @@ async def on_startup(app):
         BotCommand('budget','Показать бюджеты'),
         BotCommand('export','Экспорт XLSX/CSV'),
         BotCommand('about','О боте и зачем он нужен'),
+        BotCommand('mlstats','ML-статистика top1/top2'),
     ])
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,3 +98,19 @@ async def cmd_about(update, context: ContextTypes.DEFAULT_TYPE):
         "Поддержка: @" + SUPPORT_USERNAME.lstrip('@')
     )
     await update.message.reply_text(txt, parse_mode='Markdown', disable_web_page_preview=True)
+
+
+async def cmd_mlstats(update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    stats = get_ml_stats(cid, days=30)
+    picks = stats.get('picks', 0)
+    top1 = stats.get('top1_hit', 0)
+    top2 = stats.get('top2_hit', 0)
+    top1_pct = (top1 * 100.0 / picks) if picks else 0.0
+    top2_pct = (top2 * 100.0 / picks) if picks else 0.0
+    await update.message.reply_text(
+        f"ML stats (30д):\n"
+        f"• picks: {picks}\n"
+        f"• top1 hit: {top1} ({top1_pct:.1f}%)\n"
+        f"• top2 hit: {top2} ({top2_pct:.1f}%)"
+    )

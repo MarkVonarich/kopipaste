@@ -58,3 +58,19 @@ stage_2_1:
     - "✅ <cat2>"
     - "✍️ Другая категория"
     - "🔁 Доход/Расход"
+
+stage_2_2:
+  added_files:
+    - services/ml_bias.py
+  updated_files:
+    - services/ml_suggest.py
+    - db/queries.py
+    - routers/messages.py
+    - routers/callbacks.py
+    - routers/commands.py
+    - main.py
+  metrics:
+    - top1_hit
+    - top2_hit
+  command:
+    - /mlstats

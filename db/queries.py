@@ -151,6 +151,50 @@ def get_user_top_categories(user_id: int, op_type: str = 'Расходы', lookb
     """, (user_id, op_type, lookback_ops, top_n))
     return [r[0] for r in rows if r and r[0]]
 
+
+
+def get_recent_choices_for_text(user_id: int, normalized_text: str, days: int = 90, limit: int = 200):
+    pref = (normalized_text or '').strip()
+    rows = pg_fetchall("""
+        SELECT chosen_category, COUNT(*) c
+          FROM public.ml_observations
+         WHERE user_id=%s
+           AND action='pick_cat'
+           AND chosen_category IS NOT NULL
+           AND created_at >= now() - (%s || ' days')::interval
+           AND (normalized_text=%s OR normalized_text LIKE %s)
+         GROUP BY chosen_category
+         ORDER BY c DESC, chosen_category ASC
+         LIMIT %s
+    """, (user_id, int(days), pref, f"{pref}%", int(limit)))
+    return [(r[0], int(r[1])) for r in rows if r and r[0]]
+
+
+def get_ml_stats(user_id: int, days: int = 30):
+    rows = pg_fetchall("""
+        SELECT
+          COUNT(*)::int AS picks,
+          COUNT(*) FILTER (
+            WHERE chosen_category = (suggested_top2->0->>'cat')
+          )::int AS top1_hit,
+          COUNT(*) FILTER (
+            WHERE chosen_category IN (
+              suggested_top2->0->>'cat',
+              suggested_top2->1->>'cat'
+            )
+          )::int AS top2_hit
+        FROM public.ml_observations
+        WHERE user_id=%s
+          AND action='pick_cat'
+          AND chosen_category IS NOT NULL
+          AND suggested_top2 IS NOT NULL
+          AND created_at >= now() - (%s || ' days')::interval
+    """, (user_id, int(days)))
+    if not rows:
+        return {'picks': 0, 'top1_hit': 0, 'top2_hit': 0}
+    picks, top1, top2 = rows[0]
+    return {'picks': int(picks or 0), 'top1_hit': int(top1 or 0), 'top2_hit': int(top2 or 0)}
+
 def get_last_operation(user_id: int):
     """Return last operation for user as dict with keys: id, op_date, type, category, amount."""
     with get_conn() as conn:

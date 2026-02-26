@@ -105,7 +105,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
 
     op_type = 'Расходы'
     normalized = normalize_for_ml(text)
-    top2 = get_top2_suggestions(cid, normalized, op_type)
+    top2, sugg_meta = get_top2_suggestions(cid, normalized, op_type)
     if len(top2) < 2:
         top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
     cat1, cat2 = top2[0]['cat'], top2[1]['cat']
@@ -129,7 +129,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             action='suggest_shown',
             suggested_top2=top2,
             confidence_top1=top2[0].get('score'),
-            meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch, 'currency_detected': src_curr},
+            meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'currency_detected': src_curr, 'suggest': sugg_meta},
         )
     except Exception:
         pass
@@ -268,7 +268,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
 
         op_type = 'Расходы'
         normalized = normalize_for_ml(text)
-        top2 = get_top2_suggestions(cid, normalized, op_type)
+        top2, sugg_meta = get_top2_suggestions(cid, normalized, op_type)
         if len(top2) < 2:
             top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
         cat1, cat2 = top2[0]['cat'], top2[1]['cat']
@@ -292,7 +292,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 action='suggest_shown',
                 suggested_top2=top2,
                 confidence_top1=top2[0].get('score'),
-                meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount'},
+                meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'currency_detected': src_curr, 'flow': 'await_amount', 'suggest': sugg_meta},
             )
         except Exception:
             pass

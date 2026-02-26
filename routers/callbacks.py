@@ -530,7 +530,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 detected_type=p.get('type') or 'Расходы',
                 action='other_category',
                 suggested_top2=suggested_top2,
-                meta={'source': 'baseline', 'stage': '2.1', 'merchant': p.get('merch', '')},
+                meta={'source': 'baseline', 'stage': '2.2', 'merchant': p.get('merch', '')},
             )
         except Exception:
             pass
@@ -557,7 +557,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         new_type = 'Доходы' if curr_type == 'Расходы' else 'Расходы'
         sign = '➕' if new_type == 'Доходы' else '➖'
         raw_text = context.user_data.get('batch_item_text') or merch
-        top2 = get_top2_suggestions(cid, normalize_for_ml(raw_text), new_type)
+        top2, sugg_meta = get_top2_suggestions(cid, normalize_for_ml(raw_text), new_type)
         if len(top2) < 2:
             top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
         cat1, cat2 = top2[0]['cat'], top2[1]['cat']
@@ -574,7 +574,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 action='toggle_type',
                 suggested_top2=suggested_top2,
                 chosen_type=new_type,
-                meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch},
+                meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'suggest': sugg_meta},
             )
         except Exception:
             pass
@@ -601,7 +601,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 chosen_category=cat,
                 chosen_type=typ,
                 suggested_top2=p.get('ml_top2') or [{'cat': p.get('ml_cat1', ''), 'score': None}, {'cat': p.get('ml_cat2', ''), 'score': None}],
-                meta={'source': 'baseline', 'stage': '2.1', 'merchant': merch, 'picked': cat},
+                meta={'source': 'baseline', 'stage': '2.2', 'merchant': merch, 'picked': cat},
             )
         except Exception:
             pass
