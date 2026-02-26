@@ -47,6 +47,16 @@ def _ml_top2(merch: str, op_type: str) -> tuple[str, str]:
     return cats[0], cats[1]
 
 
+async def _safe_reply(emsg, text_md: str, reply_markup=None):
+    """Reply in markdown, fallback to plain text if telegram rejects entities."""
+    try:
+        return await emsg.reply_text(text_md, parse_mode='Markdown', reply_markup=reply_markup)
+    except Exception as e:
+        log.warning("reply_text markdown failed, fallback plain: %s", e)
+        plain = (text_md or '').replace('*', '').replace('_', '').replace('`', '')
+        return await emsg.reply_text(plain, reply_markup=reply_markup)
+
+
 async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_text: str):
     """
     Одна строка → тот же старый флоу.
@@ -94,9 +104,9 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         'ml_cat1': cat1,
         'ml_cat2': cat2,
     }
-    msg = await emsg.reply_text(
+    msg = await _safe_reply(
+        emsg,
         f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
-        parse_mode='Markdown',
         reply_markup=_ml_keyboard(cat1, cat2),
     )
     context.user_data['suggest_msg_id'] = msg.message_id
@@ -223,28 +233,32 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             'ml_cat1': cat1,
             'ml_cat2': cat2,
         }
-        msg = await emsg.reply_text(
+        msg = await _safe_reply(
+            emsg,
             f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
-            parse_mode='Markdown',
             reply_markup=_ml_keyboard(cat1, cat2),
         )
         context.user_data['suggest_msg_id'] = msg.message_id
         context.user_data['batch_item_text'] = text
         return
 
-    # ─────────── батч (последовательно) ───────────
-    items = parse_day_list(text)
-    if items:
-        if context.user_data.get('batch_active'):
-            return await emsg.reply_text("⚠️ Введите новый список после завершения текущего.")
-        if len(items) > BATCH_MAX:
-            return await emsg.reply_text(
-                f"⚠️ Слишком длинный список: {len(items)} элементов. Разбейте на части (≤ {BATCH_MAX})."
-            )
-        return await _batch_start(update, context, items)
+    try:
+        # ─────────── батч (последовательно) ───────────
+        items = parse_day_list(text)
+        if items:
+            if context.user_data.get('batch_active'):
+                return await emsg.reply_text("⚠️ Введите новый список после завершения текущего.")
+            if len(items) > BATCH_MAX:
+                return await emsg.reply_text(
+                    f"⚠️ Слишком длинный список: {len(items)} элементов. Разбейте на части (≤ {BATCH_MAX})."
+                )
+            return await _batch_start(update, context, items)
 
-    # основной путь: одна строка
-    return await _process_free_text(update, context, text)
+        # основной путь: одна строка
+        return await _process_free_text(update, context, text)
+    except Exception as e:
+        log.exception("handle_text failed: user=%s text=%r err=%s", cid, text, e)
+        return await emsg.reply_text("Не получилось обработать сообщение. Попробуй ещё раз.")
 
 
 async def handle_location(update, context: ContextTypes.DEFAULT_TYPE):
