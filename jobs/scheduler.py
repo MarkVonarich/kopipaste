@@ -5,8 +5,9 @@ import asyncio
 import logging
 from telegram.ext import ContextTypes
 
-from .daily import day_nudge_job, evening_reminder_job
+from .daily import evening_reminder_job, weekly_report_job, monthly_report_job
 from services.currency import update_fx_rates
+from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER
 
 log = logging.getLogger("finbot.scheduler")
 
@@ -27,11 +28,19 @@ async def fx_update_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_jobs(app):
-    # 1) дневной «пинок» — каждые 5 мин
-    app.job_queue.run_repeating(day_nudge_job, interval=300, first=60, name="day_nudge")
+    # 1) day_nudge intentionally disabled by default
+    if ENABLE_DAY_NUDGE:
+        log.info("day_nudge enabled")
 
     # 2) вечернее — каждые 5 мин
-    app.job_queue.run_repeating(evening_reminder_job, interval=300, first=120, name="evening_reminder")
+    if ENABLE_EVENING_REMINDER:
+        app.job_queue.run_repeating(evening_reminder_job, interval=300, first=120, name="evening_reminder")
 
     # 3) FX — раз в 12 часов
     app.job_queue.run_repeating(fx_update_job, interval=43200, first=180, name="fx_update")
+
+    # 4) Weekly report v1: every 5 minutes, sends only at local Monday 12:00 per user
+    app.job_queue.run_repeating(weekly_report_job, interval=300, first=200, name="weekly_report")
+
+    # 5) Monthly report v1: every 5 minutes, sends only at local day=1 10:00 per user
+    app.job_queue.run_repeating(monthly_report_job, interval=300, first=220, name="monthly_report")

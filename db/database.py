@@ -70,5 +70,8 @@ def pg_exec(sql: str, params=(), commit=True):
             cur.execute(sql, params)
         if commit:
             conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()

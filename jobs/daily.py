@@ -11,7 +11,7 @@ jobs/daily.py — персонализированные напоминания
 
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 
 from telegram.error import Forbidden, BadRequest
 from psycopg2 import OperationalError
@@ -153,6 +153,76 @@ def _local_now(user_id: int) -> datetime:
 def _local_today(user_id: int):
     return _local_now(user_id).date()
 
+
+def _period_from_local_date(user_id: int) -> date:
+    return _local_now(user_id).date()
+
+
+def previous_week_period(today: date) -> tuple[date, date]:
+    this_monday = today - timedelta(days=today.weekday())
+    start = this_monday - timedelta(days=7)
+    end = this_monday - timedelta(days=1)
+    return start, end
+
+
+def previous_month_period(today: date) -> tuple[date, date]:
+    first_this_month = today.replace(day=1)
+    end = first_this_month - timedelta(days=1)
+    start = end.replace(day=1)
+    return start, end
+
+
+def format_money(amount: float | int | None) -> str:
+    if amount is None:
+        amount = 0
+    value = float(amount)
+    if abs(value - int(value)) < 0.005:
+        s = f"{int(round(value)):,}".replace(",", " ")
+    else:
+        s = f"{value:,.2f}".replace(",", " ").replace(".", ",")
+    return f"{s} ₽"
+
+
+def _report_key(kind: str, period_start: date, period_end: date) -> str:
+    return f"{kind}:{period_start.isoformat()}:{period_end.isoformat()}"
+
+
+def _report_already_sent(user_id: int, kind: str, period_start: date, period_end: date) -> bool:
+    key = _report_key(kind, period_start, period_end)
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT 1 FROM public.reminders_log WHERE user_id=%s AND kind=%s LIMIT 1", (user_id, key))
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def _report_mark_sent(user_id: int, kind: str, period_start: date, period_end: date):
+    key = _report_key(kind, period_start, period_end)
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO public.reminders_log (user_id, sent_on, kind, tmpl_id, tag)
+        VALUES (%s, %s, %s, NULL, %s)
+        ON CONFLICT ON CONSTRAINT reminders_log_pkey DO NOTHING
+    """, (user_id, _local_today(user_id), key, kind))
+    conn.commit(); conn.close()
+
+
+def _sum_by_type(user_id: int, start: date, end: date) -> tuple[float, float]:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT
+          COALESCE(SUM(CASE WHEN type='Расходы' THEN amount END), 0),
+          COALESCE(SUM(CASE WHEN type='Доходы' THEN amount END), 0)
+        FROM public.operations
+        WHERE user_id=%s
+          AND op_date BETWEEN %s AND %s
+          AND COALESCE(type,'') <> 'noop'
+          AND COALESCE(category,'') <> 'Без операций'
+    """, (user_id, start, end))
+    row = cur.fetchone() or (0, 0)
+    conn.close()
+    return float(row[0] or 0), float(row[1] or 0)
+
 def _has_ops_today(user_id: int) -> bool:
     conn = get_conn(); cur = conn.cursor()
     cur.execute("""
@@ -292,3 +362,137 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         log.exception("evening_reminder_job db error: %s", e)
     except Exception as e:
         log.exception("evening_reminder_job error: %s", e)
+
+def _top_expense_categories(user_id: int, start: date, end: date, limit_n: int) -> list[tuple[str, float]]:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT category, COALESCE(SUM(amount),0) AS total
+        FROM public.operations
+        WHERE user_id=%s
+          AND op_date BETWEEN %s AND %s
+          AND type='Расходы'
+          AND COALESCE(type,'') <> 'noop'
+          AND COALESCE(category,'') NOT IN ('', 'Без операций')
+        GROUP BY category
+        ORDER BY total DESC
+        LIMIT %s
+    """, (user_id, start, end, limit_n))
+    rows = [(r[0], float(r[1] or 0)) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def _active_users(days: int) -> list[int]:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT user_id
+        FROM public.operations
+        WHERE op_date >= CURRENT_DATE - (%s || ' days')::interval
+    """, (days,))
+    users = [int(r[0]) for r in cur.fetchall() if r[0] is not None]
+    conn.close()
+    return users
+
+
+def build_weekly_report_text(user_id: int, period_start: date, period_end: date) -> str:
+    exp, inc = _sum_by_type(user_id, period_start, period_end)
+    title = f"📊 Итоги недели: {period_start:%d.%m}–{period_end:%d.%m}"
+    if exp == 0 and inc == 0:
+        return f"{title}\n\nЗа прошлую неделю записей не было.\n\nМожно начать с малого: просто напиши боту:\nкофе 250"
+    prev_start = period_start - timedelta(days=7)
+    prev_end = period_end - timedelta(days=7)
+    prev_exp, _ = _sum_by_type(user_id, prev_start, prev_end)
+    if prev_exp > 0:
+        delta = (exp - prev_exp) / prev_exp * 100
+        dyn = f"Расходы на {abs(delta):.0f}% {'выше' if delta > 0 else 'меньше'}, чем неделей ранее."
+    else:
+        dyn = "Неделей ранее расходов не было."
+    tops = _top_expense_categories(user_id, period_start, period_end, 3)
+    tops_text = "\n".join([f"{i+1}. {c} — {format_money(v)}" for i, (c, v) in enumerate(tops)]) or "—"
+    balance = inc - exp
+    return (
+        f"{title}\n\n"
+        f"Расходы: {format_money(exp)}\n"
+        f"Доходы: {format_money(inc)}\n"
+        f"Баланс: {'+' if balance >= 0 else ''}{format_money(balance)}\n\n"
+        f"Топ расходов:\n{tops_text}\n\n"
+        f"Динамика:\n{dyn}"
+    )
+
+
+def build_monthly_report_text(user_id: int, period_start: date, period_end: date) -> str:
+    exp, inc = _sum_by_type(user_id, period_start, period_end)
+    title = f"📊 Итоги месяца: {period_start:%m.%Y}"
+    if exp == 0 and inc == 0:
+        return f"{title}\n\nЗа месяц записей не было.\nКогда вернёшься к учёту, я снова соберу отчёт автоматически."
+    prev_end = period_start - timedelta(days=1)
+    prev_start = prev_end.replace(day=1)
+    prev_exp, _ = _sum_by_type(user_id, prev_start, prev_end)
+    if prev_exp > 0:
+        delta = (exp - prev_exp) / prev_exp * 100
+        dyn = f"Расходы на {abs(delta):.0f}% {'выше' if delta > 0 else 'меньше'}, чем в прошлом месяце."
+    else:
+        dyn = "Месяцем ранее расходов не было."
+    tops = _top_expense_categories(user_id, period_start, period_end, 5)
+    tops_text = "\n".join([f"{i+1}. {c} — {format_money(v)}" for i, (c, v) in enumerate(tops)]) or "—"
+    balance = inc - exp
+    return (
+        f"{title}\n\n"
+        f"Расходы: {format_money(exp)}\n"
+        f"Доходы: {format_money(inc)}\n"
+        f"Баланс: {'+' if balance >= 0 else ''}{format_money(balance)}\n\n"
+        f"Топ расходов:\n{tops_text}\n\n"
+        f"Динамика:\n{dyn}"
+    )
+
+
+async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        _ensure_tables()
+        for uid in _active_users(14):
+            now_loc = _local_now(uid)
+            today = now_loc.date()
+            if today.weekday() != 0 or now_loc.hour != 12:
+                continue
+            start, end = previous_week_period(today)
+            if _report_already_sent(uid, "weekly_report", start, end):
+                continue
+            text = build_weekly_report_text(uid, start, end)
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                _report_mark_sent(uid, "weekly_report", start, end)
+            except (Forbidden, BadRequest) as e:
+                log.info("weekly report: skip %s: %s", uid, e)
+            except Exception as e:
+                log.exception("weekly report: send error for %s: %s", uid, e)
+    except OperationalError as e:
+        if _is_too_many_clients(e):
+            log.warning("weekly_report_job backoff: %s", e)
+            return
+        log.exception("weekly_report_job db error: %s", e)
+
+
+async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        _ensure_tables()
+        for uid in _active_users(45):
+            now_loc = _local_now(uid)
+            today = now_loc.date()
+            if today.day != 1 or now_loc.hour != 10:
+                continue
+            start, end = previous_month_period(today)
+            if _report_already_sent(uid, "monthly_report", start, end):
+                continue
+            text = build_monthly_report_text(uid, start, end)
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                _report_mark_sent(uid, "monthly_report", start, end)
+            except (Forbidden, BadRequest) as e:
+                log.info("monthly report: skip %s: %s", uid, e)
+            except Exception as e:
+                log.exception("monthly report: send error for %s: %s", uid, e)
+    except OperationalError as e:
+        if _is_too_many_clients(e):
+            log.warning("monthly_report_job backoff: %s", e)
+            return
+        log.exception("monthly_report_job db error: %s", e)
