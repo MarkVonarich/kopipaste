@@ -1,0 +1,24 @@
+                                                                               Table "public.action_tokens"
+   Column   |           Type           | Collation | Nullable |                  Default                  | Storage  | Compression | Stats target |              Description               
+------------+--------------------------+-----------+----------+-------------------------------------------+----------+-------------+--------------+----------------------------------------
+ id         | bigint                   |           | not null | nextval('action_tokens_id_seq'::regclass) | plain    |             |              | PK
+ user_id    | bigint                   |           | not null |                                           | plain    |             |              | ID пользователя
+ chat_id    | bigint                   |           | not null |                                           | plain    |             |              | ID чата
+ payload    | jsonb                    |           | not null |                                           | extended |             |              | JSON-полезная нагрузка (для сценариев)
+ created_at | timestamp with time zone |           | not null | now()                                     | plain    |             |              | Когда создано
+ status     | text                     |           | not null | 'draft'::text                             | extended |             |              | 
+ used_at    | timestamp with time zone |           |          |                                           | plain    |             |              | 
+ op_id      | bigint                   |           |          |                                           | plain    |             |              | 
+ expires_at | timestamp with time zone |           |          | now() + '00:10:00'::interval              | plain    |             |              | 
+Indexes:
+    "action_tokens_pkey" PRIMARY KEY, btree (id)
+    "action_tokens_created_at_idx" btree (created_at)
+    "idx_action_tokens_chat_created_at" btree (chat_id, created_at)
+    "idx_action_tokens_created_at" btree (created_at)
+    "idx_action_tokens_expires_at" btree (expires_at)
+    "idx_action_tokens_status_created_at" btree (status, created_at)
+    "idx_action_tokens_user_created" btree (user_id, created_at DESC)
+Check constraints:
+    "action_tokens_status_check" CHECK (status = ANY (ARRAY['draft'::text, 'committed'::text, 'cancelled'::text, 'expired'::text]))
+Access method: heap
+
