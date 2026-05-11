@@ -3,6 +3,14 @@ __version__ = "2026.01.04-01"
 
 import os
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 def _required(name: str) -> str:
     v = os.getenv(name)
     if not v:
