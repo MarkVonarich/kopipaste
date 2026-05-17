@@ -43,3 +43,6 @@ All further changes follow:
 - `fx_update` remains active.
 - Added weekly report job (Monday 12:00 local per user) and monthly report job (day 1, 10:00 local per user).
 - Dedup implemented without schema changes via `reminders_log.kind` period keys (`weekly_report:<start>:<end>`, `monthly_report:<start>:<end>`).
+
+- Added notifications screen and smart morning limit toggle (per-user opt-in via reminders_log events, default off).
+- Added smart_morning_limit scheduler job; day_nudge remains disabled.

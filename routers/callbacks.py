@@ -11,7 +11,8 @@ from db.queries import (
     set_category_limit, get_category_limit, list_category_limits, delete_category_limit,
     get_user_tz, log_category_feedback, insert_ml_observation,
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
-    resolve_limit_conflict_replace, delete_limit_by_key
+    resolve_limit_conflict_replace, delete_limit_by_key,
+    get_smart_morning_limits_enabled, set_smart_morning_limits_enabled
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
@@ -398,12 +399,42 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
              InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
+            [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
             [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
             [InlineKeyboardButton('1️⃣ Установить бюджет', callback_data='menu_set_budget')],
             [InlineKeyboardButton('📉 Лимиты по категориям', callback_data='cl_menu')],
             [InlineKeyboardButton('◀️ Назад', callback_data='start_main')],
         ])
         return await q.edit_message_text('⚙️ Настройки:', reply_markup=kb)
+
+    if data == 'menu_notifications':
+        morning_enabled = get_smart_morning_limits_enabled(cid)
+        morning_row = '🌤 Утро: включено' if morning_enabled else '🌤 Утро: выключено'
+        toggle_btn = '⛔ Выключить утро' if morning_enabled else '🌤 Включить утро'
+        toggle_cb = 'notif_morning_off' if morning_enabled else 'notif_morning_on'
+        text = (
+            '🔔 Оповещения\n\n'
+            '🌙 Вечер: включено\n'
+            f'{morning_row}\n'
+            '📊 Отчёты: включены'
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(toggle_btn, callback_data=toggle_cb)],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+        ])
+        return await q.edit_message_text(text, reply_markup=kb)
+
+    if data == 'notif_morning_on':
+        set_smart_morning_limits_enabled(cid, True)
+        await q.answer('Утренние лимиты включены')
+        q.data = 'menu_notifications'
+        return await callback_handler(update, context)
+
+    if data == 'notif_morning_off':
+        set_smart_morning_limits_enabled(cid, False)
+        await q.answer('Утренние лимиты выключены')
+        q.data = 'menu_notifications'
+        return await callback_handler(update, context)
 
     # Валюта
     if data == 'menu_currency':

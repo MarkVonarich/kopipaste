@@ -7,6 +7,34 @@ from psycopg2.extras import Json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
 
+
+def set_smart_morning_limits_enabled(user_id: int, enabled: bool):
+    kind = 'smart_morning_opt_in' if enabled else 'smart_morning_opt_out'
+    pg_exec(
+        """
+        INSERT INTO public.reminders_log (user_id, sent_on, kind, tmpl_id, tag)
+        VALUES (%s, CURRENT_DATE, %s, NULL, 'settings_toggle')
+        """,
+        (user_id, kind)
+    )
+
+
+def get_smart_morning_limits_enabled(user_id: int) -> bool:
+    rows = pg_fetchall(
+        """
+        SELECT kind
+        FROM public.reminders_log
+        WHERE user_id=%s
+          AND kind IN ('smart_morning_opt_in', 'smart_morning_opt_out')
+        ORDER BY sent_at DESC
+        LIMIT 1
+        """,
+        (user_id,)
+    )
+    if not rows:
+        return False
+    return rows[0][0] == 'smart_morning_opt_in'
+
 def ensure_user(user_id: int) -> bool:
     conn = get_conn()
     try:

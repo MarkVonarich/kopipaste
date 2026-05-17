@@ -46,6 +46,7 @@ async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
          InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
+        [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
         [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
         [InlineKeyboardButton('1️⃣ Установить бюджет', callback_data='menu_set_budget')],
         [InlineKeyboardButton('◀️ В меню', callback_data='start_main')],

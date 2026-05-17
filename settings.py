@@ -53,3 +53,4 @@ def _parse_bool(name: str, default: bool) -> bool:
 
 ENABLE_DAY_NUDGE = _parse_bool("ENABLE_DAY_NUDGE", False)
 ENABLE_EVENING_REMINDER = _parse_bool("ENABLE_EVENING_REMINDER", True)
+ENABLE_SMART_MORNING_LIMITS = _parse_bool("ENABLE_SMART_MORNING_LIMITS", True)

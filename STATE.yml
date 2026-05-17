@@ -59,3 +59,9 @@ notifications_v1:
     - monthly_report
   dedup_strategy: reminders_log_kind_with_period_key
   db_migration_required: false
+
+stage_2_5_1_a:
+  notifications_menu: true
+  smart_morning_toggle_storage: reminders_log_opt_in_out_events
+  smart_morning_job: smart_morning_limit
+  day_nudge_registered: false

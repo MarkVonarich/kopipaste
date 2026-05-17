@@ -5,7 +5,7 @@ import asyncio
 import logging
 from telegram.ext import ContextTypes
 
-from .daily import evening_reminder_job, weekly_report_job, monthly_report_job
+from .daily import evening_reminder_job, weekly_report_job, monthly_report_job, smart_morning_limit_job
 from services.currency import update_fx_rates
 from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER
 
@@ -44,3 +44,6 @@ def register_jobs(app):
 
     # 5) Monthly report v1: every 5 minutes, sends only at local day=1 10:00 per user
     app.job_queue.run_repeating(monthly_report_job, interval=300, first=220, name="monthly_report")
+
+    # 6) Smart morning limits: every 5 minutes, sends only in local 09:00-11:00 window
+    app.job_queue.run_repeating(smart_morning_limit_job, interval=300, first=240, name="smart_morning_limit")

@@ -19,6 +19,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from db.database import get_conn
+from db.queries import list_category_limits, get_smart_morning_limits_enabled
+from settings import ENABLE_SMART_MORNING_LIMITS
 
 log = logging.getLogger("finbot.daily")
 
@@ -496,3 +498,104 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
             log.warning("monthly_report_job backoff: %s", e)
             return
         log.exception("monthly_report_job db error: %s", e)
+
+
+def _has_recent_activity(user_id: int, days: int) -> bool:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT 1 FROM public.operations WHERE user_id=%s AND op_date >= CURRENT_DATE - (%s || ' days')::interval LIMIT 1", (user_id, days))
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def _current_period_bounds(local_today: date, period: str) -> tuple[date, date, int, int]:
+    if period == 'week':
+        start = local_today - timedelta(days=local_today.weekday())
+        end = start + timedelta(days=6)
+    else:
+        start = local_today.replace(day=1)
+        nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = nxt - timedelta(days=1)
+    total = (end - start).days + 1
+    elapsed = (local_today - start).days + 1
+    return start, end, elapsed, total
+
+
+def _spent_in_period(user_id: int, category: str, start: date, end: date) -> float:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("""
+      SELECT COALESCE(SUM(amount),0)
+      FROM public.operations
+      WHERE user_id=%s AND type='Расходы' AND category=%s AND op_date BETWEEN %s AND %s
+        AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
+    """, (user_id, category, start, end))
+    v = float((cur.fetchone() or [0])[0] or 0)
+    conn.close()
+    return v
+
+
+def _build_smart_morning_text(user_id: int, local_today: date):
+    limits = list_category_limits(user_id)
+    if not limits:
+        return None
+    picks = []
+    for period, amount, currency, category in limits:
+        if period not in ('week', 'month') or not amount:
+            continue
+        start, end, elapsed, total = _current_period_bounds(local_today, period)
+        spent = _spent_in_period(user_id, category, start, end)
+        remaining = amount - spent
+        days_left = max(1, (end - local_today).days + 1)
+        safe_today = max(0.0, remaining / days_left)
+        spent_ratio = spent / amount if amount else 0.0
+        expected_progress = elapsed / total if total else 1.0
+        if (remaining <= 0) or (spent_ratio >= 0.8 and days_left >= 2) or (safe_today <= 500) or (spent_ratio >= expected_progress + 0.25):
+            picks.append((category, period, remaining, safe_today, spent_ratio))
+    if not picks:
+        return None
+    category, period, remaining, safe_today, spent_ratio = sorted(picks, key=lambda x: (x[2], x[3]))[0]
+    hdr = "🌤 Утренний ориентир" if remaining <= 0 else "🌤 Лимиты на сегодня"
+    if remaining <= 0:
+        line1 = f"{category}: лимит уже превышен на {format_money(abs(remaining))}."
+    else:
+        line1 = f"{category}: безопасно ≈ {format_money(safe_today)} в день."
+    line2 = f"Использовано {spent_ratio*100:.0f}% {'недельного' if period=='week' else 'месячного'} лимита."
+    return f"{hdr}\n\n{line1}\n{line2}\n\nКоротко: сегодня лучше держать эту категорию спокойно."
+
+
+async def smart_morning_limit_job(context: ContextTypes.DEFAULT_TYPE):
+    if not ENABLE_SMART_MORNING_LIMITS:
+        return
+    try:
+        _ensure_tables()
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT user_id FROM public.users")
+        users = [r[0] for r in cur.fetchall()]
+        conn.close()
+        for uid in users:
+            if not get_smart_morning_limits_enabled(uid):
+                continue
+            now_loc = _local_now(uid)
+            if not (9 <= now_loc.hour <= 11):
+                continue
+            if _already_sent_today(uid, 'smart_morning_limit'):
+                continue
+            if not _has_recent_activity(uid, 14):
+                continue
+            text = _build_smart_morning_text(uid, now_loc.date())
+            if not text:
+                continue
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                _log_sent(uid, 'smart_morning_limit', None, 'limits')
+            except (Forbidden, BadRequest) as e:
+                log.info("smart morning: skip %s: %s", uid, e)
+            except Exception as e:
+                log.exception("smart morning: send error for %s: %s", uid, e)
+    except OperationalError as e:
+        if _is_too_many_clients(e):
+            log.warning("smart_morning_limit_job backoff: %s", e)
+            return
+        log.exception("smart_morning_limit_job db error: %s", e)
+    except Exception as e:
+        log.exception("smart_morning_limit_job error: %s", e)
