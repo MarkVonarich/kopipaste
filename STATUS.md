@@ -46,3 +46,5 @@ All further changes follow:
 
 - Added notifications screen and smart morning limit toggle (per-user opt-in via reminders_log events, default off).
 - Added smart_morning_limit scheduler job; day_nudge remains disabled.
+
+- Stage 2.5.1-B: limit card now shows spent/remaining and has quick adjust buttons (-1000/-500/+500/+1000) using short token callbacks.

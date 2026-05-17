@@ -12,7 +12,8 @@ from db.queries import (
     get_user_tz, log_category_feedback, insert_ml_observation,
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
-    get_smart_morning_limits_enabled, set_smart_morning_limits_enabled
+    get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
+    get_limit_spent, adjust_limit_amount
 )
 from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
@@ -105,13 +106,20 @@ def _lim_parse_key(user_id: int, payload: str):
 def _lim_card_kb(period: str, category: str):
     key = _lim_key(period, category)
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton('−1000', callback_data=f'lim_adj|{key}|m1000'),
+         InlineKeyboardButton('−500', callback_data=f'lim_adj|{key}|m500'),
+         InlineKeyboardButton('+500', callback_data=f'lim_adj|{key}|p500'),
+         InlineKeyboardButton('+1000', callback_data=f'lim_adj|{key}|p1000')],
         [InlineKeyboardButton('✏️ Изменить сумму', callback_data=f'lim_edit_amount|{key}')],
         [InlineKeyboardButton('🗓 Неделя', callback_data=f'lim_edit_period|{key}|week'),
          InlineKeyboardButton('🗓 Месяц', callback_data=f'lim_edit_period|{key}|month')],
         [InlineKeyboardButton('🗑 Удалить', callback_data=f'lim_del|{key}')],
-        [InlineKeyboardButton('🔕 Mute (скоро)', callback_data='lim_mute_soon')],
         [InlineKeyboardButton('⬅️ Назад', callback_data='lim_list')],
     ])
+
+
+def _fmt_money(v: int) -> str:
+    return f"{int(v):,}".replace(',', ' ') + ' ₽'
 
 
 async def _lim_show_list(q, user_id: int):
@@ -156,11 +164,14 @@ async def _lim_show_card(q, user_id: int, period: str, category: str, note: str 
         return await q.edit_message_text('Лимит не найден или уже изменён.', reply_markup=kb)
 
     log.info('open_limit user=%s period=%s category=%s amount=%s', user_id, period, category, row['amount'])
+    spent = get_limit_spent(user_id, row['period'], row['category'])
+    remaining = int(row['amount']) - int(spent)
     text = (
-        f"📌 *Лимит*\n"
-        f"Категория: *{_md_escape(row['category'])}*\n"
-        f"Период: *{_lim_period_label(row['period'])}*\n"
-        f"Сумма: *{row['amount']} {row['currency']}*"
+        f"*{_md_escape(row['category'])}*\n"
+        f"{_lim_period_label(row['period'])}\n"
+        f"Лимит: {_fmt_money(int(row['amount']))}\n"
+        f"Потрачено: {_fmt_money(int(spent))}\n"
+        f"Осталось: {_fmt_money(int(remaining))}"
     )
     if note:
         text += f"\n\n{note}"
@@ -602,6 +613,33 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=kb,
         )
+
+    if data.startswith('lim_adj|'):
+        try:
+            _, token, op = data.split('|', 2)
+        except ValueError:
+            log.warning('lim_adj bad payload user=%s data=%s', cid, data)
+            return await _lim_show_list(q, cid)
+        period, category = _lim_parse_key(cid, token)
+        if not period:
+            log.info('lim_adj invalid token user=%s token=%s', cid, token)
+            return await _lim_show_list(q, cid)
+        delta_map = {'p500': 500, 'p1000': 1000, 'm500': -500, 'm1000': -1000}
+        delta = delta_map.get(op)
+        if delta is None:
+            log.warning('lim_adj invalid op user=%s op=%s', cid, op)
+            return await _lim_show_card(q, cid, period, category)
+        res = adjust_limit_amount(cid, period, category, delta)
+        if res.get('status') == 'too_small':
+            return await q.answer('Лимит не может быть меньше 1 ₽', show_alert=True)
+        if res.get('status') == 'too_big':
+            return await q.answer('Слишком большой лимит', show_alert=True)
+        if res.get('status') != 'ok':
+            log.info('lim_adj not ok user=%s period=%s category=%s status=%s', cid, period, category, res.get('status'))
+            return await _lim_show_list(q, cid)
+        log.info('lim_adj ok user=%s period=%s category=%s delta=%s old=%s new=%s', cid, period, category, delta, res.get('old_amount'), res.get('new_amount'))
+        await q.answer(f"Готово: {_fmt_money(int(res.get('new_amount', 0)))}")
+        return await _lim_show_card(q, cid, period, category)
 
     if data.startswith('lim_edit_period|'):
         rest = data.split('|', 1)[1]

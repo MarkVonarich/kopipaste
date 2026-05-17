@@ -2,7 +2,7 @@
 __version__ = "2025.08.30-limits"
 
 from typing import Optional, Tuple, List
-from datetime import date
+from datetime import date, timedelta
 from psycopg2.extras import Json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
@@ -386,6 +386,42 @@ def update_limit_amount(user_id: int, period: str, category: str, amount: int):
          WHERE user_id=%s AND period=%s AND category=%s
     """, (int(amount), user_id, period, category))
     return get_limit_by_key(user_id, period, category)
+
+
+def get_limit_spent(user_id: int, period: str, category: str, today: Optional[date] = None) -> int:
+    today = today or date.today()
+    if period == 'week':
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+    else:
+        start = today.replace(day=1)
+        nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = nxt - timedelta(days=1)
+    rows = pg_fetchall("""
+        SELECT COALESCE(SUM(amount), 0)
+        FROM public.operations
+        WHERE user_id=%s
+          AND type='Расходы'
+          AND category=%s
+          AND op_date BETWEEN %s AND %s
+          AND COALESCE(type,'') <> 'noop'
+          AND COALESCE(category,'') <> 'Без операций'
+    """, (user_id, category, start, end))
+    return int(rows[0][0] if rows else 0)
+
+
+def adjust_limit_amount(user_id: int, period: str, category: str, delta: int):
+    row = get_limit_by_key(user_id, period, category)
+    if not row:
+        return {'status': 'not_found'}
+    old_amount = int(row['amount'])
+    new_amount = old_amount + int(delta)
+    if new_amount <= 0:
+        return {'status': 'too_small', 'old_amount': old_amount, 'new_amount': new_amount}
+    if new_amount >= 1_000_000_000:
+        return {'status': 'too_big', 'old_amount': old_amount, 'new_amount': new_amount}
+    updated = update_limit_amount(user_id, period, category, new_amount)
+    return {'status': 'ok', 'old_amount': old_amount, 'new_amount': new_amount, 'limit': updated}
 
 
 def update_limit_period(user_id: int, old_period: str, category: str, new_period: str):

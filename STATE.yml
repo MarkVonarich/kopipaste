@@ -65,3 +65,9 @@ stage_2_5_1_a:
   smart_morning_toggle_storage: reminders_log_opt_in_out_events
   smart_morning_job: smart_morning_limit
   day_nudge_registered: false
+
+stage_2_5_1_b:
+  quick_limit_adjust_buttons: true
+  callback_short_tokens_reused: true
+  button_data_invalid_risk: minimized
+  db_migration_required: false
