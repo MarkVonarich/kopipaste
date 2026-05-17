@@ -12,6 +12,7 @@ from services.ml_train import train_model
 from ui.keyboards import main_menu_kb
 from services.onboarding import onboarding_welcome
 from settings import ADMIN_USER_IDS
+from jobs.daily import previous_week_period, previous_month_period, build_weekly_report_text, build_monthly_report_text, _build_smart_morning_text
 
 
 async def on_startup(app):
@@ -29,6 +30,9 @@ async def on_startup(app):
         BotCommand('about', 'О боте и зачем он нужен'),
         BotCommand('mlstats', 'ML-статистика top1/top2'),
         BotCommand('mltrain', 'Обучить ML модель (admin)'),
+        BotCommand('admin_weekly_report_preview', 'Превью недельного отчёта (admin)'),
+        BotCommand('admin_monthly_report_preview', 'Превью месячного отчёта (admin)'),
+        BotCommand('admin_smart_morning_preview', 'Превью утреннего лимит-сигнала (admin)'),
     ])
 
 
@@ -167,3 +171,37 @@ async def cmd_limits(update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton('📌 Мои лимиты', callback_data='lim_list')],
     ])
     await update.message.reply_text('📌 Управление лимитами', reply_markup=kb)
+
+
+def _is_admin(update) -> bool:
+    uid = update.effective_user.id if update.effective_user else 0
+    return uid in ADMIN_USER_IDS
+
+
+async def cmd_admin_weekly_report_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    uid = update.effective_user.id
+    today = datetime.utcnow().date()
+    start, end = previous_week_period(today)
+    txt = build_weekly_report_text(uid, start, end)
+    await update.message.reply_text("[PREVIEW] Недельный отчёт\n\n" + txt)
+
+
+async def cmd_admin_monthly_report_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    uid = update.effective_user.id
+    today = datetime.utcnow().date()
+    start, end = previous_month_period(today)
+    txt = build_monthly_report_text(uid, start, end)
+    await update.message.reply_text("[PREVIEW] Месячный отчёт\n\n" + txt)
+
+
+async def cmd_admin_smart_morning_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    uid = update.effective_user.id
+    today = datetime.utcnow().date()
+    txt = _build_smart_morning_text(uid, today) or "Сигналов по лимитам сейчас нет."
+    await update.message.reply_text("[PREVIEW] Утренний лимит-сигнал\n\n" + txt)

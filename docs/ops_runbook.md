@@ -34,3 +34,32 @@ PY
 
 ## 6) Safety warning
 - Never run old and new servers simultaneously with the same Telegram token.
+
+## 7) Scheduler jobs and feature-flag diagnostics
+```bash
+SINCE_NO_TZ="$(systemctl show -p ActiveEnterTimestamp finuchet | cut -d= -f2- | sed 's/ UTC$//' | sed 's/ MSK$//')"
+journalctl -u finuchet --since "$SINCE_NO_TZ" --no-pager | egrep -i "scheduler flags|Added job|Skipped job|day_nudge|evening_reminder|weekly_report|monthly_report|smart_morning_limit|fx_update|Scheduler started|Application started"
+```
+
+## 8) Report/smart-morning dedup and toggle rows
+```bash
+sudo -u postgres psql -P pager=off -d finance_bot -c "
+SELECT user_id, sent_on, kind, tag, sent_at
+FROM public.reminders_log
+WHERE kind LIKE 'weekly_report:%'
+   OR kind LIKE 'monthly_report:%'
+   OR kind IN ('smart_morning_limit','smart_morning_opt_in','smart_morning_opt_out')
+ORDER BY sent_at DESC
+LIMIT 50;
+"
+```
+
+## 9) Limits state snapshot
+```bash
+sudo -u postgres psql -P pager=off -d finance_bot -c "
+SELECT user_id, period, category, amount, currency, updated_at
+FROM public.category_limits
+ORDER BY updated_at DESC
+LIMIT 50;
+"
+```

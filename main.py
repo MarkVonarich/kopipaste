@@ -17,7 +17,11 @@ from telegram.ext import (
 from logging_config import setup_logging
 from settings import TELEGRAM_TOKEN
 
-from routers.commands import cmd_start, cmd_settings, cmd_budget, cmd_export, cmd_about, cmd_limits, cmd_mlstats, cmd_mltrain, on_startup
+from routers.commands import (
+    cmd_start, cmd_settings, cmd_budget, cmd_export, cmd_about, cmd_limits,
+    cmd_mlstats, cmd_mltrain, on_startup,
+    cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
+)
 from routers.callbacks import callback_handler
 from routers.messages import handle_text, handle_location
 from jobs.scheduler import register_jobs
@@ -61,6 +65,9 @@ def main():
     app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CommandHandler("mlstats", cmd_mlstats))
     app.add_handler(CommandHandler("mltrain", cmd_mltrain))
+    app.add_handler(CommandHandler("admin_weekly_report_preview", cmd_admin_weekly_report_preview))
+    app.add_handler(CommandHandler("admin_monthly_report_preview", cmd_admin_monthly_report_preview))
+    app.add_handler(CommandHandler("admin_smart_morning_preview", cmd_admin_smart_morning_preview))
 
     # ✅ patterns ^sugg_… раньше общего callback_handler
     register_suggestions(app)

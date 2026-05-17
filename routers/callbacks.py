@@ -427,7 +427,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             '🔔 Оповещения\n\n'
             '🌙 Вечер: включено\n'
             f'{morning_row}\n'
-            '📊 Отчёты: включены'
+            '📊 Отчёты: включены\n\n'
+            'Утро — только когда по лимитам есть полезный сигнал.'
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(toggle_btn, callback_data=toggle_cb)],

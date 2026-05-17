@@ -451,22 +451,33 @@ def build_monthly_report_text(user_id: int, period_start: date, period_end: date
 async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         _ensure_tables()
-        for uid in _active_users(14):
+        users = _active_users(14)
+        if not users:
+            log.info('weekly_report: no active users (14d)')
+            return
+        skipped_hour = 0
+        skipped_dedup = 0
+        sent = 0
+        for uid in users:
             now_loc = _local_now(uid)
             today = now_loc.date()
             if today.weekday() != 0 or now_loc.hour != 12:
+                skipped_hour += 1
                 continue
             start, end = previous_week_period(today)
             if _report_already_sent(uid, "weekly_report", start, end):
+                skipped_dedup += 1
                 continue
             text = build_weekly_report_text(uid, start, end)
             try:
                 await context.bot.send_message(chat_id=uid, text=text)
                 _report_mark_sent(uid, "weekly_report", start, end)
+                sent += 1
             except (Forbidden, BadRequest) as e:
-                log.info("weekly report: skip %s: %s", uid, e)
+                log.info("weekly report: skip telegram uid=%s err=%s", uid, e)
             except Exception as e:
                 log.exception("weekly report: send error for %s: %s", uid, e)
+        log.info('weekly_report: sent=%s skipped_not_target_time=%s skipped_dedup=%s', sent, skipped_hour, skipped_dedup)
     except OperationalError as e:
         if _is_too_many_clients(e):
             log.warning("weekly_report_job backoff: %s", e)
@@ -477,22 +488,33 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
 async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         _ensure_tables()
-        for uid in _active_users(45):
+        users = _active_users(45)
+        if not users:
+            log.info('monthly_report: no active users (45d)')
+            return
+        skipped_day_hour = 0
+        skipped_dedup = 0
+        sent = 0
+        for uid in users:
             now_loc = _local_now(uid)
             today = now_loc.date()
             if today.day != 1 or now_loc.hour != 10:
+                skipped_day_hour += 1
                 continue
             start, end = previous_month_period(today)
             if _report_already_sent(uid, "monthly_report", start, end):
+                skipped_dedup += 1
                 continue
             text = build_monthly_report_text(uid, start, end)
             try:
                 await context.bot.send_message(chat_id=uid, text=text)
                 _report_mark_sent(uid, "monthly_report", start, end)
+                sent += 1
             except (Forbidden, BadRequest) as e:
-                log.info("monthly report: skip %s: %s", uid, e)
+                log.info("monthly report: skip telegram uid=%s err=%s", uid, e)
             except Exception as e:
                 log.exception("monthly report: send error for %s: %s", uid, e)
+        log.info('monthly_report: sent=%s skipped_not_target_time=%s skipped_dedup=%s', sent, skipped_day_hour, skipped_dedup)
     except OperationalError as e:
         if _is_too_many_clients(e):
             log.warning("monthly_report_job backoff: %s", e)
@@ -565,6 +587,7 @@ def _build_smart_morning_text(user_id: int, local_today: date):
 
 async def smart_morning_limit_job(context: ContextTypes.DEFAULT_TYPE):
     if not ENABLE_SMART_MORNING_LIMITS:
+        log.info('smart_morning: skipped by feature flag')
         return
     try:
         _ensure_tables()
@@ -572,26 +595,45 @@ async def smart_morning_limit_job(context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT user_id FROM public.users")
         users = [r[0] for r in cur.fetchall()]
         conn.close()
+        if not users:
+            log.info('smart_morning: no users in users table')
+            return
+        skipped_disabled = 0
+        skipped_time = 0
+        skipped_dedup = 0
+        skipped_activity = 0
+        skipped_no_signal = 0
+        sent = 0
         for uid in users:
             if not get_smart_morning_limits_enabled(uid):
+                skipped_disabled += 1
                 continue
             now_loc = _local_now(uid)
             if not (9 <= now_loc.hour <= 11):
+                skipped_time += 1
                 continue
             if _already_sent_today(uid, 'smart_morning_limit'):
+                skipped_dedup += 1
                 continue
             if not _has_recent_activity(uid, 14):
+                skipped_activity += 1
                 continue
             text = _build_smart_morning_text(uid, now_loc.date())
             if not text:
+                skipped_no_signal += 1
                 continue
             try:
                 await context.bot.send_message(chat_id=uid, text=text)
                 _log_sent(uid, 'smart_morning_limit', None, 'limits')
+                sent += 1
             except (Forbidden, BadRequest) as e:
                 log.info("smart morning: skip %s: %s", uid, e)
             except Exception as e:
                 log.exception("smart morning: send error for %s: %s", uid, e)
+        log.info(
+            'smart_morning: sent=%s skipped_disabled=%s skipped_not_target_hour=%s skipped_dedup=%s skipped_no_activity=%s skipped_no_signal=%s',
+            sent, skipped_disabled, skipped_time, skipped_dedup, skipped_activity, skipped_no_signal,
+        )
     except OperationalError as e:
         if _is_too_many_clients(e):
             log.warning("smart_morning_limit_job backoff: %s", e)
