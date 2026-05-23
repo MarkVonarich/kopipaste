@@ -214,6 +214,9 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         if not result.configured:
             return await emsg.reply_text('Фото получил, но распознавание пока не настроено на сервере.')
 
+        if result.warning in {'provider_error', 'image_too_large', 'openai_pkg_missing'}:
+            return await emsg.reply_text('Не смог распознать фото. Попробуй ещё раз или пришли скрин крупнее.')
+
         if not result.candidates:
             return await emsg.reply_text('Не удалось уверенно извлечь операции с этого изображения. Попробуй фото покрупнее.')
 

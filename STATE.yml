@@ -109,3 +109,12 @@ stage_receipt_import_v1:
   no_auto_write_without_confirmation: true
   fallback_when_unconfigured: true
   db_migration_required: false
+
+stage_receipt_ocr_openai_v1:
+  provider: openai
+  env:
+    - RECEIPT_OCR_PROVIDER
+    - RECEIPT_OCR_API_KEY
+    - RECEIPT_OCR_MODEL
+  confirm_required_before_write: true
+  db_migration_required: false
