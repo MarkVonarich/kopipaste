@@ -95,3 +95,10 @@ stage_personal_quick_actions_v1_1:
   default_enabled_without_event: true
   per_item_hide_supported: false
   db_migration_required: false
+
+stage_2_7_budgets_hub:
+  in_settings: true
+  legacy_budget_command_redirect: true
+  active_budget_table: public.budgets
+  supports_week_month: true
+  db_migration_required: false

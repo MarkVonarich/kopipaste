@@ -14,7 +14,6 @@ from db.queries import (
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
     get_limit_spent, adjust_limit_amount, record_category_confirmation
-    ,get_quick_suggestions_enabled, set_quick_suggestions_enabled
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from ui.keyboards import ml_top2_kb
@@ -23,6 +22,58 @@ from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 
 log = logging.getLogger(__name__)
+
+
+def _fmt_money(v: int) -> str:
+    return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+def _budget_spent(user_id: int, period: str) -> int:
+    today = date.today()
+    if period == 'week':
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+    else:
+        start = today.replace(day=1)
+        nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = nxt - timedelta(days=1)
+    rows = pg_fetchall("""
+      SELECT COALESCE(SUM(amount),0)
+      FROM public.operations
+      WHERE user_id=%s AND type='Расходы' AND op_date BETWEEN %s AND %s
+        AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
+    """, (user_id, start, end))
+    return int(rows[0][0] if rows else 0)
+
+
+def _budgets_hub_text(user_id: int) -> str:
+    wl, ml = get_user_budgets(user_id)
+    active_limits = len(list_user_limits(user_id))
+    if not wl and not ml:
+        return (
+            '💰 Бюджеты\n\n'
+            'Общий бюджет пока не задан.\n\n'
+            'Бюджет помогает понять, сколько можно безопасно тратить за неделю или месяц.'
+        )
+    lines = ['💰 Бюджеты', '', 'Общий бюджет:']
+    if ml:
+        spent = _budget_spent(user_id, 'month')
+        rem = ml - spent
+        lines += [f"Месяц — {_fmt_money(ml)}", f"Потрачено — {_fmt_money(spent)}", (f"Осталось — {_fmt_money(rem)}" if rem >= 0 else f"Перерасход — {_fmt_money(abs(rem))}")]
+    if wl:
+        spent_w = _budget_spent(user_id, 'week')
+        rem_w = wl - spent_w
+        lines += ['', f"Неделя — {_fmt_money(wl)}", f"Потрачено — {_fmt_money(spent_w)}", (f"Осталось — {_fmt_money(rem_w)}" if rem_w >= 0 else f"Перерасход — {_fmt_money(abs(rem_w))}")]
+    lines += ['', f'Лимиты категорий:\n{active_limits} активных лимита']
+    return '\n'.join(lines)
+
+
+def _budgets_hub_kb(has_any: bool):
+    rows = [[InlineKeyboardButton('➕ Добавить бюджет', callback_data='bud_add')]]
+    if has_any:
+        rows += [[InlineKeyboardButton('✏️ Изменить', callback_data='bud_edit')], [InlineKeyboardButton('🗑 Удалить', callback_data='bud_del')]]
+    rows += [[InlineKeyboardButton('📂 Лимиты категорий', callback_data='lim_list')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]]
+    return InlineKeyboardMarkup(rows)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
@@ -411,13 +462,136 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
              InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
             [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
-            [InlineKeyboardButton('⚡ Быстрые записи', callback_data='menu_quick_suggestions')],
+            [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets')],
             [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
-            [InlineKeyboardButton('1️⃣ Установить бюджет', callback_data='menu_set_budget')],
             [InlineKeyboardButton('📉 Лимиты по категориям', callback_data='cl_menu')],
             [InlineKeyboardButton('◀️ Назад', callback_data='start_main')],
         ])
         return await q.edit_message_text('⚙️ Настройки:', reply_markup=kb)
+
+    if data == 'settings_budgets':
+        wl, ml = get_user_budgets(cid)
+        has_any = bool((wl or 0) > 0 or (ml or 0) > 0)
+        return await _safe_edit_or_reply(q, _budgets_hub_text(cid), reply_markup=_budgets_hub_kb(has_any))
+
+    if data == 'bud_add':
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Неделя', callback_data='bud_add_period|week')],
+            [InlineKeyboardButton('Месяц', callback_data='bud_add_period|month')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')],
+        ])
+        return await _safe_edit_or_reply(q, 'Выбери период бюджета:', reply_markup=kb)
+
+    if data.startswith('bud_add_period|'):
+        period = data.split('|', 1)[1]
+        context.user_data['budget_add_period'] = period
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='bud_add')]])
+        return await _safe_edit_or_reply(q, 'Введи сумму бюджета.\nНапример: 60000', reply_markup=kb)
+
+    if data == 'bud_edit':
+        wl, ml = get_user_budgets(cid)
+        btns = []
+        if ml and ml > 0:
+            btns.append([InlineKeyboardButton(f'Месяц — {_fmt_money(ml)}', callback_data='bud_card|month')])
+        if wl and wl > 0:
+            btns.append([InlineKeyboardButton(f'Неделя — {_fmt_money(wl)}', callback_data='bud_card|week')])
+        btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')])
+        return await _safe_edit_or_reply(q, 'Что изменить?', reply_markup=InlineKeyboardMarkup(btns))
+
+    if data.startswith('bud_card|'):
+        period = data.split('|', 1)[1]
+        wl, ml = get_user_budgets(cid)
+        amount = ml if period == 'month' else wl
+        if not amount:
+            return await _safe_edit_or_reply(q, 'Бюджет не найден.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')]]))
+        spent = _budget_spent(cid, period)
+        rem = int(amount) - int(spent)
+        text = (
+            f"💰 Бюджет: {'месяц' if period=='month' else 'неделя'}\n\n"
+            f"Лимит: {_fmt_money(int(amount))}\n"
+            f"Потрачено: {_fmt_money(int(spent))}\n"
+            f"{'Осталось' if rem>=0 else 'Перерасход'}: {_fmt_money(abs(int(rem)))}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('−5000', callback_data=f'bud_adj|{period}|-5000'), InlineKeyboardButton('−1000', callback_data=f'bud_adj|{period}|-1000'), InlineKeyboardButton('+1000', callback_data=f'bud_adj|{period}|1000'), InlineKeyboardButton('+5000', callback_data=f'bud_adj|{period}|5000')],
+            [InlineKeyboardButton('✏️ Ввести сумму', callback_data=f'bud_set_manual|{period}')],
+            [InlineKeyboardButton('🗑 Удалить', callback_data=f'bud_del_one|{period}')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='bud_edit')],
+        ])
+        return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+    if data.startswith('bud_adj|'):
+        _, period, delta_s = data.split('|', 2)
+        delta = int(delta_s)
+        wl, ml = get_user_budgets(cid)
+        cur = int(ml if period == 'month' else wl or 0)
+        new = cur + delta
+        if new <= 0:
+            return await q.answer('Бюджет не может быть меньше 1 ₽', show_alert=True)
+        if new >= 1_000_000_000:
+            return await q.answer('Слишком большой бюджет', show_alert=True)
+        if period == 'month':
+            set_budget(cid, month=new)
+        else:
+            set_budget(cid, week=new)
+        await q.answer(f'Готово: {_fmt_money(new)}')
+        q.data = f'bud_card|{period}'
+        return await callback_handler(update, context)
+
+    if data.startswith('bud_set_manual|'):
+        period = data.split('|', 1)[1]
+        context.user_data['budget_manual_period'] = period
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}')]])
+        return await _safe_edit_or_reply(q, 'Введи новую сумму бюджета.', reply_markup=kb)
+
+    if data == 'bud_del':
+        wl, ml = get_user_budgets(cid)
+        btns = []
+        if ml and ml > 0:
+            btns.append([InlineKeyboardButton(f'Месяц — {_fmt_money(ml)}', callback_data='bud_del_one|month')])
+        if wl and wl > 0:
+            btns.append([InlineKeyboardButton(f'Неделя — {_fmt_money(wl)}', callback_data='bud_del_one|week')])
+        btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')])
+        return await _safe_edit_or_reply(q, 'Что удалить?', reply_markup=InlineKeyboardMarkup(btns))
+
+    if data.startswith('bud_del_one|'):
+        period = data.split('|', 1)[1]
+        wl, ml = get_user_budgets(cid)
+        amount = ml if period == 'month' else wl
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('🗑 Да, удалить', callback_data=f'bud_del_yes|{period}')],
+            [InlineKeyboardButton('⬅️ Отмена', callback_data=f'bud_card|{period}')],
+        ])
+        return await _safe_edit_or_reply(q, f"Удалить бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(int(amount or 0))}", reply_markup=kb)
+
+    if data.startswith('bud_del_yes|'):
+        period = data.split('|', 1)[1]
+        if period == 'month':
+            set_budget(cid, month=0)
+        else:
+            set_budget(cid, week=0)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💰 К бюджетам', callback_data='settings_budgets')],
+            [InlineKeyboardButton('➕ Добавить бюджет', callback_data='bud_add')],
+            [InlineKeyboardButton('⬅️ В настройки', callback_data='menu_settings')],
+        ])
+        return await _safe_edit_or_reply(q, '✅ Бюджет удалён', reply_markup=kb)
+
+    if data.startswith('bud_replace_confirm|'):
+        period = data.split('|', 1)[1]
+        amount = int(context.user_data.get('budget_pending_amount', 0))
+        if period == 'month':
+            set_budget(cid, month=amount)
+        else:
+            set_budget(cid, week=amount)
+        context.user_data.pop('budget_add_period', None)
+        context.user_data.pop('budget_pending_amount', None)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💰 К бюджетам', callback_data='settings_budgets')],
+            [InlineKeyboardButton('➕ Добавить ещё', callback_data='bud_add')],
+            [InlineKeyboardButton('⬅️ В настройки', callback_data='menu_settings')],
+        ])
+        return await _safe_edit_or_reply(q, f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(amount)}", reply_markup=kb)
 
     if data == 'menu_notifications':
         morning_enabled = get_smart_morning_limits_enabled(cid)
@@ -436,28 +610,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
         ])
         return await q.edit_message_text(text, reply_markup=kb)
-
-    if data == 'menu_quick_suggestions':
-        enabled = get_quick_suggestions_enabled(cid)
-        status = 'включены' if enabled else 'выключены'
-        toggle_text = '⛔ Выключить' if enabled else '✅ Включить'
-        toggle_cb = 'quick_sugg_off' if enabled else 'quick_sugg_on'
-        text = (
-            '⚡ Быстрые записи\n\n'
-            'Показываю до 2 частых расходов, чтобы записывать их в один тап.\n\n'
-            f'Статус: {status}'
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(toggle_text, callback_data=toggle_cb)],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
-        ])
-        return await q.edit_message_text(text, reply_markup=kb)
-
-    if data == 'quick_sugg_on':
-        set_quick_suggestions_enabled(cid, True)
-        await q.answer('Быстрые записи включены')
-        q.data = 'menu_quick_suggestions'
-        return await callback_handler(update, context)
 
     if data == 'quick_sugg_off':
         set_quick_suggestions_enabled(cid, False)
@@ -586,29 +738,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         update_user_field(cid, 'tz_offset_min', off)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
         return await q.edit_message_text(f"✅ Часовой пояс установлен: UTC{off//60:+d}", reply_markup=kb)
-
-    # Бюджеты (как было)
-    if data == 'menu_set_budget':
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('Установить недельный бюджет', callback_data='set_week')],
-            [InlineKeyboardButton('Установить месячный бюджет', callback_data='set_month')],
-            [InlineKeyboardButton('Отключить недельный бюджет', callback_data='unset_week')],
-            [InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')],
-        ])
-        return await q.edit_message_text('⚙️ Бюджеты:', reply_markup=kb)
-
-    if data == 'set_week':
-        context.user_data['setting_week'] = True
-        return await q.edit_message_text('⚙️ Введите недельный бюджет (целое число):')
-
-    if data == 'set_month':
-        context.user_data['setting_month'] = True
-        return await q.edit_message_text('⚙️ Введите месячный бюджет (целое число):')
-
-    if data == 'unset_week':
-        set_budget(cid, week=None)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
-        return await q.edit_message_text('✅ Недельный бюджет отключён', reply_markup=kb)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Лимиты по категориям — ветки

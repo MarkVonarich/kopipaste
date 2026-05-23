@@ -54,3 +54,7 @@ All further changes follow:
 - Global learning bugfix: alias/global signals restored as high-priority (e.g. дикси -> Продукты), signature mismatch fixed, debug command expanded.
 
 - Personal Quick Actions v1.1: removed per-item hide path and added global quick suggestions toggle in settings (default enabled, user opt-out supported).
+
+- Removed quick suggestions feature additions from settings/admin diagnostics in this branch and switched to Stage 2.7 Budgets hub inside /settings.
+- /budget command now acts as legacy redirect to settings budgets screen.
+- Budget CRUD (add/edit/delete, quick +/- and manual amount) integrated under settings callbacks using public.budgets table.

@@ -43,6 +43,13 @@ def _parse_amount_input(text: str) -> int | None:
         return None
     return int(val)
 
+
+def _parse_budget_amount(text: str) -> int | None:
+    t = (text or '').strip().replace(' ', '').replace(',', '')
+    if not t.isdigit():
+        return None
+    return int(t)
+
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
     """Reply in markdown, fallback to plain text if telegram rejects entities."""
     try:
@@ -248,6 +255,56 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         set_budget(cid, month=int(text.strip()))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
         return await emsg.reply_text(f"✅ Месячный бюджет: {int(text)}", reply_markup=kb)
+
+    if context.user_data.get('budget_add_period'):
+        period = context.user_data.get('budget_add_period')
+        amount = _parse_budget_amount(text)
+        if amount is None:
+            return await emsg.reply_text('⚠️ Введите сумму числом, например: 60000')
+        if amount <= 0:
+            return await emsg.reply_text('⚠️ Бюджет не может быть меньше 1 ₽')
+        if amount >= 1_000_000_000:
+            return await emsg.reply_text('⚠️ Слишком большой бюджет')
+        from db.queries import get_user_budgets, set_budget
+        wl, ml = get_user_budgets(cid)
+        cur = ml if period == 'month' else wl
+        if cur and cur > 0:
+            context.user_data['budget_pending_amount'] = amount
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('✅ Заменить', callback_data=f'bud_replace_confirm|{period}')],
+                [InlineKeyboardButton('✏️ Ввести другую сумму', callback_data='bud_add')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')],
+            ])
+            return await emsg.reply_text(f"Бюджет на {'месяц' if period=='month' else 'неделю'} уже есть: {cur} ₽\n\nЗаменить его?", reply_markup=kb)
+        if period == 'month':
+            set_budget(cid, month=amount)
+        else:
+            set_budget(cid, week=amount)
+        context.user_data.pop('budget_add_period', None)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💰 К бюджетам', callback_data='settings_budgets')],
+            [InlineKeyboardButton('➕ Добавить ещё', callback_data='bud_add')],
+            [InlineKeyboardButton('⬅️ В настройки', callback_data='menu_settings')],
+        ])
+        return await emsg.reply_text(f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {amount} ₽", reply_markup=kb)
+
+    if context.user_data.get('budget_manual_period'):
+        period = context.user_data.get('budget_manual_period')
+        amount = _parse_budget_amount(text)
+        if amount is None:
+            return await emsg.reply_text('⚠️ Введите сумму числом, например: 60000')
+        if amount <= 0:
+            return await emsg.reply_text('⚠️ Бюджет не может быть меньше 1 ₽')
+        if amount >= 1_000_000_000:
+            return await emsg.reply_text('⚠️ Слишком большой бюджет')
+        from db.queries import set_budget
+        if period == 'month':
+            set_budget(cid, month=amount)
+        else:
+            set_budget(cid, week=amount)
+        context.user_data.pop('budget_manual_period', None)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 К карточке', callback_data=f'bud_card|{period}')]])
+        return await emsg.reply_text(f"✅ Бюджет обновлён: {amount} ₽", reply_markup=kb)
 
     if context.user_data.get('adding_category'):
         p = context.user_data.get('pending', {})

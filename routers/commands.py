@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime
 
 from db.database import get_conn
-from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, get_quick_suggestions_enabled
+from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact
 from services.ml_train import train_model
 from ui.keyboards import main_menu_kb
 from services.onboarding import onboarding_welcome
@@ -37,7 +37,6 @@ async def on_startup(app):
         BotCommand('admin_monthly_report_preview', 'Превью месячного отчёта (admin)'),
         BotCommand('admin_smart_morning_preview', 'Превью утреннего лимит-сигнала (admin)'),
         BotCommand('admin_category_learning_debug', 'Диагностика global category learning (admin)'),
-        BotCommand('admin_quick_suggestions_preview', 'Диагностика быстрых записей (admin)'),
     ])
 
 
@@ -56,19 +55,18 @@ async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
          InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
         [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
-        [InlineKeyboardButton('⚡ Быстрые записи', callback_data='menu_quick_suggestions')],
+        [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets')],
         [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
-        [InlineKeyboardButton('1️⃣ Установить бюджет', callback_data='menu_set_budget')],
         [InlineKeyboardButton('◀️ В меню', callback_data='start_main')],
     ])
     await update.message.reply_text('⚙️ Настройки:', reply_markup=kb)
 
 
 async def cmd_budget(update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    wl, ml = get_user_budgets(cid)
-    cur = get_user_currency(cid)
-    await update.message.reply_text(f"Ваши бюджеты:\n• Неделя: {wl or 0} {cur}\n• Месяц: {ml or 0} {cur}")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('💰 Открыть бюджеты', callback_data='settings_budgets')],
+    ])
+    await update.message.reply_text('💰 Бюджеты теперь в настройках.', reply_markup=kb)
 
 
 async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,21 +240,3 @@ async def cmd_admin_category_learning_debug(update, context: ContextTypes.DEFAUL
         f"reason: {meta.get('reason', '—')}"
     )
     await update.message.reply_text(txt)
-
-
-async def cmd_admin_quick_suggestions_preview(update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update):
-        return await update.message.reply_text('⛔ Команда только для администратора.')
-    uid = update.effective_user.id
-    enabled = get_quick_suggestions_enabled(uid)
-    buttons = get_quick_buttons(uid, uid)
-    lines = [f"quick_suggestions_enabled: {str(enabled).lower()}"]
-    if not enabled:
-        lines.append('UI block hidden because setting is disabled')
-    if buttons:
-        lines.append('candidates:')
-        for b, payload in buttons:
-            lines.append(f"- {b} ({payload})")
-    else:
-        lines.append('candidates: none')
-    await update.message.reply_text("\n".join(lines))
