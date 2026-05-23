@@ -1,0 +1,136 @@
+action_log.id bigint
+action_log.created_at timestamp with time zone
+action_log.user_id bigint
+action_log.chat_id bigint
+action_log.action text
+action_log.metadata jsonb
+action_tokens.id bigint
+action_tokens.user_id bigint
+action_tokens.chat_id bigint
+action_tokens.payload jsonb
+action_tokens.created_at timestamp with time zone
+action_tokens.status text
+action_tokens.used_at timestamp with time zone
+action_tokens.op_id bigint
+action_tokens.expires_at timestamp with time zone
+budgets.week_limit integer
+budgets.month_limit integer
+budgets.user_id bigint
+budgets.updated_at timestamp without time zone
+category_aliases.user_id bigint
+category_aliases.alias text
+category_aliases.rtype text
+category_aliases.category text
+category_aliases.subcategory text
+category_limit_state.user_id bigint
+category_limit_state.period text
+category_limit_state.category text
+category_limit_state.last_band integer
+category_limit_state.updated_at timestamp with time zone
+category_limit_state.muted_until date
+category_limits.user_id bigint
+category_limits.period text
+category_limits.category text
+category_limits.amount integer
+category_limits.currency text
+category_limits.updated_at timestamp with time zone
+events.id bigint
+events.user_id bigint
+events.event_ts timestamp without time zone
+events.name text
+events.props_json jsonb
+fx_cache.code text
+fx_cache.rate_to_rub numeric
+fx_cache.updated_at timestamp with time zone
+global_aliases.id bigint
+global_aliases.norm_text text
+global_aliases.type text
+global_aliases.category text
+global_aliases.popularity integer
+global_aliases.updated_at timestamp without time zone
+goals.id bigint
+goals.user_id bigint
+goals.name text
+goals.target_amount numeric
+goals.saved_amount numeric
+goals.deadline date
+goals.created_at timestamp without time zone
+model_meta.id bigint
+model_meta.model_name text
+model_meta.trained_at timestamp without time zone
+model_meta.n_samples integer
+model_meta.acc_type numeric
+model_meta.acc_micro numeric
+model_meta.extra jsonb
+notification_templates.id integer
+notification_templates.key text
+notification_templates.text text
+notification_templates.enabled boolean
+notification_templates.created_at timestamp with time zone
+notifications_log.id bigint
+notifications_log.user_id bigint
+notifications_log.template_id integer
+notifications_log.delivered boolean
+notifications_log.result text
+notifications_log.created_at timestamp with time zone
+operations.id integer
+operations.chat_id bigint
+operations.op_date date
+operations.weekday integer
+operations.week_range character varying
+operations.type character varying
+operations.category character varying
+operations.amount integer
+operations.comment text
+operations.created_at timestamp without time zone
+operations.user_id bigint
+operations.raw_text text
+records.id bigint
+records.user_id bigint
+records.chat_id bigint
+records.record_date date
+records.type text
+records.category text
+records.subcategory text
+records.amount numeric
+records.currency text
+records.amount_rub numeric
+records.comment text
+records.created_at timestamp with time zone
+remind_log.id integer
+remind_log.sent_at timestamp without time zone
+remind_log.user_id bigint
+reminders_log.user_id bigint
+reminders_log.sent_on date
+reminders_log.kind text
+reminders_log.tmpl_id integer
+reminders_log.tag text
+reminders_log.sent_at timestamp with time zone
+user_aliases.id bigint
+user_aliases.user_id bigint
+user_aliases.norm_text text
+user_aliases.type text
+user_aliases.category text
+user_aliases.updated_at timestamp without time zone
+user_aliases_bak.id bigint
+user_aliases_bak.user_id bigint
+user_aliases_bak.norm_text text
+user_aliases_bak.type text
+user_aliases_bak.category text
+user_aliases_bak.updated_at timestamp without time zone
+user_budgets.user_id bigint
+user_budgets.week_limit integer
+user_budgets.month_limit integer
+user_budgets.updated_at timestamp with time zone
+users.user_id bigint
+users.locale text
+users.currency text
+users.tz_offset_min integer
+users.reminder_hour integer
+users.plan text
+users.ml_consent boolean
+users.created_at timestamp without time zone
+users.display_name text
+users.updated_at timestamp with time zone
+users.onboarding_done boolean
+users.username text
