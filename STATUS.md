@@ -62,3 +62,5 @@ All further changes follow:
 - Stage receipt import v1: added image intake + safe preview/confirm flow with graceful fallback when OCR provider is not configured.
 
 - Receipt OCR OpenAI provider v1 enabled: parses photo/screenshots via OpenAI Responses API when RECEIPT_OCR_PROVIDER=openai and RECEIPT_OCR_API_KEY is set; keeps confirm-before-write safety.
+
+- Receipt OCR v1.1: improved day-total filtering, income preservation, and real per-operation review flow (save/skip/list/cancel) before bulk confirm.

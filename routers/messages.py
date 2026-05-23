@@ -232,6 +232,7 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
             }
             for c in result.candidates
         ]
+        context.user_data['receipt_warning'] = result.warning
         lines = ['🧾 Нашёл операции:', '']
         for i, c in enumerate(result.candidates[:10], start=1):
             lines.append(f"{i}. {c.category} — {c.amount} ₽ — {c.merchant}")

@@ -118,3 +118,9 @@ stage_receipt_ocr_openai_v1:
     - RECEIPT_OCR_MODEL
   confirm_required_before_write: true
   db_migration_required: false
+
+stage_receipt_ocr_v1_1:
+  day_total_filters: true
+  parses_incomes: true
+  review_one_flow_real: true
+  db_migration_required: false

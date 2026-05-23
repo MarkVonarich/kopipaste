@@ -76,6 +76,43 @@ def _budgets_hub_kb(has_any: bool):
     rows += [[InlineKeyboardButton('📂 Лимиты категорий', callback_data='lim_list')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]]
     return InlineKeyboardMarkup(rows)
 
+
+def _receipt_render_list(cands: list[dict], warning: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
+    lines = ['🧾 Нашёл операции:', '']
+    for i, c in enumerate(cands[:10], start=1):
+        lines.append(f"{i}. {c.get('category') or 'Прочее'} — {int(c.get('amount') or 0)} ₽ — {c.get('merchant') or 'Из изображения'}")
+    if warning:
+        lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
+        [InlineKeyboardButton('✏️ Проверить по одной', callback_data='receipt_review_one')],
+        [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
+    ])
+    return '\n'.join(lines), kb
+
+
+def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboardMarkup]:
+    c = cands[idx]
+    dt = c.get('date') or ''
+    try:
+        dts = datetime.fromisoformat(dt).strftime('%d.%m.%Y')
+    except Exception:
+        dts = 'Сегодня'
+    text = (
+        f"Операция {idx + 1} из {len(cands)}\n"
+        f"Тип: {c.get('type') or 'Расходы'}\n"
+        f"Сумма: {int(c.get('amount') or 0)} ₽\n"
+        f"Категория: {c.get('category') or 'Прочее'}\n"
+        f"Комментарий: {c.get('merchant') or 'Из изображения'}\n"
+        f"Дата: {dts}"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Записать', callback_data='receipt_save_one')],
+        [InlineKeyboardButton('⏭ Пропустить', callback_data='receipt_skip_one')],
+        [InlineKeyboardButton('⬅️ К списку', callback_data='receipt_back_list'), InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
+    ])
+    return text, kb
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
 # ──────────────────────────────────────────────────────────────────────────────
@@ -620,12 +657,60 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'receipt_cancel':
         context.user_data.pop('receipt_candidates', None)
+        context.user_data.pop('receipt_warning', None)
+        context.user_data.pop('receipt_review_idx', None)
         await q.answer('Отменено')
         return await _safe_edit_or_reply(q, '❌ Импорт отменён.')
 
     if data == 'receipt_review_one':
-        await q.answer('Режим по одной будет добавлен следующим шагом')
-        return await _safe_edit_or_reply(q, '✏️ Проверка по одной скоро появится. Сейчас можно выбрать «Записать всё» или «Отмена».')
+        cands = context.user_data.get('receipt_candidates') or []
+        if not cands:
+            await q.answer('Нет данных для проверки', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
+        context.user_data['receipt_review_idx'] = 0
+        await q.answer()
+        text, kb = _receipt_render_card(cands, 0)
+        return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+    if data == 'receipt_back_list':
+        cands = context.user_data.get('receipt_candidates') or []
+        if not cands:
+            await q.answer('Нет данных', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Нет подготовленных операций.')
+        await q.answer()
+        text, kb = _receipt_render_list(cands, context.user_data.get('receipt_warning'))
+        return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+    if data in {'receipt_save_one', 'receipt_skip_one'}:
+        cands = context.user_data.get('receipt_candidates') or []
+        idx = int(context.user_data.get('receipt_review_idx') or 0)
+        if not cands or idx >= len(cands):
+            await q.answer('Нет данных', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
+        cur = cands[idx]
+        if data == 'receipt_save_one':
+            try:
+                dt = datetime.fromisoformat(cur.get('date') or '').date()
+            except Exception:
+                dt = date.today()
+            amount = int(cur.get('amount') or 0)
+            if amount > 0:
+                insert_operation(cid, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
+                log.info('receipt_review: saved index=%s user=%s', idx, cid)
+                await q.answer('Сохранено')
+        else:
+            log.info('receipt_review: skipped index=%s user=%s', idx, cid)
+            await q.answer('Пропущено')
+        cands.pop(idx)
+        context.user_data['receipt_candidates'] = cands
+        if not cands:
+            context.user_data.pop('receipt_candidates', None)
+            context.user_data.pop('receipt_review_idx', None)
+            return await _safe_edit_or_reply(q, '✅ Проверка завершена. Операции обработаны.')
+        next_idx = min(idx, len(cands) - 1)
+        context.user_data['receipt_review_idx'] = next_idx
+        text, kb = _receipt_render_card(cands, next_idx)
+        return await _safe_edit_or_reply(q, text, reply_markup=kb)
 
     if data == 'receipt_confirm_all':
         cands = context.user_data.get('receipt_candidates') or []
@@ -645,7 +730,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             insert_operation(cid, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
             total += amount
             written += 1
+        log.info('receipt_confirm_all: inserted=%s user=%s', written, cid)
         context.user_data.pop('receipt_candidates', None)
+        context.user_data.pop('receipt_warning', None)
+        context.user_data.pop('receipt_review_idx', None)
         await q.answer('Готово')
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('📊 Отчёт', callback_data='menu_report')],

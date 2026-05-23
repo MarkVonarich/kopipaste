@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import List
@@ -48,6 +49,22 @@ def _category(v: str | None) -> str:
     return (v or 'Прочее').strip() or 'Прочее'
 
 
+_DROP_WORDS = (
+    'остаток', 'баланс', 'доступно', 'кэшбэк', 'кешбэк', 'бонус', 'итого', 'всего', 'за день',
+    'today', 'cashback'
+)
+_DATE_TOTAL_RE = re.compile(r'(сегодня|вчера|январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)', re.IGNORECASE)
+
+
+def _looks_like_aggregate_row(text: str) -> bool:
+    t = (text or '').strip().lower()
+    if not t:
+        return True
+    if any(w in t for w in _DROP_WORDS):
+        return True
+    return bool(_DATE_TOTAL_RE.search(t) and not re.search(r'[a-zа-я]{4,}', t))
+
+
 def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
     provider = os.getenv('RECEIPT_OCR_PROVIDER', 'openai').strip().lower()
     api_key = os.getenv('RECEIPT_OCR_API_KEY', '').strip()
@@ -71,14 +88,19 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
     prompt = (
         'Ты парсер финансовых операций с фото/скриншотов. '
         'Верни строго JSON без markdown и без пояснений. '
-        'Извлекай только реальные операции, игнорируй баланс, кешбэк, номера карт, кнопки UI, заголовки. '
-        'Тип: Расходы/Доходы. Если не уверен — лучше не добавляй строку. '
+        'Извлекай только реальные строки транзакций. '
+        'Игнорируй агрегаты по дням и итоги: "20 мая −416,99", "Сегодня −2 496", "Итого", "Всего", "За день". '
+        'Игнорируй также: баланс/остаток/доступно/кэшбэк/бонусы/номера карт/кнопки UI/вкладки/заголовки. '
+        'Тип: Расходы/Доходы. Положительные операции (входящий перевод/зарплата/пополнение) — Доходы. '
+        'Не подменяй сумму строки на соседний дневной итог: бери сумму, визуально связанную с конкретным мерчантом/строкой. '
+        'Если не уверен — лучше не добавляй строку. '
         'Если receipt с товарами неуверенный — можно вернуть одну итоговую операцию по total.\n\n'
         'JSON schema:\n'
         '{"ok":true|false,"source_type":"bank_screenshot|receipt|unknown",'
         '"operations":[{"amount":123.45,"currency":"RUB","type":"Расходы|Доходы",'
         '"category_hint":"Продукты|Транспорт|Заведения|Красота|Коммунальные|Прочее|null",'
-        '"merchant":"string|null","comment":"string","op_date":"YYYY-MM-DD|null","confidence":0.0}],'
+        '"merchant":"string|null","comment":"string","op_date":"YYYY-MM-DD|null","confidence":0.0,"evidence":"short"}],'
+        '"ignored_rows":[{"text":"string","reason":"day_total|ui|balance|duplicate|other"}],'
         '"notes":"short"}'
     )
 
@@ -110,6 +132,8 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
         return ParseResult(configured=True, candidates=[], warning='not_confident')
 
     ops = data.get('operations') or []
+    ignored = data.get('ignored_rows') or []
+    dropped_by_filter = 0
     out: List[ParsedCandidate] = []
     seen = set()
     for op in ops:
@@ -120,8 +144,11 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
         if amount <= 0:
             continue
         merchant = (op.get('merchant') or op.get('comment') or 'Из изображения').strip()[:64]
-        raw = (op.get('comment') or op.get('merchant') or '').strip()[:120]
-        key = (amount, merchant.lower(), _op_type(op.get('type')))
+        raw = (op.get('evidence') or op.get('comment') or op.get('merchant') or '').strip()[:120]
+        if _looks_like_aggregate_row(f'{merchant} {raw} {op.get("category_hint") or ""}'):
+            dropped_by_filter += 1
+            continue
+        key = (amount, merchant.lower(), _op_type(op.get('type')), _safe_date(op.get('op_date')).isoformat())
         if key in seen:
             continue
         seen.add(key)
@@ -135,5 +162,5 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
             raw_text=raw,
         ))
 
-    log.info('receipt_ocr: parsed candidates=%s user=%s', len(out), user_id)
+    log.info('receipt_ocr: parsed candidates=%s ignored=%s dropped_by_filter=%s user=%s', len(out), len(ignored), dropped_by_filter, user_id)
     return ParseResult(configured=True, candidates=out, warning=('low_confidence' if any(c.confidence < 0.6 for c in out) else None))
