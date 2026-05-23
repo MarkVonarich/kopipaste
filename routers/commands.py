@@ -7,13 +7,13 @@ import pandas as pd
 from datetime import datetime
 
 from db.database import get_conn
-from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion
+from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact
 from services.ml_train import train_model
 from ui.keyboards import main_menu_kb
 from services.onboarding import onboarding_welcome
 from settings import ADMIN_USER_IDS
 from jobs.daily import previous_week_period, previous_month_period, build_weekly_report_text, build_monthly_report_text, _build_smart_morning_text
-from services.ml_prep import normalize_alias_text
+from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
 
 
@@ -218,16 +218,23 @@ async def cmd_admin_category_learning_debug(update, context: ContextTypes.DEFAUL
         return await update.message.reply_text('Использование: /admin_category_learning_debug <текст>')
     uid = update.effective_user.id
     alias_norm = normalize_alias_text(raw)
-    personal = get_personal_category_suggestion(uid, alias_norm)
+    ml_norm = normalize_for_ml(raw)
+    personal = get_personal_category_suggestion(uid, alias_norm, 'Расходы')
+    ga = get_global_alias_exact(alias_norm, 'Расходы')
     global_s = get_global_category_suggestion(alias_norm, 'Расходы')
-    top2, meta = get_top2_suggestions(uid, alias_norm, 'Расходы')
+    seed = 'Продукты' if alias_norm in {'дикси', 'пятерочка', 'пятёрочка', 'магнит', 'лента'} else None
+    top2, meta = get_top2_suggestions(uid, ml_norm, 'Расходы')
     final_cat = (top2[0]['cat'] if top2 else '—')
     txt = (
+        f"raw: {raw}\n"
         f"alias_norm: {alias_norm or '—'}\n"
+        f"ml_norm: {ml_norm or '—'}\n"
         f"personal: {(personal.get('category') + ' (' + personal.get('reason') + ')') if personal else '—'}\n"
+        f"global_alias: {(ga.get('category') + ' pop=' + str(ga.get('popularity'))) if ga else '—'}\n"
         f"global: {(global_s.get('category') if global_s else '—')}\n"
         f"global_conf: {(round(global_s.get('confidence', 0), 3) if global_s else '—')}\n"
         f"global_votes/distinct: {(str(global_s.get('votes_count')) + '/' + str(global_s.get('distinct_users'))) if global_s else '—'}\n"
+        f"merchant_seed: {seed or '—'}\n"
         f"final: {final_cat}\n"
         f"reason: {meta.get('reason', '—')}"
     )

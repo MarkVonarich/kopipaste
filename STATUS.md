@@ -50,3 +50,5 @@ All further changes follow:
 - Stage 2.5.1-B: limit card now shows spent/remaining and has quick adjust buttons (-1000/-500/+500/+1000) using short token callbacks.
 
 - Stage global category learning v1: added cross-user alias learning with confidence scoring and admin debug command /admin_category_learning_debug.
+
+- Global learning bugfix: alias/global signals restored as high-priority (e.g. дикси -> Продукты), signature mismatch fixed, debug command expanded.

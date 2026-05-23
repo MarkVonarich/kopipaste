@@ -25,6 +25,7 @@ _PUNCT_RE = re.compile(r"[^\w\s₽$€£¥₸₹₴₾%]", flags=re.UNICODE)
 _NUM_RE = re.compile(r"\d+(?:[\s\.,]\d+)*", flags=re.UNICODE)
 _DATE_WORDS_RE = re.compile(r"\b(сегодня|вчера|завтра|позавчера|пн|вт|ср|чт|пт|сб|вс)\b", flags=re.UNICODE)
 _CURRENCY_NOISE_RE = re.compile(r"\b(руб|рублей|р|usd|eur|kzt|byn|tenge|тенге)\b", flags=re.UNICODE)
+_ML_NUM_TOKEN_RE = re.compile(r"\bnum\b", flags=re.UNICODE)
 
 
 def normalize_for_ml(text: str) -> str:
@@ -57,5 +58,6 @@ def normalize_alias_text(raw_text: str) -> str:
     s = _NUM_RE.sub(" ", s)
     s = _DATE_WORDS_RE.sub(" ", s)
     s = _CURRENCY_NOISE_RE.sub(" ", s)
+    s = _ML_NUM_TOKEN_RE.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s

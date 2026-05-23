@@ -504,23 +504,23 @@ def get_local_alias(user_id: int, text: str):
     return (rows[0][0], rows[0][1]) if rows else None
 
 
-def get_personal_category_suggestion(user_id: int, alias_norm: str):
+def get_personal_category_suggestion(user_id: int, alias_norm: str, op_type: str = 'Расходы'):
     rows = pg_fetchall("""
         SELECT type, category
         FROM public.user_aliases
-        WHERE user_id=%s AND norm_text=%s
+        WHERE user_id=%s AND norm_text=%s AND type=%s
         LIMIT 1
-    """, (user_id, alias_norm))
+    """, (user_id, alias_norm, op_type))
     if rows:
         return {'type': rows[0][0], 'category': rows[0][1], 'reason': 'personal_exact'}
     rows = pg_fetchall("""
         SELECT type, category, COUNT(*) c
         FROM public.user_aliases
-        WHERE user_id=%s AND (norm_text LIKE %s OR %s LIKE norm_text || '%%')
+        WHERE user_id=%s AND type=%s AND (norm_text LIKE %s OR %s LIKE norm_text || '%%')
         GROUP BY type, category
         ORDER BY c DESC
         LIMIT 1
-    """, (user_id, f"{alias_norm}%", alias_norm))
+    """, (user_id, op_type, f"{alias_norm}%", alias_norm))
     if rows:
         return {'type': rows[0][0], 'category': rows[0][1], 'reason': 'personal_fuzzy'}
     return None
@@ -543,6 +543,19 @@ def get_global_alias(text: str):
          LIMIT 1
     """, (nt,))
     return (rows[0][0], rows[0][1]) if rows else None
+
+
+def get_global_alias_exact(alias_norm: str, op_type: str = 'Расходы'):
+    rows = pg_fetchall("""
+        SELECT type, category, COALESCE(popularity,0)::int AS popularity
+        FROM public.global_aliases
+        WHERE norm_text=%s AND type=%s
+        ORDER BY COALESCE(popularity,0) DESC
+        LIMIT 1
+    """, (alias_norm, op_type))
+    if not rows:
+        return None
+    return {'type': rows[0][0], 'category': rows[0][1], 'popularity': int(rows[0][2] or 0)}
 
 
 def get_global_category_suggestion(alias_norm: str, op_type: str = 'Расходы'):

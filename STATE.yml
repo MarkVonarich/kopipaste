@@ -82,3 +82,9 @@ stage_global_category_learning_v1:
     - global_high_confidence
     - ml_model
     - user_frequency_fallback
+
+stage_global_category_learning_v1_fix:
+  alias_norm_source: normalize_alias_text
+  global_alias_priority_restored: true
+  personal_signature_op_type_added: true
+  db_migration_required: false
