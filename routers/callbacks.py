@@ -20,6 +20,7 @@ from ui.keyboards import ml_top2_kb
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
+from db.queries import insert_operation
 
 log = logging.getLogger(__name__)
 
@@ -616,6 +617,41 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer('Быстрые записи выключены')
         q.data = 'menu_quick_suggestions'
         return await callback_handler(update, context)
+
+    if data == 'receipt_cancel':
+        context.user_data.pop('receipt_candidates', None)
+        await q.answer('Отменено')
+        return await _safe_edit_or_reply(q, '❌ Импорт отменён.')
+
+    if data == 'receipt_review_one':
+        await q.answer('Режим по одной будет добавлен следующим шагом')
+        return await _safe_edit_or_reply(q, '✏️ Проверка по одной скоро появится. Сейчас можно выбрать «Записать всё» или «Отмена».')
+
+    if data == 'receipt_confirm_all':
+        cands = context.user_data.get('receipt_candidates') or []
+        if not cands:
+            await q.answer('Нет данных для записи', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Нет подготовленных операций для записи.')
+        total = 0
+        written = 0
+        for c in cands:
+            try:
+                dt = datetime.fromisoformat(c['date']).date()
+            except Exception:
+                dt = date.today()
+            amount = int(c.get('amount') or 0)
+            if amount <= 0:
+                continue
+            insert_operation(cid, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
+            total += amount
+            written += 1
+        context.user_data.pop('receipt_candidates', None)
+        await q.answer('Готово')
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('📊 Отчёт', callback_data='menu_report')],
+            [InlineKeyboardButton('⬅️ Меню', callback_data='start_main')],
+        ])
+        return await _safe_edit_or_reply(q, f'✅ Записал {written} операции на сумму {total} ₽', reply_markup=kb)
 
     if data == 'notif_morning_on':
         set_smart_morning_limits_enabled(cid, True)

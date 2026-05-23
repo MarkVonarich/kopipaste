@@ -24,7 +24,7 @@ from routers.commands import (
     cmd_admin_category_learning_debug,
 )
 from routers.callbacks import callback_handler
-from routers.messages import handle_text, handle_location
+from routers.messages import handle_text, handle_location, handle_photo
 from jobs.scheduler import register_jobs
 
 # узкоспециализированные колбэки подсказок категорий (sugg_*)
@@ -77,6 +77,8 @@ def main():
     # Callbacks + messages
     app.add_handler(CallbackQueryHandler(callback_handler))  # generic
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Jobs

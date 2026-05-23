@@ -102,3 +102,10 @@ stage_2_7_budgets_hub:
   active_budget_table: public.budgets
   supports_week_month: true
   db_migration_required: false
+
+stage_receipt_import_v1:
+  enabled: true
+  provider_env: RECEIPT_OCR_API_KEY
+  no_auto_write_without_confirmation: true
+  fallback_when_unconfigured: true
+  db_migration_required: false

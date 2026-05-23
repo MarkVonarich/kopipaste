@@ -15,6 +15,7 @@ from utils.text import norm_text
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
+from services.receipt_parser import parse_receipt_image
 import logging
 
 log = logging.getLogger(__name__)
@@ -194,6 +195,55 @@ async def continue_batch_if_needed(update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data['batch_done'] = int(context.user_data.get('batch_done', 0)) + 1
     await _batch_next(update, context)
+
+
+async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    emsg = update.effective_message
+    try:
+        file = None
+        if update.message.photo:
+            file = await update.message.photo[-1].get_file()
+        elif update.message.document and (update.message.document.mime_type or '').startswith('image/'):
+            file = await update.message.document.get_file()
+        if not file:
+            return await emsg.reply_text('Не удалось прочитать изображение. Попробуй отправить фото ещё раз.')
+
+        image_bytes = await file.download_as_bytearray()
+        result = parse_receipt_image(bytes(image_bytes), cid)
+        if not result.configured:
+            return await emsg.reply_text('Фото получил, но распознавание пока не настроено на сервере.')
+
+        if not result.candidates:
+            return await emsg.reply_text('Не удалось уверенно извлечь операции с этого изображения. Попробуй фото покрупнее.')
+
+        context.user_data['receipt_candidates'] = [
+            {
+                'amount': c.amount,
+                'category': c.category,
+                'type': c.op_type,
+                'date': c.op_date.isoformat(),
+                'merchant': c.merchant,
+                'confidence': c.confidence,
+                'raw_text': c.raw_text,
+            }
+            for c in result.candidates
+        ]
+        lines = ['🧾 Нашёл операции:', '']
+        for i, c in enumerate(result.candidates[:10], start=1):
+            lines.append(f"{i}. {c.category} — {c.amount} ₽ — {c.merchant}")
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
+            [InlineKeyboardButton('✏️ Проверить по одной', callback_data='receipt_review_one')],
+            [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
+        ])
+        if result.warning:
+            lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
+        await emsg.reply_text('\n'.join(lines), reply_markup=kb)
+    except Exception as e:
+        log.exception('receipt parse failed user=%s err=%s', cid, e)
+        await emsg.reply_text('Не удалось обработать изображение. Попробуй ещё раз позже.')
 
 
 # ─────────────────────────────────────────────

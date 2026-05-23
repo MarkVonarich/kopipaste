@@ -58,3 +58,5 @@ All further changes follow:
 - Removed quick suggestions feature additions from settings/admin diagnostics in this branch and switched to Stage 2.7 Budgets hub inside /settings.
 - /budget command now acts as legacy redirect to settings budgets screen.
 - Budget CRUD (add/edit/delete, quick +/- and manual amount) integrated under settings callbacks using public.budgets table.
+
+- Stage receipt import v1: added image intake + safe preview/confirm flow with graceful fallback when OCR provider is not configured.
