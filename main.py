@@ -22,9 +22,10 @@ from routers.commands import (
     cmd_mlstats, cmd_mltrain, on_startup,
     cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
     cmd_admin_category_learning_debug,
+    cmd_admin_voice_status,
 )
 from routers.callbacks import callback_handler
-from routers.messages import handle_text, handle_location, handle_photo
+from routers.messages import handle_text, handle_location, handle_photo, handle_voice
 from jobs.scheduler import register_jobs
 
 # узкоспециализированные колбэки подсказок категорий (sugg_*)
@@ -70,6 +71,7 @@ def main():
     app.add_handler(CommandHandler("admin_monthly_report_preview", cmd_admin_monthly_report_preview))
     app.add_handler(CommandHandler("admin_smart_morning_preview", cmd_admin_smart_morning_preview))
     app.add_handler(CommandHandler("admin_category_learning_debug", cmd_admin_category_learning_debug))
+    app.add_handler(CommandHandler("admin_voice_status", cmd_admin_voice_status))
 
     # ✅ patterns ^sugg_… раньше общего callback_handler
     register_suggestions(app)
@@ -79,6 +81,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Jobs

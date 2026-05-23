@@ -108,6 +108,7 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('✅ Записать', callback_data='receipt_save_one')],
+        [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_edit_one')],
         [InlineKeyboardButton('⏭ Пропустить', callback_data='receipt_skip_one')],
         [InlineKeyboardButton('⬅️ К списку', callback_data='receipt_back_list'), InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
     ])
@@ -711,6 +712,22 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['receipt_review_idx'] = next_idx
         text, kb = _receipt_render_card(cands, next_idx)
         return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+    if data == 'receipt_edit_one':
+        cands = context.user_data.get('receipt_candidates') or []
+        idx = int(context.user_data.get('receipt_review_idx') or 0)
+        if not cands or idx >= len(cands):
+            await q.answer('Нет данных', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
+        context.user_data['receipt_edit_idx'] = idx
+        context.user_data['await_receipt_edit_text'] = True
+        await q.answer()
+        cur = cands[idx]
+        return await q.message.reply_text(
+            f"Отправь исправленный текст для операции {idx + 1}.\n"
+            f"Пример: столовая 392\n"
+            f"Сейчас: {cur.get('merchant')} {cur.get('amount')} ₽"
+        )
 
     if data == 'receipt_confirm_all':
         cands = context.user_data.get('receipt_candidates') or []

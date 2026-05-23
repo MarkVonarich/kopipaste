@@ -3,6 +3,10 @@
 __version__ = "2025.08.26-batch-05"
 
 import re
+import os
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime
 from telegram import ReplyKeyboardRemove
 from telegram.ext import ContextTypes
@@ -16,6 +20,7 @@ from db.queries import update_user_field, insert_ml_observation, update_limit_am
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
+from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
 
 log = logging.getLogger(__name__)
@@ -235,7 +240,9 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['receipt_warning'] = result.warning
         lines = ['🧾 Нашёл операции:', '']
         for i, c in enumerate(result.candidates[:10], start=1):
-            lines.append(f"{i}. {c.category} — {c.amount} ₽ — {c.merchant}")
+            op_icon = '💸' if c.op_type == 'Расходы' else '💰'
+            dts = c.op_date.strftime('%d.%m')
+            lines.append(f"{i}. {op_icon} {c.op_type}: {c.amount} ₽ • {c.category} • {c.merchant} • {dts}")
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
@@ -248,6 +255,48 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception('receipt parse failed user=%s err=%s', cid, e)
         await emsg.reply_text('Не удалось обработать изображение. Попробуй ещё раз позже.')
+
+
+async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
+    emsg = update.effective_message
+    if not VOICE_INPUT_ENABLED:
+        return await emsg.reply_text('Голосовой ввод сейчас выключен.')
+    if VOICE_TRANSCRIBE_PROVIDER != 'openai':
+        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
+    if not shutil.which('ffmpeg'):
+        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
+    api_key = (os.getenv('OPENAI_API_KEY') or os.getenv('RECEIPT_OCR_API_KEY') or '').strip()
+    if not api_key:
+        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
+    msg = update.message
+    media = msg.voice or msg.audio
+    if not media:
+        return await emsg.reply_text('Не удалось прочитать аудио. Попробуй ещё раз.')
+    if (media.duration or 0) > VOICE_MAX_SECONDS:
+        return await emsg.reply_text(f'Слишком длинное аудио. Максимум {VOICE_MAX_SECONDS} сек.')
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, timeout=30)
+        with tempfile.TemporaryDirectory(prefix='fin_voice_') as td:
+            src = os.path.join(td, 'in.oga')
+            dst = os.path.join(td, 'out.mp3')
+            f = await media.get_file()
+            await f.download_to_drive(custom_path=src)
+            proc = subprocess.run(['ffmpeg', '-y', '-i', src, '-ac', '1', '-ar', '16000', dst], capture_output=True)
+            if proc.returncode != 0:
+                log.warning('voice transcode failed user=%s', update.effective_chat.id)
+                return await emsg.reply_text('Не смог обработать аудио. Попробуй ещё раз.')
+            with open(dst, 'rb') as af:
+                tr = client.audio.transcriptions.create(model=VOICE_TRANSCRIBE_MODEL, file=af)
+            text = (getattr(tr, 'text', None) or '').strip()
+        if not text:
+            return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
+        await emsg.reply_text(f'🎤 Распознал: {text[:180]}')
+        update.message.text = text
+        return await handle_text(update, context)
+    except Exception as e:
+        log.warning('voice transcribe failed user=%s reason=%s', update.effective_chat.id, type(e).__name__)
+        return await emsg.reply_text('Не смог распознать голос. Попробуй ещё раз или напиши текстом.')
 
 
 # ─────────────────────────────────────────────
@@ -279,6 +328,26 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
+
+    if context.user_data.pop('await_receipt_edit_text', False):
+        idx = int(context.user_data.get('receipt_edit_idx') or -1)
+        cands = context.user_data.get('receipt_candidates') or []
+        if idx < 0 or idx >= len(cands):
+            return await emsg.reply_text('Не нашёл операцию для редактирования.')
+        try:
+            merch_display, amt_raw, dt, _src_curr = parse_user_input(text)
+            cands[idx]['amount'] = int(amt_raw)
+            cands[idx]['merchant'] = norm_text(merch_display)
+            cands[idx]['date'] = dt.date().isoformat()
+            if re.search(r'зарплат|доход|перевод|пополн', text.lower()):
+                cands[idx]['type'] = 'Доходы'
+            context.user_data['receipt_candidates'] = cands
+            context.user_data['receipt_review_idx'] = idx
+            context.user_data.pop('receipt_edit_idx', None)
+            return await emsg.reply_text('✅ Операция обновлена. Нажми «Проверить по одной» или «Записать всё».')
+        except Exception:
+            context.user_data['await_receipt_edit_text'] = True
+            return await emsg.reply_text('Не понял исправление. Пример: столовая 392')
 
     # ----- настройки и прочие ветки (без изменений) -----
     if context.user_data.pop('await_reminder_custom', False):

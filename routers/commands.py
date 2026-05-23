@@ -11,7 +11,9 @@ from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_
 from services.ml_train import train_model
 from ui.keyboards import main_menu_kb
 from services.onboarding import onboarding_welcome
-from settings import ADMIN_USER_IDS
+from settings import ADMIN_USER_IDS, VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL
+import os
+import shutil
 from jobs.daily import previous_week_period, previous_month_period, build_weekly_report_text, build_monthly_report_text, _build_smart_morning_text
 from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
@@ -238,5 +240,19 @@ async def cmd_admin_category_learning_debug(update, context: ContextTypes.DEFAUL
         f"merchant_seed: {seed or '—'}\n"
         f"final: {final_cat}\n"
         f"reason: {meta.get('reason', '—')}"
+    )
+    await update.message.reply_text(txt)
+
+
+async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    key_loaded = bool((os.getenv('OPENAI_API_KEY') or os.getenv('RECEIPT_OCR_API_KEY') or '').strip())
+    txt = (
+        f"VOICE_INPUT_ENABLED: {VOICE_INPUT_ENABLED}\n"
+        f"VOICE_TRANSCRIBE_PROVIDER: {VOICE_TRANSCRIBE_PROVIDER}\n"
+        f"VOICE_TRANSCRIBE_MODEL: {VOICE_TRANSCRIBE_MODEL}\n"
+        f"ffmpeg_available: {bool(shutil.which('ffmpeg'))}\n"
+        f"api_key_loaded: {key_loaded}"
     )
     await update.message.reply_text(txt)

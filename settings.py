@@ -54,3 +54,8 @@ def _parse_bool(name: str, default: bool) -> bool:
 ENABLE_DAY_NUDGE = _parse_bool("ENABLE_DAY_NUDGE", False)
 ENABLE_EVENING_REMINDER = _parse_bool("ENABLE_EVENING_REMINDER", True)
 ENABLE_SMART_MORNING_LIMITS = _parse_bool("ENABLE_SMART_MORNING_LIMITS", True)
+
+VOICE_INPUT_ENABLED = _parse_bool("VOICE_INPUT_ENABLED", True)
+VOICE_TRANSCRIBE_PROVIDER = os.getenv("VOICE_TRANSCRIBE_PROVIDER", "openai").strip().lower() or "openai"
+VOICE_TRANSCRIBE_MODEL = os.getenv("VOICE_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
+VOICE_MAX_SECONDS = int(os.getenv("VOICE_MAX_SECONDS", "60") or "60")

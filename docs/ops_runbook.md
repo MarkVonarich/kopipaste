@@ -63,3 +63,5 @@ ORDER BY updated_at DESC
 LIMIT 50;
 "
 ```
+
+- Для голосового ввода нужен ffmpeg: `apt-get install -y ffmpeg`

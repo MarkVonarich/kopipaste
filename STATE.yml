@@ -124,3 +124,10 @@ stage_receipt_ocr_v1_1:
   parses_incomes: true
   review_one_flow_real: true
   db_migration_required: false
+
+stage_voice_input_v1:
+  enabled_by_default: true
+  provider: openai
+  ffmpeg_required: true
+  reuses_text_flow: true
+  db_migration_required: false

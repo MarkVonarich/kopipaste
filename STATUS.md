@@ -64,3 +64,6 @@ All further changes follow:
 - Receipt OCR OpenAI provider v1 enabled: parses photo/screenshots via OpenAI Responses API when RECEIPT_OCR_PROVIDER=openai and RECEIPT_OCR_API_KEY is set; keeps confirm-before-write safety.
 
 - Receipt OCR v1.1: improved day-total filtering, income preservation, and real per-operation review flow (save/skip/list/cancel) before bulk confirm.
+
+- Voice input v1: added Telegram voice/audio transcription via OpenAI with ffmpeg conversion and reuse of existing text parsing flow.
+- Receipt review UX: added edit action in per-item review and clearer preview lines with type/date markers.
