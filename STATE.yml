@@ -1,0 +1,111 @@
+project: finuchet
+repository_state:
+  git_workflow: enforced
+  secrets_in_git: false
+  db_data_in_git: false
+  backup_artifacts_in_git: false
+  docs_inventory:
+    readme: true
+    architecture_doc: true
+    runbook_doc: true
+    env_example: true
+    ops_runbook_doc: true
+runtime:
+  production_server:
+    host: s66b5610e.fastvps-server.com
+    ipv4: 45.67.128.94
+  server_path: /root/bot_finuchet
+  service: finuchet.service
+  service_status: enabled_active
+  exec_start: /root/bot_finuchet/.venv/bin/python -u /root/bot_finuchet/main.py
+  database: postgresql
+  database_name: finance_bot
+  database_restore_source: finance_bot_dump
+  telegram_api_reachable: true
+  telegram_api_probe: "curl -I --connect-timeout 8 --max-time 12 https://api.telegram.org/"
+previous_runtime:
+  old_production_server:
+    host: maximchiranov
+    ipv4: 82.146.47.28
+  prod_role: retired
+  finuchet_service: disabled
+  incident_note: telegram_api_timeout_was_infrastructure_issue
+reproducibility:
+  requirements_txt_present: true
+  includes:
+    - python-telegram-bot
+    - psycopg2-binary
+    - python-dotenv
+    - apscheduler
+    - requests
+    - dateparser
+    - rapidfuzz
+    - pandas
+    - scikit-learn
+    - joblib
+notes:
+  - Keep environment secrets only in /root/bot_finuchet/.env and/or /root/.env
+  - Apply changes via branch -> PR -> merge
+  - Any DB schema change must be added as a SQL file in migrations/
+  - Never run old and new server at the same time with one Telegram token
+
+notifications_v1:
+  enable_day_nudge_default: false
+  enable_evening_reminder_default: true
+  scheduled_jobs:
+    - evening_reminder
+    - fx_update
+    - weekly_report
+    - monthly_report
+  dedup_strategy: reminders_log_kind_with_period_key
+  db_migration_required: false
+
+stage_2_5_1_a:
+  notifications_menu: true
+  smart_morning_toggle_storage: reminders_log_opt_in_out_events
+  smart_morning_job: smart_morning_limit
+  day_nudge_registered: false
+
+stage_2_5_1_b:
+  quick_limit_adjust_buttons: true
+  callback_short_tokens_reused: true
+  button_data_invalid_risk: minimized
+  db_migration_required: false
+
+stage_global_category_learning_v1:
+  enabled: true
+  db_migration_required: false
+  confidence_source: category_feedback_aggregates
+  priority_order:
+    - personal_exact
+    - personal_fuzzy
+    - global_high_confidence
+    - ml_model
+    - user_frequency_fallback
+
+stage_global_category_learning_v1_fix:
+  alias_norm_source: normalize_alias_text
+  global_alias_priority_restored: true
+  personal_signature_op_type_added: true
+  db_migration_required: false
+
+stage_personal_quick_actions_v1_1:
+  quick_suggestions_toggle_in_settings: true
+  storage: reminders_log_quick_suggestions_opt_in_out
+  default_enabled_without_event: true
+  per_item_hide_supported: false
+  db_migration_required: false
+
+stage_2_7_budgets_hub:
+  in_settings: true
+  legacy_budget_command_redirect: true
+  active_budget_table: public.budgets
+  supports_week_month: true
+  db_migration_required: false
+
+stage_receipt_import_v1:
+  enabled: true
+  provider_env: RECEIPT_OCR_API_KEY
+  no_auto_write_without_confirmation: true
+  fallback_when_unconfigured: true
+  db_migration_required: false
