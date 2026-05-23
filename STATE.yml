@@ -88,3 +88,10 @@ stage_global_category_learning_v1_fix:
   global_alias_priority_restored: true
   personal_signature_op_type_added: true
   db_migration_required: false
+
+stage_personal_quick_actions_v1_1:
+  quick_suggestions_toggle_in_settings: true
+  storage: reminders_log_quick_suggestions_opt_in_out
+  default_enabled_without_event: true
+  per_item_hide_supported: false
+  db_migration_required: false

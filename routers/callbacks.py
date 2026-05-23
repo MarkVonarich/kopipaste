@@ -14,6 +14,7 @@ from db.queries import (
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
     get_limit_spent, adjust_limit_amount, record_category_confirmation
+    ,get_quick_suggestions_enabled, set_quick_suggestions_enabled
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from ui.keyboards import ml_top2_kb
@@ -410,6 +411,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
              InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
             [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
+            [InlineKeyboardButton('⚡ Быстрые записи', callback_data='menu_quick_suggestions')],
             [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
             [InlineKeyboardButton('1️⃣ Установить бюджет', callback_data='menu_set_budget')],
             [InlineKeyboardButton('📉 Лимиты по категориям', callback_data='cl_menu')],
@@ -434,6 +436,34 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
         ])
         return await q.edit_message_text(text, reply_markup=kb)
+
+    if data == 'menu_quick_suggestions':
+        enabled = get_quick_suggestions_enabled(cid)
+        status = 'включены' if enabled else 'выключены'
+        toggle_text = '⛔ Выключить' if enabled else '✅ Включить'
+        toggle_cb = 'quick_sugg_off' if enabled else 'quick_sugg_on'
+        text = (
+            '⚡ Быстрые записи\n\n'
+            'Показываю до 2 частых расходов, чтобы записывать их в один тап.\n\n'
+            f'Статус: {status}'
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(toggle_text, callback_data=toggle_cb)],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+        ])
+        return await q.edit_message_text(text, reply_markup=kb)
+
+    if data == 'quick_sugg_on':
+        set_quick_suggestions_enabled(cid, True)
+        await q.answer('Быстрые записи включены')
+        q.data = 'menu_quick_suggestions'
+        return await callback_handler(update, context)
+
+    if data == 'quick_sugg_off':
+        set_quick_suggestions_enabled(cid, False)
+        await q.answer('Быстрые записи выключены')
+        q.data = 'menu_quick_suggestions'
+        return await callback_handler(update, context)
 
     if data == 'notif_morning_on':
         set_smart_morning_limits_enabled(cid, True)

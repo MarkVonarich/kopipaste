@@ -52,3 +52,5 @@ All further changes follow:
 - Stage global category learning v1: added cross-user alias learning with confidence scoring and admin debug command /admin_category_learning_debug.
 
 - Global learning bugfix: alias/global signals restored as high-priority (e.g. дикси -> Продукты), signature mismatch fixed, debug command expanded.
+
+- Personal Quick Actions v1.1: removed per-item hide path and added global quick suggestions toggle in settings (default enabled, user opt-out supported).

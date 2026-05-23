@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta, timezone
-from db.database import pg_query
+from db.database import pg_fetchall
 
 UTC = timezone.utc
 
 THRESHOLD_REPEATS = 4       # твой порог
 WINDOW_DAYS = 60            # окно анализа
-MAX_BUTTONS = 3
+MAX_BUTTONS = 2
 
 def get_quick_buttons(user_id: int, chat_id: int | None = None) -> list[tuple[str, str]]:
     """
@@ -15,7 +15,7 @@ def get_quick_buttons(user_id: int, chat_id: int | None = None) -> list[tuple[st
     """
     since = datetime.now(tz=UTC) - timedelta(days=WINDOW_DAYS)
     if chat_id:
-        rows = pg_query("""
+        rows = pg_fetchall("""
             SELECT category, amount, COUNT(*) AS c
             FROM public.operations
             WHERE user_id = %s AND chat_id = %s AND created_at >= %s
@@ -26,7 +26,7 @@ def get_quick_buttons(user_id: int, chat_id: int | None = None) -> list[tuple[st
             LIMIT %s
         """, (user_id, chat_id, since, THRESHOLD_REPEATS, MAX_BUTTONS))
     else:
-        rows = pg_query("""
+        rows = pg_fetchall("""
             SELECT category, amount, COUNT(*) AS c
             FROM public.operations
             WHERE user_id = %s AND created_at >= %s
@@ -38,8 +38,9 @@ def get_quick_buttons(user_id: int, chat_id: int | None = None) -> list[tuple[st
         """, (user_id, since, THRESHOLD_REPEATS, MAX_BUTTONS))
 
     buttons: list[tuple[str, str]] = []
-    for r in rows:
-        label = f"{r['category']} {int(r['amount']) if float(r['amount']).is_integer() else r['amount']}"
-        payload = f"quick::{r['category']}::{r['amount']}"
+    for category, amount, _c in rows:
+        amount_fmt = int(amount) if float(amount).is_integer() else amount
+        label = f"{category} {amount_fmt}"
+        payload = f"quick::{category}::{amount_fmt}"
         buttons.append((label, payload))
     return buttons
