@@ -21,6 +21,7 @@ from routers.commands import (
     cmd_start, cmd_settings, cmd_budget, cmd_export, cmd_about, cmd_limits,
     cmd_mlstats, cmd_mltrain, on_startup,
     cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
+    cmd_admin_category_learning_debug,
 )
 from routers.callbacks import callback_handler
 from routers.messages import handle_text, handle_location
@@ -68,6 +69,7 @@ def main():
     app.add_handler(CommandHandler("admin_weekly_report_preview", cmd_admin_weekly_report_preview))
     app.add_handler(CommandHandler("admin_monthly_report_preview", cmd_admin_monthly_report_preview))
     app.add_handler(CommandHandler("admin_smart_morning_preview", cmd_admin_smart_morning_preview))
+    app.add_handler(CommandHandler("admin_category_learning_debug", cmd_admin_category_learning_debug))
 
     # ✅ patterns ^sugg_… раньше общего callback_handler
     register_suggestions(app)

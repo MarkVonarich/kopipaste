@@ -13,13 +13,12 @@ from db.queries import (
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
-    get_limit_spent, adjust_limit_amount
+    get_limit_spent, adjust_limit_amount, record_category_confirmation
 )
-from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from ui.keyboards import ml_top2_kb
 from services.analytics import build_report
-from services.ml_prep import normalize_for_ml
+from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 
 log = logging.getLogger(__name__)
@@ -884,8 +883,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        upsert_user_alias(cid, merch, typ, cat)
-        bump_global_popularity(merch, typ, cat, 1)
+        alias_norm = normalize_alias_text(raw_text or merch)
+        record_category_confirmation(cid, raw_text or merch, alias_norm, cat, typ, 'accept')
         if p.get('from_ml_decline'):
             try:
                 log_category_feedback(
@@ -904,8 +903,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             log_category_feedback(
                 user_id=cid,
                 chat_id=cid,
-                raw_text=merch,
-                norm_text=merch,
+                raw_text=raw_text or merch,
+                norm_text=normalize_alias_text(raw_text or merch),
                 suggested_cat=cat,
                 chosen_cat=cat,
                 op_type=typ,
@@ -947,8 +946,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         dt = p.get('time', datetime.now())
         note = p.get('note')
 
-        upsert_user_alias(cid, merch, typ, cat)
-        bump_global_popularity(merch, typ, cat, 1)
+        alias_norm = normalize_alias_text(context.user_data.get('batch_item_text') or merch)
+        record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, cat, typ, 'accept')
         try:
             log_category_feedback(
                 user_id=cid,

@@ -48,3 +48,5 @@ All further changes follow:
 - Added smart_morning_limit scheduler job; day_nudge remains disabled.
 
 - Stage 2.5.1-B: limit card now shows spent/remaining and has quick adjust buttons (-1000/-500/+500/+1000) using short token callbacks.
+
+- Stage global category learning v1: added cross-user alias learning with confidence scoring and admin debug command /admin_category_learning_debug.

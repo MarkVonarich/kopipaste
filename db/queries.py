@@ -6,6 +6,8 @@ from datetime import date, timedelta
 from psycopg2.extras import Json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
+from services.ml_prep import normalize_alias_text
+import math
 
 
 def set_smart_morning_limits_enabled(user_id: int, enabled: bool):
@@ -501,6 +503,28 @@ def get_local_alias(user_id: int, text: str):
     """, (user_id, nt))
     return (rows[0][0], rows[0][1]) if rows else None
 
+
+def get_personal_category_suggestion(user_id: int, alias_norm: str):
+    rows = pg_fetchall("""
+        SELECT type, category
+        FROM public.user_aliases
+        WHERE user_id=%s AND norm_text=%s
+        LIMIT 1
+    """, (user_id, alias_norm))
+    if rows:
+        return {'type': rows[0][0], 'category': rows[0][1], 'reason': 'personal_exact'}
+    rows = pg_fetchall("""
+        SELECT type, category, COUNT(*) c
+        FROM public.user_aliases
+        WHERE user_id=%s AND (norm_text LIKE %s OR %s LIKE norm_text || '%%')
+        GROUP BY type, category
+        ORDER BY c DESC
+        LIMIT 1
+    """, (user_id, f"{alias_norm}%", alias_norm))
+    if rows:
+        return {'type': rows[0][0], 'category': rows[0][1], 'reason': 'personal_fuzzy'}
+    return None
+
 def get_global_alias(text: str):
     """
     Возвращает (type, category) из global_aliases по нормализованному тексту,
@@ -519,6 +543,54 @@ def get_global_alias(text: str):
          LIMIT 1
     """, (nt,))
     return (rows[0][0], rows[0][1]) if rows else None
+
+
+def get_global_category_suggestion(alias_norm: str, op_type: str = 'Расходы'):
+    rows = pg_fetchall("""
+        SELECT chosen_cat,
+               COUNT(*)::int AS positive_votes,
+               COUNT(DISTINCT user_id)::int AS distinct_users
+        FROM public.category_feedback
+        WHERE norm_text=%s
+          AND op_type=%s
+          AND event_type IN ('accept', 'decline')
+          AND chosen_cat IS NOT NULL
+          AND chosen_cat<>''
+        GROUP BY chosen_cat
+        ORDER BY positive_votes DESC
+    """, (alias_norm, op_type))
+    if not rows:
+        return None
+    total_votes = sum(int(r[1] or 0) for r in rows)
+    winner = rows[0]
+    cat = winner[0]
+    positive_votes = int(winner[1] or 0)
+    distinct_users = int(winner[2] or 0)
+    dominance_ratio = (positive_votes / total_votes) if total_votes else 0.0
+    log_boost = min(1.3, 1.0 + math.log1p(distinct_users) / 10.0 + math.log1p(total_votes) / 20.0)
+    confidence = min(0.99, dominance_ratio * log_boost)
+    level = 'low'
+    if distinct_users >= 3 and positive_votes >= 3 and dominance_ratio >= 0.75:
+        level = 'high'
+    elif positive_votes >= 2 and dominance_ratio >= 0.60:
+        level = 'medium'
+    return {
+        'category': cat,
+        'type': op_type,
+        'confidence': confidence,
+        'dominance_ratio': dominance_ratio,
+        'votes_count': total_votes,
+        'positive_votes': positive_votes,
+        'distinct_users': distinct_users,
+        'level': level,
+    }
+
+
+def record_category_confirmation(user_id: int, raw_text: str, alias_norm: str, category: str, op_type: str, source: str):
+    norm = alias_norm or normalize_alias_text(raw_text)
+    upsert_user_alias(user_id, norm, op_type, category)
+    bump_global_alias(norm, op_type, category, 1)
+    log_category_feedback(user_id, user_id, raw_text, norm, category, category, op_type, source)
 
 
 def log_category_feedback(user_id: int, chat_id: int, raw_text: str, norm_text: str,

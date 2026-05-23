@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Dict, Tuple
 
-from db.queries import get_local_alias, get_global_alias, get_user_top_categories
+from db.queries import get_personal_category_suggestion, get_global_category_suggestion, get_user_top_categories
 from services.ml_bias import apply_user_bias
 from services.ml_infer import model_is_fresh, predict_top2
 
@@ -19,17 +19,17 @@ def _pack(cat1: str, cat2: str, s1: float = 0.6, s2: float = 0.4) -> List[Dict]:
 
 
 def _baseline_top2(user_id: int, normalized_text: str, detected_type: str) -> Tuple[List[Dict], str]:
-    local = get_local_alias(user_id, normalized_text)
-    if local:
-        typ, cat = local
-        if typ == detected_type and cat:
-            return _pack(cat, 'Другое', 0.8, 0.2), 'local_alias'
+    personal = get_personal_category_suggestion(user_id, normalized_text)
+    if personal and personal.get('type') == detected_type and personal.get('category'):
+        if personal.get('reason') == 'personal_exact':
+            return _pack(personal['category'], 'Другое', 0.92, 0.08), 'personal_exact'
+        return _pack(personal['category'], 'Другое', 0.82, 0.18), 'personal_fuzzy'
 
-    glob = get_global_alias(normalized_text)
-    if glob:
-        typ, cat = glob
-        if typ == detected_type and cat:
-            return _pack(cat, 'Другое', 0.7, 0.3), 'global_alias'
+    glob = get_global_category_suggestion(normalized_text, detected_type)
+    if glob and glob.get('category') and glob.get('level') in ('high', 'medium'):
+        s1 = max(0.6, float(glob.get('confidence', 0.6)))
+        s2 = max(0.01, 1.0 - s1)
+        return _pack(glob['category'], 'Другое', s1, s2), f"global_{glob.get('level')}"
 
     top = get_user_top_categories(user_id=user_id, op_type=detected_type, lookback_ops=50)
     if len(top) >= 2:
@@ -41,6 +41,16 @@ def _baseline_top2(user_id: int, normalized_text: str, detected_type: str) -> Tu
 
 
 def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str) -> Tuple[List[Dict], Dict]:
+    top2, baseline_reason = _baseline_top2(user_id, normalized_text, detected_type)
+    if baseline_reason in ('personal_exact', 'personal_fuzzy', 'global_high'):
+        biased, bias_meta = apply_user_bias(user_id, normalized_text, top2)
+        return biased, {
+            'reason': baseline_reason,
+            'source': 'baseline',
+            'stage': '2.5.4',
+            'bias': bias_meta,
+        }
+
     source = 'baseline'
     model_meta: Dict = {}
     try:
@@ -52,7 +62,7 @@ def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str)
                 return biased, {
                     'reason': 'model_predict',
                     'source': source,
-                    'stage': '2.3',
+                    'stage': '2.5.4',
                     'model_version': model_meta.get('model_version'),
                     'trained_at': model_meta.get('trained_at'),
                     'bias': bias_meta,
@@ -60,7 +70,6 @@ def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str)
     except Exception:
         source = 'baseline'
 
-    top2, baseline_reason = _baseline_top2(user_id, normalized_text, detected_type)
     biased, bias_meta = apply_user_bias(user_id, normalized_text, top2)
     return biased, {
         'reason': baseline_reason,

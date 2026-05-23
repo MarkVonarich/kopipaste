@@ -23,6 +23,8 @@ _EMOJI_RE = re.compile(
 # numbers are replaced by <num> later.
 _PUNCT_RE = re.compile(r"[^\w\s₽$€£¥₸₹₴₾%]", flags=re.UNICODE)
 _NUM_RE = re.compile(r"\d+(?:[\s\.,]\d+)*", flags=re.UNICODE)
+_DATE_WORDS_RE = re.compile(r"\b(сегодня|вчера|завтра|позавчера|пн|вт|ср|чт|пт|сб|вс)\b", flags=re.UNICODE)
+_CURRENCY_NOISE_RE = re.compile(r"\b(руб|рублей|р|usd|eur|kzt|byn|tenge|тенге)\b", flags=re.UNICODE)
 
 
 def normalize_for_ml(text: str) -> str:
@@ -37,5 +39,23 @@ def normalize_for_ml(text: str) -> str:
     s = _EMOJI_RE.sub(" ", s)
     s = _PUNCT_RE.sub(" ", s)
     s = _NUM_RE.sub(" <num> ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def normalize_alias_text(raw_text: str) -> str:
+    """
+    Normalization for global/personal alias learning (human-readable alias key):
+    - lowercase
+    - remove emoji and punctuation noise
+    - strip numbers/currency/date words
+    - collapse spaces
+    """
+    s = (raw_text or "").lower().strip()
+    s = _EMOJI_RE.sub(" ", s)
+    s = _PUNCT_RE.sub(" ", s)
+    s = _NUM_RE.sub(" ", s)
+    s = _DATE_WORDS_RE.sub(" ", s)
+    s = _CURRENCY_NOISE_RE.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s

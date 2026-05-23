@@ -8,13 +8,12 @@ from telegram import ReplyKeyboardRemove
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
 from services.records import get_user_alias, record_operation
-from cache.global_dict import bump_global_popularity
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key
-from services.ml_prep import normalize_for_ml
+from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
+from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 import logging
 
@@ -261,9 +260,8 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         amt = p.get('amt', 0)
         dt  = p.get('time', datetime.now())
         note = p.get('note')
-        from db.queries import upsert_user_alias
-        upsert_user_alias(cid, merch, typ, new_cat)
-        bump_global_popularity(merch, typ, new_cat, 1)
+        alias_norm = normalize_alias_text(context.user_data.get('batch_item_text') or merch)
+        record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, new_cat, typ, 'accept')
         context.user_data['batch_item_text'] = text
         return await record_operation(new_cat, amt, dt, typ, update, context, note)
 
