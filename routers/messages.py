@@ -16,6 +16,7 @@ from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
+from utils.spoken_numbers import normalize_spoken_money_ru
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
@@ -246,7 +247,7 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
-            [InlineKeyboardButton('✏️ Проверить', callback_data='receipt_review_one')],
+            [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_review_one')],
             [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
         ])
         if result.warning:
@@ -294,9 +295,21 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             text = (getattr(tr, 'text', None) or '').strip()
         if not text:
             return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
+        log.info('voice_transcribe: ok user=%s', update.effective_chat.id)
         await emsg.reply_text(f'Распознал: {text[:180]}')
-        update.message.text = text
-        return await handle_text(update, context)
+        normalized_text, changed = normalize_spoken_money_ru(text)
+        log.info('voice_normalized_text: changed=%s user=%s', changed, update.effective_chat.id)
+        try:
+            parse_user_input(normalized_text)
+            parse_ok = True
+        except ValueError:
+            parse_ok = False
+        if not parse_ok:
+            log.info('voice_to_text_flow: failed user=%s', update.effective_chat.id)
+            return await emsg.reply_text(f'Но не понял сумму. Попробуй так: {normalized_text[:120] or "такси 750"}')
+        await _process_free_text(update, context, normalized_text)
+        log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
+        return
     except Exception as e:
         log.warning('voice transcribe failed user=%s reason=%s', update.effective_chat.id, type(e).__name__)
         return await emsg.reply_text('Не смог распознать голос. Попробуй ещё раз или напиши текстом.')

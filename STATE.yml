@@ -156,3 +156,15 @@ stage_voice_input_v1_1:
   ffmpeg_optional_direct_transcribe_fallback: true
   admin_voice_status_command: true
   db_migration_required: false
+
+stage_voice_input_v1_2:
+  spoken_ru_number_normalization: true
+  normalize_range_max: 999999
+  text_flow_reuse_after_transcribe: true
+  avoid_false_voice_failure_after_successful_transcribe: true
+  db_migration_required: false
+
+stage_receipt_review_v1_3:
+  preview_cta_label: "✏️ Изменить"
+  emits_standard_operation_confirmation_cards_on_save: true
+  db_migration_required: false

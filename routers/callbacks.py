@@ -21,12 +21,25 @@ from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from db.queries import insert_operation
+from ui.messages import render_operation_confirmation
 
 log = logging.getLogger(__name__)
 
 
 def _fmt_money(v: int) -> str:
     return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str):
+    second = InlineKeyboardButton('💰 Остаток', callback_data='status') if op_type == 'Расходы' else InlineKeyboardButton('💵 Доходы', callback_data='income_status')
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
+        second,
+        InlineKeyboardButton('✏️ Изменить', callback_data='op_edit'),
+    ]])
+    name = (getattr(user, 'full_name', None) or getattr(user, 'first_name', None) or getattr(user, 'username', None) or 'Пользователь')
+    text = render_operation_confirmation(name=name, amount=amount, currency=get_user_currency(chat_id), category=category, op_dt=dt, original=comment, op_kind=op_type)
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown', reply_markup=kb)
 
 
 def _budget_spent(user_id: int, period: str) -> int:
@@ -87,7 +100,7 @@ def _receipt_render_list(cands: list[dict], warning: str | None = None) -> tuple
         lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
-        [InlineKeyboardButton('✏️ Проверить', callback_data='receipt_review_one')],
+        [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_review_one')],
         [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
     ])
     return '\n'.join(lines), kb
@@ -664,6 +677,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('receipt_candidates', None)
         context.user_data.pop('receipt_warning', None)
         context.user_data.pop('receipt_review_idx', None)
+        context.user_data.pop('receipt_saved_count', None)
+        context.user_data.pop('receipt_skipped_count', None)
         await q.answer('Отменено')
         return await _safe_edit_or_reply(q, '❌ Импорт отменён.')
 
@@ -673,6 +688,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer('Нет данных для проверки', show_alert=True)
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
         context.user_data['receipt_review_idx'] = 0
+        context.user_data['receipt_saved_count'] = 0
+        context.user_data['receipt_skipped_count'] = 0
         await q.answer()
         text, kb = _receipt_render_card(cands, 0)
         return await _safe_edit_or_reply(q, text, reply_markup=kb)
@@ -701,17 +718,22 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             amount = int(cur.get('amount') or 0)
             if amount > 0:
                 insert_operation(cid, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
+                await _send_standard_op_confirmation(context, cid, update.effective_user, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
                 log.info('receipt_review: saved index=%s user=%s', idx, cid)
+                context.user_data['receipt_saved_count'] = int(context.user_data.get('receipt_saved_count') or 0) + 1
                 await q.answer('Сохранено')
         else:
             log.info('receipt_review: skipped index=%s user=%s', idx, cid)
+            context.user_data['receipt_skipped_count'] = int(context.user_data.get('receipt_skipped_count') or 0) + 1
             await q.answer('Пропущено')
         cands.pop(idx)
         context.user_data['receipt_candidates'] = cands
         if not cands:
             context.user_data.pop('receipt_candidates', None)
             context.user_data.pop('receipt_review_idx', None)
-            return await _safe_edit_or_reply(q, '✅ Проверка завершена. Операции обработаны.')
+            saved = int(context.user_data.pop('receipt_saved_count', 0) or 0)
+            skipped = int(context.user_data.pop('receipt_skipped_count', 0) or 0)
+            return await _safe_edit_or_reply(q, f'✅ Готово: записано {saved}, пропущено {skipped}.')
         next_idx = min(idx, len(cands) - 1)
         context.user_data['receipt_review_idx'] = next_idx
         text, kb = _receipt_render_card(cands, next_idx)
@@ -809,6 +831,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для записи.')
         total = 0
         written = 0
+        skipped = 0
         for c in cands:
             try:
                 dt = datetime.fromisoformat(c['date']).date()
@@ -816,8 +839,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 dt = date.today()
             amount = int(c.get('amount') or 0)
             if amount <= 0:
+                skipped += 1
                 continue
             insert_operation(cid, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
+            await _send_standard_op_confirmation(context, cid, update.effective_user, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
             total += amount
             written += 1
         log.info('receipt_confirm_all: inserted=%s user=%s', written, cid)
@@ -829,7 +854,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('📊 Отчёт', callback_data='menu_report')],
             [InlineKeyboardButton('⬅️ Меню', callback_data='start_main')],
         ])
-        return await _safe_edit_or_reply(q, f'✅ Записал {written} операции на сумму {total} ₽', reply_markup=kb)
+        return await _safe_edit_or_reply(q, f'✅ Готово: записано {written}, пропущено {skipped}. Сумма: {total} ₽', reply_markup=kb)
 
     if data == 'notif_morning_on':
         set_smart_morning_limits_enabled(cid, True)
