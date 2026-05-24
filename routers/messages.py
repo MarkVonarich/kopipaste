@@ -98,6 +98,46 @@ def _parse_flexible_date(text: str):
         return None
     return None
 
+
+def _parse_reminder_event_date(text: str, today):
+    t = (text or '').strip().lower()
+    if t in {'сегодня', 'today'}:
+        return today
+    if t in {'завтра', 'tomorrow'}:
+        from datetime import timedelta
+        return today + timedelta(days=1)
+    if t == 'послезавтра':
+        from datetime import timedelta
+        return today + timedelta(days=2)
+    try:
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', t):
+            return datetime.strptime(t, '%Y-%m-%d').date()
+        if re.fullmatch(r'\d{1,2}\.\d{1,2}\.\d{2,4}', t):
+            fmt = '%d.%m.%Y' if len(t.split('.')[-1]) == 4 else '%d.%m.%y'
+            return datetime.strptime(t, fmt).date()
+        if re.fullmatch(r'\d{1,2}\.\d{1,2}', t):
+            d = datetime.strptime(f'{t}.{today.year}', '%d.%m.%Y').date()
+            return d if d >= today else d.replace(year=today.year + 1)
+        m = re.fullmatch(r'(\d{1,2})(?:\s*(?:число|числа|-?го|го))?$', t)
+        if m:
+            day = int(m.group(1))
+            if day < 1 or day > 31:
+                return None
+            from calendar import monthrange
+            y, mo = today.year, today.month
+            for _ in range(24):
+                mdays = monthrange(y, mo)[1]
+                if day <= mdays:
+                    cand = today.replace(year=y, month=mo, day=day)
+                    if cand >= today:
+                        return cand
+                mo += 1
+                if mo > 12:
+                    mo = 1; y += 1
+    except Exception:
+        return None
+    return None
+
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
     """Reply in markdown, fallback to plain text if telegram rejects entities."""
     try:
@@ -392,32 +432,48 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         if not parsed:
             log.info('reminder_wizard_title_amount_parsed ok=false user=%s', cid)
             context.user_data['await_rem_title_amount'] = True
-            return await emsg.reply_text('Не понял сумму. Напиши так: ChatGPT 1990')
+            return await update.message.reply_text('Не понял сумму. Напиши так: ChatGPT 1990')
+
         log.info('reminder_wizard_title_amount_parsed ok=true user=%s', cid)
         context.user_data.pop('await_rem_title_amount', None)
         merch, amt = parsed
-        d = context.user_data.setdefault('rem_draft', {})
-        d['title'] = merch
-        d['amount'] = int(amt)
-        d['category'] = 'Прочее' if d.get('rem_type') != 'Доходы' else 'Переводы'
-        d['step'] = 'category'
+        draft = context.user_data.get('rem_draft') or {}
+        rem_type = draft.get('rem_type') or 'Расходы'
+        draft['title'] = merch
+        draft['amount'] = int(amt)
+        draft['rem_type'] = rem_type
+        draft['step'] = 'category'
+        context.user_data['rem_draft'] = draft
+        context.user_data['await_rem_category'] = True
         log.info('reminder_wizard_next_step=category user=%s', cid)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('Заведения', callback_data='rem_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rem_cat_prod')],
-            [InlineKeyboardButton('Транспорт', callback_data='rem_cat_tr'), InlineKeyboardButton('Подписки', callback_data='rem_cat_sub')],
-            [InlineKeyboardButton('Прочее', callback_data='rem_cat_other')],
-            [InlineKeyboardButton('✏️ Другая', callback_data='rem_cat_custom')],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
-        ])
+
+        if rem_type == 'Доходы':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Зарплата', callback_data='rem_cat_salary'), InlineKeyboardButton('Переводы', callback_data='rem_cat_transfer')],
+                [InlineKeyboardButton('Кэшбэк', callback_data='rem_cat_cashback'), InlineKeyboardButton('Прочее', callback_data='rem_cat_other')],
+                [InlineKeyboardButton('✏️ Другая', callback_data='rem_cat_custom')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+            ])
+        else:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Заведения', callback_data='rem_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rem_cat_prod')],
+                [InlineKeyboardButton('Транспорт', callback_data='rem_cat_tr'), InlineKeyboardButton('Подписки', callback_data='rem_cat_sub')],
+                [InlineKeyboardButton('Прочее', callback_data='rem_cat_other')],
+                [InlineKeyboardButton('✏️ Другая', callback_data='rem_cat_custom')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+            ])
         try:
             log.info('reminder_wizard_category_ui_send_start user=%s', cid)
-            msg = await update.message.reply_text('Выбери категорию', reply_markup=kb)
-            context.user_data['rem_last_msg_id'] = getattr(msg, 'message_id', None)
+            await update.message.reply_text('Выбери категорию', reply_markup=kb)
             log.info('reminder_wizard_category_ui_send_ok user=%s', cid)
             return
-        except Exception as e:
-            log.exception('reminder_wizard_category_ui_send_failed user=%s err=%s', cid, type(e).__name__)
-            return await emsg.reply_text('Не смог открыть выбор категории. Попробуй /reminders ещё раз.')
+        except Exception:
+            log.exception('reminder_wizard_category_ui_send_failed user=%s', cid)
+            try:
+                await update.message.reply_text('Не смог открыть выбор категории. Попробуй /reminders ещё раз.')
+            except Exception:
+                pass
+            return
 
     if context.user_data.get('await_rem_edit'):
         st = context.user_data.pop('await_rem_edit')
@@ -429,10 +485,12 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 if field == 'category_draft':
                     d['category'] = norm_text(text)[:64] or 'Прочее'
                 elif field == 'date_draft':
-                    dd = _parse_flexible_date(text)
+                    dd = _parse_reminder_event_date(text, datetime.now().date())
+                    log.info('reminder_date_input raw=%s parsed_ok=%s user=%s', (text or '')[:32], bool(dd), cid)
                     if not dd:
-                        raise ValueError('date')
+                        return await emsg.reply_text('Не понял дату. Напиши, например: 19, 19 число или 19.06.2026')
                     d['event_date'] = dd
+                    log.info('reminder_date_selected source=manual event_date=%s user=%s', dd.isoformat(), cid)
                 elif field == 'repeat_draft':
                     n = int((text or '').strip())
                     if n < 1 or n > 3650:
@@ -452,10 +510,12 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             elif field == 'category':
                 reminder_update(cid, rid, category=norm_text(text)[:64] or 'Прочее')
             elif field == 'date':
-                d = _parse_flexible_date(text)
+                d = _parse_reminder_event_date(text, datetime.now().date())
+                log.info('reminder_date_input raw=%s parsed_ok=%s user=%s', (text or '')[:32], bool(d), cid)
                 if not d:
-                    raise ValueError('date')
+                    return await emsg.reply_text('Не понял дату. Напиши, например: 19, 19 число или 19.06.2026')
                 reminder_update(cid, rid, event_date=d)
+                log.info('reminder_date_selected source=manual event_date=%s user=%s', d.isoformat(), cid)
             elif field == 'repeat':
                 t = (text or '').strip().lower()
                 if t.startswith('custom_days:'):

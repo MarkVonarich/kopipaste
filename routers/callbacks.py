@@ -34,6 +34,19 @@ def _fmt_money(v: int) -> str:
     return f"{int(v):,}".replace(',', ' ') + ' ₽'
 
 
+def _next_monthly_date(dt: date) -> date:
+    y, m = dt.year, dt.month + 1
+    if m > 12:
+        y, m = y + 1, 1
+    from calendar import monthrange
+    d = min(dt.day, monthrange(y, m)[1])
+    return date(y, m, d)
+
+
+def _repeat_label(r: str, d: dict) -> str:
+    return {'none': 'не повторять', 'weekly': 'каждую неделю', 'monthly': 'каждый месяц', 'yearly': 'каждый год', 'custom_days': f"каждые {int(d.get('repeat_interval_days') or 1)} дней"}.get(r or 'none', r or 'none')
+
+
 def _reminders_menu_kb(has_any: bool):
     if has_any:
         return InlineKeyboardMarkup([
@@ -645,14 +658,19 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         ])
         return await _safe_edit_or_reply(q, txt, reply_markup=kb)
 
-    if data in {'rem_cat_zav', 'rem_cat_prod', 'rem_cat_tr', 'rem_cat_sub', 'rem_cat_other', 'rem_cat_custom'}:
+    if data in {'rem_cat_zav', 'rem_cat_prod', 'rem_cat_tr', 'rem_cat_sub', 'rem_cat_other', 'rem_cat_custom', 'rem_cat_salary', 'rem_cat_transfer', 'rem_cat_cashback'}:
         d = context.user_data.setdefault('rem_draft', {})
         log.info('reminder_wizard_category_selected user=%s cb=%s', cid, data)
         if data == 'rem_cat_custom':
             context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'category_draft'}
             await q.answer()
             return await q.message.reply_text('Введи категорию:')
-        d['category'] = {'rem_cat_zav': 'Заведения', 'rem_cat_prod': 'Продукты', 'rem_cat_tr': 'Транспорт', 'rem_cat_sub': 'Подписки', 'rem_cat_other': 'Прочее'}[data]
+        d['category'] = {
+            'rem_cat_zav': 'Заведения', 'rem_cat_prod': 'Продукты', 'rem_cat_tr': 'Транспорт',
+            'rem_cat_sub': 'Подписки', 'rem_cat_other': 'Прочее', 'rem_cat_salary': 'Зарплата',
+            'rem_cat_transfer': 'Переводы', 'rem_cat_cashback': 'Кэшбэк'
+        }[data]
+        context.user_data.pop('await_rem_category', None)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('Сегодня', callback_data='rem_dt_today'), InlineKeyboardButton('Завтра', callback_data='rem_dt_tom')],
             [InlineKeyboardButton('1 число', callback_data='rem_dt_1'), InlineKeyboardButton('15 число', callback_data='rem_dt_15')],
@@ -660,7 +678,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
         ])
         await q.answer()
-        msg = await q.message.reply_text('Когда событие?', reply_markup=kb)
+        msg = await q.message.reply_text('Когда первое событие?\n\nМожно написать:\n19\n19 число\n19.06\n19.06.2026\nзавтра\n\nДля регулярных платежей это будет первая дата, дальше повтор настроим следующим шагом.', reply_markup=kb)
         context.user_data['rem_last_msg_id'] = getattr(msg, 'message_id', None)
         log.info('reminder_wizard_date_ui_send_ok user=%s', cid)
         return
@@ -669,12 +687,16 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         t = date.today()
         if data == 'rem_dt_today': d['event_date'] = t
         elif data == 'rem_dt_tom': d['event_date'] = t + timedelta(days=1)
-        elif data == 'rem_dt_1': d['event_date'] = t.replace(day=1)
-        elif data == 'rem_dt_15': d['event_date'] = t.replace(day=15)
+        elif data == 'rem_dt_1':
+            d['event_date'] = t.replace(day=1) if t.day <= 1 else _next_monthly_date(t.replace(day=1))
+        elif data == 'rem_dt_15':
+            d['event_date'] = t.replace(day=15) if t.day <= 15 else _next_monthly_date(t.replace(day=15))
         elif data == 'rem_dt_in':
             context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'date_draft'}
             await q.answer()
-            return await q.message.reply_text('Введи дату:')
+            prompt = 'Когда первое списание?' if (d.get('repeat_rule') != 'none') else 'Когда первое событие?'
+            return await q.message.reply_text(f'{prompt}\n\nМожно написать:\n19\n19 число\n19.06\n19.06.2026')
+        log.info('reminder_date_selected source=button event_date=%s user=%s', d['event_date'].isoformat(), cid)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('Не повторять', callback_data='rem_r_none')],
             [InlineKeyboardButton('Каждую неделю', callback_data='rem_r_week'), InlineKeyboardButton('Каждый месяц', callback_data='rem_r_month')],
@@ -711,8 +733,21 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return await q.message.reply_text('За сколько дней напомнить? (0..30)')
         d['notify_days_before'] = int(data.split('_')[-1])
+        ev = d.get('event_date')
+        rpt = d.get('repeat_rule', 'none')
+        next_after = None
+        if rpt == 'weekly': next_after = ev + timedelta(days=7)
+        elif rpt == 'monthly': next_after = _next_monthly_date(ev)
+        elif rpt == 'yearly':
+            try: next_after = ev.replace(year=ev.year + 1)
+            except Exception: next_after = ev.replace(month=2, day=28, year=ev.year + 1)
+        elif rpt == 'custom_days': next_after = ev + timedelta(days=int(d.get('repeat_interval_days') or 1))
+        log.info('reminder_repeat_semantics repeat_rule=%s event_date=%s next_after=%s user=%s', rpt, ev.isoformat(), (next_after.isoformat() if next_after else '-'), cid)
+        date_label = 'Первое списание' if rpt != 'none' else 'Дата'
         txt = (f"🔔 Напоминание\n\n{d.get('title','—')} — {_fmt_money(int(d.get('amount',0)))}\nТип: {d.get('rem_type','Расходы')}\n"
-               f"Категория: {d.get('category','Прочее')}\nДата: {d.get('event_date')}\nПовтор: {d.get('repeat_rule')}\nНапомнить: за {d.get('notify_days_before',1)} дня")
+               f"Категория: {d.get('category','Прочее')}\n{date_label}: {ev.strftime('%d.%m.%Y')}\nПовтор: {_repeat_label(rpt, d)}" +
+               (f"\nСледующее после этого: {next_after.strftime('%d.%m.%Y')}" if next_after else '') +
+               f"\nНапомнить: за {d.get('notify_days_before',1)} дня")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Сохранить', callback_data='rem_save')], [InlineKeyboardButton('✏️ Изменить', callback_data='rem_add')], [InlineKeyboardButton('❌ Отмена', callback_data='rem_menu')]])
         await q.answer()
         return await _safe_edit_or_reply(q, txt, reply_markup=kb)
@@ -1715,7 +1750,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         elif r['repeat_rule'] == 'weekly':
             reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=7)))
         elif r['repeat_rule'] == 'monthly':
-            nd = r['event_date'] + timedelta(days=32); nd = nd.replace(day=min(r['event_date'].day, 28))
+            nd = _next_monthly_date(r['event_date'])
             reminder_update(cid, rid, event_date=nd)
         elif r['repeat_rule'] == 'yearly':
             reminder_update(cid, rid, event_date=r['event_date'].replace(year=r['event_date'].year + 1))
