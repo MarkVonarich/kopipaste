@@ -252,7 +252,7 @@ async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
         f"VOICE_INPUT_ENABLED: {VOICE_INPUT_ENABLED}\n"
         f"VOICE_TRANSCRIBE_PROVIDER: {VOICE_TRANSCRIBE_PROVIDER}\n"
         f"VOICE_TRANSCRIBE_MODEL: {VOICE_TRANSCRIBE_MODEL}\n"
-        f"ffmpeg_available: {bool(shutil.which('ffmpeg'))}\n"
-        f"api_key_loaded: {key_loaded}"
+        f"OPENAI_KEY_LOADED: {key_loaded}\n"
+        f"FFMPEG_AVAILABLE: {bool(shutil.which('ffmpeg'))}"
     )
     await update.message.reply_text(txt)

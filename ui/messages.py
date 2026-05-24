@@ -102,3 +102,29 @@ def render_final_reply(
     if orig_line:
         return f"{line1}\n{date_str}\n{orig_line}"
     return f"{line1}\n{date_str}"
+
+
+def render_operation_confirmation(
+    name: str,
+    amount: Union[int, float],
+    currency: str,
+    category: str,
+    op_dt: Union[date, datetime],
+    original: Optional[str] = None,
+    op_kind: Optional[str] = None,
+    note: Optional[str] = None,
+) -> str:
+    """
+    Backward-compatible alias used by OCR save flow.
+    Returns the same standard confirmation text as regular operation flow.
+    """
+    return render_final_reply(
+        name=name,
+        amount=amount,
+        currency=currency,
+        category=category,
+        op_dt=op_dt,
+        original=original,
+        op_kind=op_kind,
+        note=note,
+    )
