@@ -131,3 +131,77 @@ stage_voice_input_v1:
   ffmpeg_required: true
   reuses_text_flow: true
   db_migration_required: false
+
+stage_receipt_ocr_v1_2:
+  extracts_multi_operations_from_bank_screenshots: true
+  keeps_incomes_and_expenses: true
+  deterministic_day_total_filter: true
+  confidence_over_filter_removed: true
+  max_operations_per_image: 20
+  db_migration_required: false
+
+stage_receipt_review_v1_2:
+  fast_edit_flow: true
+  editable_fields:
+    - amount
+    - category
+    - date
+    - type
+    - comment
+  write_on_explicit_confirm_only: true
+  db_migration_required: false
+
+stage_voice_input_v1_1:
+  openai_key_fallback_to_receipt_key: true
+  ffmpeg_optional_direct_transcribe_fallback: true
+  admin_voice_status_command: true
+  db_migration_required: false
+
+stage_voice_input_v1_2:
+  spoken_ru_number_normalization: true
+  normalize_range_max: 999999
+  text_flow_reuse_after_transcribe: true
+  avoid_false_voice_failure_after_successful_transcribe: true
+  db_migration_required: false
+
+stage_receipt_review_v1_3:
+  preview_cta_label: "✏️ Изменить"
+  emits_standard_operation_confirmation_cards_on_save: true
+  db_migration_required: false
+
+stage_voice_edit_polish_v1:
+  last_operation_edit_menu_expanded: true
+  editable_fields:
+    - amount
+    - category
+    - date
+    - type
+    - comment
+  db_migration_required: false
+
+stage_export_xlsx_v1:
+  export_command_opens_menu: true
+  default_file_format: xlsx
+  sheets:
+    - Итоги
+    - Операции
+    - По категориям
+    - По месяцам
+    - По неделям
+  db_migration_required: false
+
+stage_export_navigation_fix:
+  preview_buttons:
+    - download_xlsx
+    - back_to_export_menu
+  custom_back_chain: true
+  db_migration_required: false
+
+stage_user_reminders_mvp:
+  command: /reminders
+  tables:
+    - public.user_reminders
+    - public.user_reminder_events
+  scheduler_job: user_reminders_job
+  supports_record_from_reminder: true
+  db_migration_required: true
