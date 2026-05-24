@@ -647,6 +647,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data in {'rem_cat_zav', 'rem_cat_prod', 'rem_cat_tr', 'rem_cat_sub', 'rem_cat_other', 'rem_cat_custom'}:
         d = context.user_data.setdefault('rem_draft', {})
+        log.info('reminder_wizard_category_selected user=%s cb=%s', cid, data)
         if data == 'rem_cat_custom':
             context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'category_draft'}
             await q.answer()
@@ -659,7 +660,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
         ])
         await q.answer()
-        return await q.message.reply_text('Когда событие?', reply_markup=kb)
+        msg = await q.message.reply_text('Когда событие?', reply_markup=kb)
+        context.user_data['rem_last_msg_id'] = getattr(msg, 'message_id', None)
+        log.info('reminder_wizard_date_ui_send_ok user=%s', cid)
+        return
     if data in {'rem_dt_today', 'rem_dt_tom', 'rem_dt_1', 'rem_dt_15', 'rem_dt_in'}:
         d = context.user_data.setdefault('rem_draft', {})
         t = date.today()
@@ -678,7 +682,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
         ])
         await q.answer()
-        return await q.message.reply_text('Как часто повторять?', reply_markup=kb)
+        msg = await q.message.reply_text('Как часто повторять?', reply_markup=kb)
+        context.user_data['rem_last_msg_id'] = getattr(msg, 'message_id', None)
+        log.info('reminder_wizard_repeat_ui_send_ok user=%s', cid)
+        return
     if data in {'rem_r_none', 'rem_r_week', 'rem_r_month', 'rem_r_year', 'rem_r_custom'}:
         d = context.user_data.setdefault('rem_draft', {})
         d['repeat_rule'] = {'rem_r_none': 'none', 'rem_r_week': 'weekly', 'rem_r_month': 'monthly', 'rem_r_year': 'yearly', 'rem_r_custom': 'custom_days'}[data]
@@ -693,7 +700,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('✏️ Свой вариант', callback_data='rem_n_in')],
         ])
         await q.answer()
-        return await q.message.reply_text('Когда напомнить?', reply_markup=kb)
+        msg = await q.message.reply_text('Когда напомнить?', reply_markup=kb)
+        context.user_data['rem_last_msg_id'] = getattr(msg, 'message_id', None)
+        log.info('reminder_wizard_notify_ui_send_ok user=%s', cid)
+        return
     if data in {'rem_n_0', 'rem_n_1', 'rem_n_2', 'rem_n_3', 'rem_n_7', 'rem_n_in'}:
         d = context.user_data.setdefault('rem_draft', {})
         if data == 'rem_n_in':

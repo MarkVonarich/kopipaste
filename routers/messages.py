@@ -400,6 +400,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         d['title'] = merch
         d['amount'] = int(amt)
         d['category'] = 'Прочее' if d.get('rem_type') != 'Доходы' else 'Переводы'
+        d['step'] = 'category'
         log.info('reminder_wizard_next_step=category user=%s', cid)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('Заведения', callback_data='rem_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rem_cat_prod')],
@@ -408,7 +409,15 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('✏️ Другая', callback_data='rem_cat_custom')],
             [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
         ])
-        return await emsg.reply_text('Выбери категорию:', reply_markup=kb)
+        try:
+            log.info('reminder_wizard_category_ui_send_start user=%s', cid)
+            msg = await update.message.reply_text('Выбери категорию', reply_markup=kb)
+            context.user_data['rem_last_msg_id'] = getattr(msg, 'message_id', None)
+            log.info('reminder_wizard_category_ui_send_ok user=%s', cid)
+            return
+        except Exception as e:
+            log.exception('reminder_wizard_category_ui_send_failed user=%s err=%s', cid, type(e).__name__)
+            return await emsg.reply_text('Не смог открыть выбор категории. Попробуй /reminders ещё раз.')
 
     if context.user_data.get('await_rem_edit'):
         st = context.user_data.pop('await_rem_edit')
