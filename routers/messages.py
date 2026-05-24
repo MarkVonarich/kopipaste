@@ -59,6 +59,27 @@ def _parse_budget_amount(text: str) -> int | None:
     return int(t)
 
 
+def _parse_reminder_title_amount(text: str) -> tuple[str, int] | None:
+    src = (text or '').strip()
+    if not src:
+        return None
+    m = list(re.finditer(r"(\d+(?:[ \t]\d{3})*(?:[.,]\d+)?)", src))
+    if not m:
+        return None
+    last = m[-1]
+    amt_raw = last.group(1).replace(' ', '').replace(',', '.')
+    try:
+        amt = int(float(amt_raw))
+    except Exception:
+        return None
+    title = (src[:last.start()] + src[last.end():]).strip()
+    if not title:
+        return None
+    if amt <= 0 or amt >= 1_000_000_000:
+        return None
+    return norm_text(title), amt
+
+
 def _parse_flexible_date(text: str):
     t = (text or '').strip().lower()
     if t == 'сегодня':
@@ -365,16 +386,21 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
 
-    if context.user_data.pop('await_rem_title_amount', False):
-        try:
-            merch, amt, _dt, _ = parse_user_input(text)
-        except Exception:
+    if context.user_data.get('await_rem_title_amount'):
+        log.info('reminder_wizard_text state=await_rem_title_amount user=%s', cid)
+        parsed = _parse_reminder_title_amount(text)
+        if not parsed:
+            log.info('reminder_wizard_title_amount_parsed ok=false user=%s', cid)
             context.user_data['await_rem_title_amount'] = True
-            return await emsg.reply_text('⚠️ Формат: Название 1990')
+            return await emsg.reply_text('Не понял сумму. Напиши так: ChatGPT 1990')
+        log.info('reminder_wizard_title_amount_parsed ok=true user=%s', cid)
+        context.user_data.pop('await_rem_title_amount', None)
+        merch, amt = parsed
         d = context.user_data.setdefault('rem_draft', {})
-        d['title'] = norm_text(merch)
+        d['title'] = merch
         d['amount'] = int(amt)
         d['category'] = 'Прочее' if d.get('rem_type') != 'Доходы' else 'Переводы'
+        log.info('reminder_wizard_next_step=category user=%s', cid)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('Заведения', callback_data='rem_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rem_cat_prod')],
             [InlineKeyboardButton('Транспорт', callback_data='rem_cat_tr'), InlineKeyboardButton('Подписки', callback_data='rem_cat_sub')],
@@ -387,6 +413,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('await_rem_edit'):
         st = context.user_data.pop('await_rem_edit')
         rid, field = int(st['rid']), st['field']
+        log.info('reminder_wizard_text state=%s user=%s', field, cid)
         try:
             if rid == -1:
                 d = context.user_data.setdefault('rem_draft', {})
