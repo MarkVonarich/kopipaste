@@ -18,6 +18,7 @@ from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
 from utils.spoken_numbers import normalize_spoken_money_ru
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
+from db.queries import update_last_operation_fields, get_last_operation
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
@@ -56,6 +57,25 @@ def _parse_budget_amount(text: str) -> int | None:
     if not t.isdigit():
         return None
     return int(t)
+
+
+def _parse_flexible_date(text: str):
+    t = (text or '').strip().lower()
+    if t == 'сегодня':
+        return datetime.now().date()
+    if t == 'вчера':
+        from datetime import timedelta
+        return (datetime.now() - timedelta(days=1)).date()
+    try:
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', t):
+            return datetime.strptime(t, '%Y-%m-%d').date()
+        if re.fullmatch(r'\d{1,2}\.\d{1,2}\.\d{4}', t):
+            return datetime.strptime(t, '%d.%m.%Y').date()
+        if re.fullmatch(r'\d{1,2}\.\d{1,2}', t):
+            return datetime.strptime(f'{t}.{datetime.now().year}', '%d.%m.%Y').date()
+    except Exception:
+        return None
+    return None
 
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
     """Reply in markdown, fallback to plain text if telegram rejects entities."""
@@ -344,6 +364,45 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
+
+    if context.user_data.pop('await_op_edit_amount', False):
+        amount = _parse_amount_input(text)
+        if amount is None or amount <= 0 or amount >= 1_000_000_000:
+            context.user_data['await_op_edit_amount'] = True
+            return await emsg.reply_text('⚠️ Неверная сумма. Введите число >0 и <1 000 000 000')
+        row = update_last_operation_fields(cid, amount=int(amount))
+        if not row:
+            return await emsg.reply_text('Не нашёл операцию для изменения.')
+        return await emsg.reply_text('✅ Сумма обновлена.')
+
+    if context.user_data.pop('await_op_edit_date', False):
+        d = _parse_flexible_date(text)
+        if not d:
+            context.user_data['await_op_edit_date'] = True
+            return await emsg.reply_text('⚠️ Не понял дату. Пример: 24.05.2026')
+        row = update_last_operation_fields(cid, op_date=d)
+        if not row:
+            return await emsg.reply_text('Не нашёл операцию для изменения.')
+        return await emsg.reply_text('✅ Дата обновлена.')
+
+    if context.user_data.pop('await_op_edit_comment', False):
+        row = update_last_operation_fields(cid, comment=(text or '').strip()[:200])
+        if not row:
+            return await emsg.reply_text('Не нашёл операцию для изменения.')
+        return await emsg.reply_text('✅ Комментарий обновлён.')
+
+    if context.user_data.get('await_export_start') or context.user_data.get('await_export_end'):
+        d = _parse_flexible_date(text)
+        if not d:
+            return await emsg.reply_text('⚠️ Не понял дату. Формат: DD.MM.YYYY / DD.MM / YYYY-MM-DD')
+        st = context.user_data.setdefault('export_state', {})
+        if context.user_data.get('await_export_start'):
+            st['from'] = d.isoformat()
+            context.user_data.pop('await_export_start', None)
+            return await emsg.reply_text('Дата начала сохранена. Выбери конец периода через /export.')
+        st['to'] = d.isoformat()
+        context.user_data.pop('await_export_end', None)
+        return await emsg.reply_text('Дата конца сохранена. Выбери «Скачать XLSX» через /export.')
 
     if context.user_data.pop('await_receipt_edit_text', False):
         idx = int(context.user_data.get('receipt_edit_idx') or -1)

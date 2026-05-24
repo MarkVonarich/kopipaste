@@ -325,6 +325,34 @@ def update_last_operation_category(user_id: int, new_category: str) -> bool:
             )
             return cur.rowcount > 0
 
+
+def update_last_operation_fields(user_id: int, *, amount: int | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM operations WHERE user_id=%s ORDER BY id DESC LIMIT 1", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            op_id = row[0]
+            sets = []
+            vals = []
+            if amount is not None:
+                sets.append("amount=%s"); vals.append(int(amount))
+            if category is not None:
+                sets.append("category=%s"); vals.append(category)
+            if op_date is not None:
+                sets.append("op_date=%s"); vals.append(op_date)
+            if op_type is not None:
+                sets.append("type=%s"); vals.append(op_type)
+            if comment is not None:
+                sets.append("comment=%s"); vals.append(comment)
+            if sets:
+                vals.append(op_id)
+                cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
+            cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (op_id,))
+            r = cur.fetchone()
+            return {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
+
 # ─────────────────────────────
 # Лимиты по категориям
 # ─────────────────────────────

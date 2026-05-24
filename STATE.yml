@@ -168,3 +168,24 @@ stage_receipt_review_v1_3:
   preview_cta_label: "✏️ Изменить"
   emits_standard_operation_confirmation_cards_on_save: true
   db_migration_required: false
+
+stage_voice_edit_polish_v1:
+  last_operation_edit_menu_expanded: true
+  editable_fields:
+    - amount
+    - category
+    - date
+    - type
+    - comment
+  db_migration_required: false
+
+stage_export_xlsx_v1:
+  export_command_opens_menu: true
+  default_file_format: xlsx
+  sheets:
+    - Итоги
+    - Операции
+    - По категориям
+    - По месяцам
+    - По неделям
+  db_migration_required: false
