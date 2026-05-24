@@ -23,6 +23,8 @@ from routers.commands import (
     cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
     cmd_admin_category_learning_debug,
     cmd_admin_voice_status,
+    cmd_reminders,
+    cmd_admin_reminders_preview,
 )
 from routers.callbacks import callback_handler
 from routers.messages import handle_text, handle_location, handle_photo, handle_voice
@@ -64,6 +66,8 @@ def main():
     app.add_handler(CommandHandler("budget", cmd_budget))
     app.add_handler(CommandHandler("limits", cmd_limits))
     app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("reminders", cmd_reminders))
+    app.add_handler(CommandHandler("admin_reminders_preview", cmd_admin_reminders_preview))
     app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CommandHandler("mlstats", cmd_mlstats))
     app.add_handler(CommandHandler("mltrain", cmd_mltrain))

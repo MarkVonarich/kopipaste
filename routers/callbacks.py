@@ -2,7 +2,7 @@ import logging
 import hashlib
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.error import BadRequest
-from db.database import get_conn, pg_fetchall
+from db.database import get_conn, pg_fetchall, pg_exec
 from datetime import datetime, timedelta, date
 from telegram.ext import ContextTypes
 from db.queries import (
@@ -13,7 +13,8 @@ from db.queries import (
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
-    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields
+    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields,
+    reminders_list, reminder_insert, reminder_get, reminder_update, reminder_delete
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from ui.keyboards import ml_top2_kb
@@ -31,6 +32,15 @@ log = logging.getLogger(__name__)
 
 def _fmt_money(v: int) -> str:
     return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+def _reminders_menu_kb(has_any: bool):
+    if has_any:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton('➕ Добавить', callback_data='rem_add'), InlineKeyboardButton('📋 Все', callback_data='rem_all')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+        ])
+    return InlineKeyboardMarkup([[InlineKeyboardButton('➕ Добавить', callback_data='rem_add')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]])
 
 
 async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str):
@@ -568,12 +578,142 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
              InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
             [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
+            [InlineKeyboardButton('🔔 Напоминания', callback_data='rem_menu')],
             [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets')],
             [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
             [InlineKeyboardButton('📉 Лимиты по категориям', callback_data='cl_menu')],
             [InlineKeyboardButton('◀️ Назад', callback_data='start_main')],
         ])
         return await q.edit_message_text('⚙️ Настройки:', reply_markup=kb)
+
+    if data == 'rem_menu':
+        rows = reminders_list(cid, active_only=True)
+        if not rows:
+            return await _safe_edit_or_reply(q, '🔔 Напоминания\n\nПока ничего нет.\n\nМожно добавить подписку, платёж, будущую трату или доход — я напомню заранее.', reply_markup=_reminders_menu_kb(False))
+        lines = ['🔔 Напоминания', '', 'Активные:']
+        btns = []
+        for i, r in enumerate(rows[:5], start=1):
+            lines.append(f"{i}. {r['title']} — {_fmt_money(int(r['amount']))}, {r['event_date'].day} число")
+            btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
+        btns += _reminders_menu_kb(True).inline_keyboard
+        return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
+
+    if data == 'rem_all':
+        rows = reminders_list(cid, active_only=False)
+        if not rows:
+            return await _safe_edit_or_reply(q, 'Нет напоминаний.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='rem_menu')]]))
+        lines = ['📋 Все напоминания']
+        btns = []
+        for r in rows[:20]:
+            st = 'вкл' if r['is_active'] else 'выкл'
+            lines.append(f"• {r['title']} ({st})")
+            btns.append([InlineKeyboardButton(f"{r['title'][:24]}", callback_data=f"rem_o|{r['id']}")])
+        btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='rem_menu')])
+        return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
+
+    if data == 'rem_add':
+        context.user_data['rem_draft'] = {'rem_type': 'Расходы', 'repeat_rule': 'none', 'notify_days_before': 1}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💸 Расход', callback_data='rem_t_exp'), InlineKeyboardButton('💰 Доход', callback_data='rem_t_inc')],
+            [InlineKeyboardButton('🔁 Регулярный платёж', callback_data='rem_t_reg')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_menu')],
+        ])
+        return await _safe_edit_or_reply(q, 'Что напомнить?', reply_markup=kb)
+    if data in {'rem_t_exp', 'rem_t_inc', 'rem_t_reg'}:
+        d = context.user_data.setdefault('rem_draft', {})
+        d['rem_type'] = 'Доходы' if data == 'rem_t_inc' else 'Расходы'
+        if data == 'rem_t_reg':
+            d['repeat_rule'] = 'monthly'
+        context.user_data['await_rem_title_amount'] = True
+        await q.answer()
+        return await q.message.reply_text('Напиши название и сумму.\n\nПример:\nChatGPT 1990')
+
+    if data.startswith('rem_o|'):
+        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
+        if not r:
+            return await _safe_edit_or_reply(q, 'Напоминание не найдено.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='rem_menu')]]))
+        toggle_lbl = '⏸ Отключить' if r['is_active'] else '▶️ Включить'
+        txt = (f"🔔 {r['title']}\n\nСумма: {_fmt_money(int(r['amount']))}\nТип: {r['rem_type']}\nКатегория: {r['category']}\n"
+               f"Дата: {r['event_date'].strftime('%d.%m.%Y')}\nПовтор: {r['repeat_rule']}\nНапомнить: за {r['notify_days_before']} дн.\nСтатус: {'включено' if r['is_active'] else 'выключено'}")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💰 Сумма', callback_data=f'rem_e_amt|{rid}'), InlineKeyboardButton('🏷 Категория', callback_data=f'rem_e_cat|{rid}')],
+            [InlineKeyboardButton('📅 Дата', callback_data=f'rem_e_date|{rid}'), InlineKeyboardButton('🔁 Повтор', callback_data=f'rem_e_rep|{rid}')],
+            [InlineKeyboardButton('⏰ Напоминать', callback_data=f'rem_e_not|{rid}'), InlineKeyboardButton('🔁 Тип', callback_data=f'rem_e_typ|{rid}')],
+            [InlineKeyboardButton(toggle_lbl, callback_data=f'rem_tog|{rid}')],
+            [InlineKeyboardButton('🗑 Удалить', callback_data=f'rem_delq|{rid}')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_menu')],
+        ])
+        return await _safe_edit_or_reply(q, txt, reply_markup=kb)
+
+    if data in {'rem_cat_zav', 'rem_cat_prod', 'rem_cat_tr', 'rem_cat_sub', 'rem_cat_other', 'rem_cat_custom'}:
+        d = context.user_data.setdefault('rem_draft', {})
+        if data == 'rem_cat_custom':
+            context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'category_draft'}
+            await q.answer()
+            return await q.message.reply_text('Введи категорию:')
+        d['category'] = {'rem_cat_zav': 'Заведения', 'rem_cat_prod': 'Продукты', 'rem_cat_tr': 'Транспорт', 'rem_cat_sub': 'Подписки', 'rem_cat_other': 'Прочее'}[data]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Сегодня', callback_data='rem_dt_today'), InlineKeyboardButton('Завтра', callback_data='rem_dt_tom')],
+            [InlineKeyboardButton('1 число', callback_data='rem_dt_1'), InlineKeyboardButton('15 число', callback_data='rem_dt_15')],
+            [InlineKeyboardButton('✏️ Ввести дату', callback_data='rem_dt_in')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+        ])
+        await q.answer()
+        return await q.message.reply_text('Когда событие?', reply_markup=kb)
+    if data in {'rem_dt_today', 'rem_dt_tom', 'rem_dt_1', 'rem_dt_15', 'rem_dt_in'}:
+        d = context.user_data.setdefault('rem_draft', {})
+        t = date.today()
+        if data == 'rem_dt_today': d['event_date'] = t
+        elif data == 'rem_dt_tom': d['event_date'] = t + timedelta(days=1)
+        elif data == 'rem_dt_1': d['event_date'] = t.replace(day=1)
+        elif data == 'rem_dt_15': d['event_date'] = t.replace(day=15)
+        elif data == 'rem_dt_in':
+            context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'date_draft'}
+            await q.answer()
+            return await q.message.reply_text('Введи дату:')
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Не повторять', callback_data='rem_r_none')],
+            [InlineKeyboardButton('Каждую неделю', callback_data='rem_r_week'), InlineKeyboardButton('Каждый месяц', callback_data='rem_r_month')],
+            [InlineKeyboardButton('Каждый год', callback_data='rem_r_year'), InlineKeyboardButton('Свой период', callback_data='rem_r_custom')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+        ])
+        await q.answer()
+        return await q.message.reply_text('Как часто повторять?', reply_markup=kb)
+    if data in {'rem_r_none', 'rem_r_week', 'rem_r_month', 'rem_r_year', 'rem_r_custom'}:
+        d = context.user_data.setdefault('rem_draft', {})
+        d['repeat_rule'] = {'rem_r_none': 'none', 'rem_r_week': 'weekly', 'rem_r_month': 'monthly', 'rem_r_year': 'yearly', 'rem_r_custom': 'custom_days'}[data]
+        if data == 'rem_r_custom':
+            context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'repeat_draft'}
+            await q.answer()
+            return await q.message.reply_text('Через сколько дней повторять? (1..3650)')
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('В день события', callback_data='rem_n_0')],
+            [InlineKeyboardButton('За 1 день', callback_data='rem_n_1'), InlineKeyboardButton('За 2 дня', callback_data='rem_n_2')],
+            [InlineKeyboardButton('За 3 дня', callback_data='rem_n_3'), InlineKeyboardButton('За неделю', callback_data='rem_n_7')],
+            [InlineKeyboardButton('✏️ Свой вариант', callback_data='rem_n_in')],
+        ])
+        await q.answer()
+        return await q.message.reply_text('Когда напомнить?', reply_markup=kb)
+    if data in {'rem_n_0', 'rem_n_1', 'rem_n_2', 'rem_n_3', 'rem_n_7', 'rem_n_in'}:
+        d = context.user_data.setdefault('rem_draft', {})
+        if data == 'rem_n_in':
+            context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'notify_draft'}
+            await q.answer()
+            return await q.message.reply_text('За сколько дней напомнить? (0..30)')
+        d['notify_days_before'] = int(data.split('_')[-1])
+        txt = (f"🔔 Напоминание\n\n{d.get('title','—')} — {_fmt_money(int(d.get('amount',0)))}\nТип: {d.get('rem_type','Расходы')}\n"
+               f"Категория: {d.get('category','Прочее')}\nДата: {d.get('event_date')}\nПовтор: {d.get('repeat_rule')}\nНапомнить: за {d.get('notify_days_before',1)} дня")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Сохранить', callback_data='rem_save')], [InlineKeyboardButton('✏️ Изменить', callback_data='rem_add')], [InlineKeyboardButton('❌ Отмена', callback_data='rem_menu')]])
+        await q.answer()
+        return await _safe_edit_or_reply(q, txt, reply_markup=kb)
+    if data == 'rem_save':
+        d = context.user_data.get('rem_draft') or {}
+        rid = reminder_insert(cid, {'title': d['title'], 'rem_type': d['rem_type'], 'category': d['category'], 'amount': d['amount'], 'event_date': d['event_date'], 'repeat_rule': d.get('repeat_rule', 'none'), 'repeat_interval_days': d.get('repeat_interval_days'), 'notify_days_before': d.get('notify_days_before', 1)})
+        log.info('reminder_saved user_id=%s reminder_id=%s', cid, rid)
+        context.user_data.pop('rem_draft', None)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('📋 К напоминаниям', callback_data='rem_menu')], [InlineKeyboardButton('➕ Добавить ещё', callback_data='rem_add')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]])
+        await q.answer('Сохранено')
+        return await _safe_edit_or_reply(q, '🔔 Напоминание сохранено.', reply_markup=kb)
 
     if data == 'settings_budgets':
         wl, ml = get_user_budgets(cid)
@@ -1497,11 +1637,11 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             st['count'] = len(rows)
             log.info('export_preview period=%s..%s count=%s user_id=%s', dfrom, dto, len(rows), cid)
             if not rows:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton('🔁 Выбрать другой период', callback_data='exp_reset')], [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')]])
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='exp_menu')]])
                 await q.answer()
                 return await _safe_edit_or_reply(q, '📤 Экспорт\n\nЗа выбранный период операций нет.', reply_markup=kb)
             st['preview_rows'] = [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': 'telegram'} for r in rows]
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Скачать XLSX', callback_data='exp_dl')], [InlineKeyboardButton('🔁 Выбрать другой период', callback_data='exp_reset')], [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Скачать XLSX', callback_data='exp_dl')], [InlineKeyboardButton('⬅️ Назад', callback_data='exp_menu')]])
             await q.answer()
             return await _safe_edit_or_reply(q, f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?', reply_markup=kb)
 
@@ -1522,6 +1662,67 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             if os.path.exists(p):
                 os.remove(p)
         return
+
+    if data == 'exp_menu':
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m'), InlineKeyboardButton('🗓 Последние 14 дней', callback_data='exp_14')],
+            [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+        ])
+        return await _safe_edit_or_reply(q, '📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=kb)
+
+    if data.startswith('rem_tog|'):
+        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
+        if r:
+            reminder_update(cid, rid, is_active=(not r['is_active']))
+        await q.answer('Обновлено')
+        q.data = f'rem_o|{rid}'
+        return await callback_handler(update, context)
+    if data.startswith('rem_delq|'):
+        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
+        title = (r['title'] if r else 'напоминание')
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🗑 Да, удалить', callback_data=f'rem_del|{rid}')], [InlineKeyboardButton('⬅️ Назад', callback_data=f'rem_o|{rid}')]])
+        return await _safe_edit_or_reply(q, f'Удалить напоминание «{title}»?', reply_markup=kb)
+    if data.startswith('rem_del|'):
+        rid = int(data.split('|', 1)[1]); reminder_delete(cid, rid)
+        await q.answer('Удалено')
+        q.data = 'rem_menu'
+        return await callback_handler(update, context)
+    if data.startswith('rem_snz|'):
+        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
+        if r:
+            reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=1)))
+        await q.answer('Напомню завтра')
+        return
+    if data.startswith('rem_rec|'):
+        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
+        if not r:
+            return await q.answer('Не найдено', show_alert=True)
+        insert_operation(cid, r['event_date'], r['rem_type'], r['category'], int(r['amount']), r['title'])
+        await _send_standard_op_confirmation(context, cid, update.effective_user, r['event_date'], r['rem_type'], r['category'], int(r['amount']), r['title'])
+        if r['repeat_rule'] == 'none':
+            reminder_update(cid, rid, is_active=False)
+        elif r['repeat_rule'] == 'weekly':
+            reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=7)))
+        elif r['repeat_rule'] == 'monthly':
+            nd = r['event_date'] + timedelta(days=32); nd = nd.replace(day=min(r['event_date'].day, 28))
+            reminder_update(cid, rid, event_date=nd)
+        elif r['repeat_rule'] == 'yearly':
+            reminder_update(cid, rid, event_date=r['event_date'].replace(year=r['event_date'].year + 1))
+        elif r['repeat_rule'] == 'custom_days':
+            reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=int(r.get('repeat_interval_days') or 1))))
+        pg_exec("""INSERT INTO public.user_reminder_events(reminder_id, user_id, event_date, notify_days_before, event_type)
+                   VALUES (%s,%s,%s,%s,'recorded')""", (rid, cid, r['event_date'], r['notify_days_before']))
+        log.info('reminder_recorded reminder_id=%s', rid)
+        await q.answer('Записано')
+        return
+    if any(data.startswith(p) for p in ['rem_e_amt|', 'rem_e_cat|', 'rem_e_date|', 'rem_e_rep|', 'rem_e_not|', 'rem_e_typ|']):
+        k, rid = data.split('|', 1); rid = int(rid)
+        field = {'rem_e_amt': 'amount', 'rem_e_cat': 'category', 'rem_e_date': 'date', 'rem_e_rep': 'repeat', 'rem_e_not': 'notify', 'rem_e_typ': 'type'}[k]
+        context.user_data['await_rem_edit'] = {'rid': rid, 'field': field}
+        prompts = {'amount': 'Введите сумму', 'category': 'Введите категорию', 'date': 'Введите дату (24.05.2026)', 'repeat': 'Введите: none|weekly|monthly|yearly|custom_days:14', 'notify': 'Введите дней до напоминания (0..30)', 'type': 'Введите тип: Расходы или Доходы'}
+        await q.answer()
+        return await q.message.reply_text(prompts[field])
 
     # Аналитика (как было)
     if data == 'menu_analytics':

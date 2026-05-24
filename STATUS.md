@@ -75,3 +75,5 @@ All further changes follow:
 - OCR UX v1.3: preview CTA renamed to “✏️ Изменить”, and OCR saves now emit standard operation confirmation cards with Удалить/Остаток/Изменить buttons.
 - Stage voice edit polish v1: expanded last-operation edit menu (amount/category/date/type/comment) for unified post-save edits.
 - Stage export xlsx v1: /export now opens period menu and sends formatted XLSX (not immediate raw CSV).
+- Stage export navigation fix: preview buttons simplified (Скачать XLSX + Назад) and Back now returns to export period menu.
+- Stage user reminders MVP: /reminders flow, CRUD, scheduler dispatch job, record-from-reminder action with standard operation confirmation.

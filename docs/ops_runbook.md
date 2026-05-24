@@ -69,3 +69,8 @@ LIMIT 50;
 apt-get update -y
 apt-get install -y ffmpeg
 ```
+
+## 11) Reminders migration
+```bash
+sudo -u postgres psql -d finance_bot -f migrations/20260524_008_user_reminders.sql
+```

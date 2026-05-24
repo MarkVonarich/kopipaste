@@ -353,6 +353,49 @@ def update_last_operation_fields(user_id: int, *, amount: int | None = None, cat
             r = cur.fetchone()
             return {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
 
+
+def reminders_list(user_id: int, active_only: bool = True):
+    sql = """SELECT id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active
+             FROM public.user_reminders WHERE user_id=%s"""
+    params = [user_id]
+    if active_only:
+        sql += " AND is_active=TRUE"
+    sql += " ORDER BY event_date, id"
+    rows = pg_fetchall(sql, tuple(params))
+    return [dict(id=r[0], title=r[1], rem_type=r[2], category=r[3], amount=float(r[4]), currency=r[5], event_date=r[6], repeat_rule=r[7], repeat_interval_days=r[8], notify_days_before=int(r[9]), is_active=bool(r[10])) for r in rows]
+
+
+def reminder_get(user_id: int, rid: int):
+    rows = pg_fetchall("""SELECT id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active
+                          FROM public.user_reminders WHERE user_id=%s AND id=%s LIMIT 1""", (user_id, rid))
+    if not rows:
+        return None
+    r = rows[0]
+    return dict(id=r[0], title=r[1], rem_type=r[2], category=r[3], amount=float(r[4]), currency=r[5], event_date=r[6], repeat_rule=r[7], repeat_interval_days=r[8], notify_days_before=int(r[9]), is_active=bool(r[10]))
+
+
+def reminder_insert(user_id: int, payload: dict) -> int:
+    rows = pg_fetchall("""INSERT INTO public.user_reminders
+        (user_id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,now())
+        RETURNING id""", (user_id, payload['title'], payload['rem_type'], payload['category'], payload['amount'], payload.get('currency', 'RUB'), payload['event_date'], payload['repeat_rule'], payload.get('repeat_interval_days'), payload['notify_days_before']))
+    return int(rows[0][0])
+
+
+def reminder_update(user_id: int, rid: int, **fields):
+    if not fields:
+        return
+    sets, vals = [], []
+    for k, v in fields.items():
+        sets.append(f"{k}=%s"); vals.append(v)
+    sets.append("updated_at=now()")
+    vals.extend([user_id, rid])
+    pg_exec(f"UPDATE public.user_reminders SET {', '.join(sets)} WHERE user_id=%s AND id=%s", tuple(vals))
+
+
+def reminder_delete(user_id: int, rid: int):
+    pg_exec("DELETE FROM public.user_reminders WHERE user_id=%s AND id=%s", (user_id, rid))
+
 # ─────────────────────────────
 # Лимиты по категориям
 # ─────────────────────────────

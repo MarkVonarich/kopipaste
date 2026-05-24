@@ -18,7 +18,7 @@ from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
 from utils.spoken_numbers import normalize_spoken_money_ru
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
-from db.queries import update_last_operation_fields, get_last_operation
+from db.queries import update_last_operation_fields, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
@@ -364,6 +364,80 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
+
+    if context.user_data.pop('await_rem_title_amount', False):
+        try:
+            merch, amt, _dt, _ = parse_user_input(text)
+        except Exception:
+            context.user_data['await_rem_title_amount'] = True
+            return await emsg.reply_text('⚠️ Формат: Название 1990')
+        d = context.user_data.setdefault('rem_draft', {})
+        d['title'] = norm_text(merch)
+        d['amount'] = int(amt)
+        d['category'] = 'Прочее' if d.get('rem_type') != 'Доходы' else 'Переводы'
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Заведения', callback_data='rem_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rem_cat_prod')],
+            [InlineKeyboardButton('Транспорт', callback_data='rem_cat_tr'), InlineKeyboardButton('Подписки', callback_data='rem_cat_sub')],
+            [InlineKeyboardButton('Прочее', callback_data='rem_cat_other')],
+            [InlineKeyboardButton('✏️ Другая', callback_data='rem_cat_custom')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+        ])
+        return await emsg.reply_text('Выбери категорию:', reply_markup=kb)
+
+    if context.user_data.get('await_rem_edit'):
+        st = context.user_data.pop('await_rem_edit')
+        rid, field = int(st['rid']), st['field']
+        try:
+            if rid == -1:
+                d = context.user_data.setdefault('rem_draft', {})
+                if field == 'category_draft':
+                    d['category'] = norm_text(text)[:64] or 'Прочее'
+                elif field == 'date_draft':
+                    dd = _parse_flexible_date(text)
+                    if not dd:
+                        raise ValueError('date')
+                    d['event_date'] = dd
+                elif field == 'repeat_draft':
+                    n = int((text or '').strip())
+                    if n < 1 or n > 3650:
+                        raise ValueError('repeat')
+                    d['repeat_rule'] = 'custom_days'; d['repeat_interval_days'] = n
+                elif field == 'notify_draft':
+                    n = int((text or '').strip())
+                    if n < 0 or n > 30:
+                        raise ValueError('notify')
+                    d['notify_days_before'] = n
+                return await emsg.reply_text('✅ Сохранено в черновике. Продолжи через кнопки.')
+            if field == 'amount':
+                a = _parse_amount_input(text)
+                if a is None or a <= 0 or a >= 1_000_000_000:
+                    raise ValueError('amount')
+                reminder_update(cid, rid, amount=int(a))
+            elif field == 'category':
+                reminder_update(cid, rid, category=norm_text(text)[:64] or 'Прочее')
+            elif field == 'date':
+                d = _parse_flexible_date(text)
+                if not d:
+                    raise ValueError('date')
+                reminder_update(cid, rid, event_date=d)
+            elif field == 'repeat':
+                t = (text or '').strip().lower()
+                if t.startswith('custom_days:'):
+                    n = int(t.split(':', 1)[1]); reminder_update(cid, rid, repeat_rule='custom_days', repeat_interval_days=n)
+                else:
+                    reminder_update(cid, rid, repeat_rule=t, repeat_interval_days=None)
+            elif field == 'notify':
+                n = int((text or '').strip())
+                if n < 0 or n > 30:
+                    raise ValueError('notify')
+                reminder_update(cid, rid, notify_days_before=n)
+            elif field == 'type':
+                v = 'Доходы' if 'доход' in (text or '').lower() else 'Расходы'
+                reminder_update(cid, rid, rem_type=v)
+        except Exception:
+            context.user_data['await_rem_edit'] = st
+            return await emsg.reply_text('⚠️ Некорректное значение, попробуй ещё раз.')
+        return await emsg.reply_text('✅ Напоминание обновлено. Открой карточку через /reminders')
 
     if context.user_data.pop('await_op_edit_amount', False):
         amount = _parse_amount_input(text)

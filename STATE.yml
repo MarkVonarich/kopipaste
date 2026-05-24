@@ -189,3 +189,19 @@ stage_export_xlsx_v1:
     - По месяцам
     - По неделям
   db_migration_required: false
+
+stage_export_navigation_fix:
+  preview_buttons:
+    - download_xlsx
+    - back_to_export_menu
+  custom_back_chain: true
+  db_migration_required: false
+
+stage_user_reminders_mvp:
+  command: /reminders
+  tables:
+    - public.user_reminders
+    - public.user_reminder_events
+  scheduler_job: user_reminders_job
+  supports_record_from_reminder: true
+  db_migration_required: true
