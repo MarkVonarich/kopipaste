@@ -80,12 +80,14 @@ def _budgets_hub_kb(has_any: bool):
 def _receipt_render_list(cands: list[dict], warning: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     lines = ['🧾 Нашёл операции:', '']
     for i, c in enumerate(cands[:10], start=1):
-        lines.append(f"{i}. {c.get('category') or 'Прочее'} — {int(c.get('amount') or 0)} ₽ — {c.get('merchant') or 'Из изображения'}")
+        amount = int(round(float(c.get('amount') or 0)))
+        label = (c.get('category') or 'Прочее') if (c.get('type') or 'Расходы') == 'Расходы' else 'Доходы'
+        lines.append(f"{i}. {label} — {amount:,} ₽ — {c.get('merchant') or 'Из изображения'}".replace(',', ' '))
     if warning:
         lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
-        [InlineKeyboardButton('✏️ Проверить по одной', callback_data='receipt_review_one')],
+        [InlineKeyboardButton('✏️ Проверить', callback_data='receipt_review_one')],
         [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
     ])
     return '\n'.join(lines), kb
@@ -101,14 +103,16 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
     text = (
         f"Операция {idx + 1} из {len(cands)}\n"
         f"Тип: {c.get('type') or 'Расходы'}\n"
-        f"Сумма: {int(c.get('amount') or 0)} ₽\n"
+        f"Сумма: {int(round(float(c.get('amount') or 0))):,} ₽\n".replace(',', ' ') +
         f"Категория: {c.get('category') or 'Прочее'}\n"
         f"Комментарий: {c.get('merchant') or 'Из изображения'}\n"
         f"Дата: {dts}"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('✅ Записать', callback_data='receipt_save_one')],
-        [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_edit_one')],
+        [InlineKeyboardButton('💰 Сумма', callback_data='rcpt_amt'), InlineKeyboardButton('🏷 Категория', callback_data='rcpt_cat')],
+        [InlineKeyboardButton('📅 Дата', callback_data='rcpt_date'), InlineKeyboardButton('🔁 Тип', callback_data='rcpt_type')],
+        [InlineKeyboardButton('📝 Комментарий', callback_data='rcpt_comment')],
         [InlineKeyboardButton('⏭ Пропустить', callback_data='receipt_skip_one')],
         [InlineKeyboardButton('⬅️ К списку', callback_data='receipt_back_list'), InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
     ])
@@ -713,21 +717,90 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         text, kb = _receipt_render_card(cands, next_idx)
         return await _safe_edit_or_reply(q, text, reply_markup=kb)
 
-    if data == 'receipt_edit_one':
+    if data in {'rcpt_amt', 'rcpt_cat', 'rcpt_date', 'rcpt_type', 'rcpt_comment', 'rcpt_back_card', 'rcpt_amt_m100', 'rcpt_amt_m50', 'rcpt_amt_p50', 'rcpt_amt_p100', 'rcpt_cat_zav', 'rcpt_cat_prod', 'rcpt_cat_trans', 'rcpt_cat_other', 'rcpt_date_today', 'rcpt_date_yday', 'rcpt_comment_clear'}:
         cands = context.user_data.get('receipt_candidates') or []
         idx = int(context.user_data.get('receipt_review_idx') or 0)
         if not cands or idx >= len(cands):
             await q.answer('Нет данных', show_alert=True)
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
+        cur = cands[idx]
+        if data == 'rcpt_back_card':
+            await q.answer()
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_amt':
+            await q.answer()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('-100', callback_data='rcpt_amt_m100'), InlineKeyboardButton('-50', callback_data='rcpt_amt_m50'),
+                 InlineKeyboardButton('+50', callback_data='rcpt_amt_p50'), InlineKeyboardButton('+100', callback_data='rcpt_amt_p100')],
+                [InlineKeyboardButton('✏️ Ввести сумму', callback_data='rcpt_amt_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')],
+            ])
+            return await _safe_edit_or_reply(q, 'Корректировка суммы', reply_markup=kb)
+        if data.startswith('rcpt_amt_') and data != 'rcpt_amt_input':
+            delta = {'rcpt_amt_m100': -100, 'rcpt_amt_m50': -50, 'rcpt_amt_p50': 50, 'rcpt_amt_p100': 100}.get(data, 0)
+            cur['amount'] = max(1, int(round(float(cur.get('amount') or 0))) + delta)
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Сумма обновлена')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_cat':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Заведения', callback_data='rcpt_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rcpt_cat_prod')],
+                [InlineKeyboardButton('Транспорт', callback_data='rcpt_cat_trans'), InlineKeyboardButton('Прочее', callback_data='rcpt_cat_other')],
+                [InlineKeyboardButton('✏️ Другая', callback_data='rcpt_cat_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Выберите категорию', reply_markup=kb)
+        if data.startswith('rcpt_cat_') and data not in {'rcpt_cat', 'rcpt_cat_input'}:
+            cur['category'] = {'rcpt_cat_zav': 'Заведения', 'rcpt_cat_prod': 'Продукты', 'rcpt_cat_trans': 'Транспорт', 'rcpt_cat_other': 'Прочее'}.get(data, cur.get('category'))
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Категория обновлена')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_date':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Сегодня', callback_data='rcpt_date_today'), InlineKeyboardButton('Вчера', callback_data='rcpt_date_yday')],
+                [InlineKeyboardButton('✏️ Ввести дату', callback_data='rcpt_date_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Выберите дату', reply_markup=kb)
+        if data == 'rcpt_date_today':
+            cur['date'] = date.today().isoformat()
+        if data == 'rcpt_date_yday':
+            cur['date'] = (date.today() - timedelta(days=1)).isoformat()
+        if data in {'rcpt_date_today', 'rcpt_date_yday'}:
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Дата обновлена')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_type':
+            cur['type'] = 'Доходы' if (cur.get('type') != 'Доходы') else 'Расходы'
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Тип обновлён')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_comment':
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('✏️ Ввести комментарий', callback_data='rcpt_comment_input')], [InlineKeyboardButton('Очистить', callback_data='rcpt_comment_clear')], [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')]])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Комментарий', reply_markup=kb)
+        if data == 'rcpt_comment_clear':
+            cur['merchant'] = ''
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Очищено')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+    if data in {'rcpt_amt_input', 'rcpt_cat_input', 'rcpt_date_input', 'rcpt_comment_input'}:
+        idx = int(context.user_data.get('receipt_review_idx') or 0)
         context.user_data['receipt_edit_idx'] = idx
         context.user_data['await_receipt_edit_text'] = True
+        context.user_data['receipt_edit_field'] = {'rcpt_amt_input': 'amount', 'rcpt_cat_input': 'category', 'rcpt_date_input': 'date', 'rcpt_comment_input': 'comment'}[data]
         await q.answer()
-        cur = cands[idx]
-        return await q.message.reply_text(
-            f"Отправь исправленный текст для операции {idx + 1}.\n"
-            f"Пример: столовая 392\n"
-            f"Сейчас: {cur.get('merchant')} {cur.get('amount')} ₽"
-        )
+        prompts = {'amount': 'Введите сумму числом, например 392', 'category': 'Введите категорию', 'date': 'Введите дату (например 23.05.2026)', 'comment': 'Введите комментарий'}
+        return await q.message.reply_text(prompts[context.user_data['receipt_edit_field']])
 
     if data == 'receipt_confirm_all':
         cands = context.user_data.get('receipt_candidates') or []
