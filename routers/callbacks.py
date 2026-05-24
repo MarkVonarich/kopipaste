@@ -13,7 +13,7 @@ from db.queries import (
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
-    get_limit_spent, adjust_limit_amount, record_category_confirmation
+    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from ui.keyboards import ml_top2_kb
@@ -21,12 +21,28 @@ from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from db.queries import insert_operation
+from ui.messages import render_operation_confirmation
+from services.export_xlsx import build_export_xlsx
+import tempfile
+import os
 
 log = logging.getLogger(__name__)
 
 
 def _fmt_money(v: int) -> str:
     return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str):
+    second = InlineKeyboardButton('💰 Остаток', callback_data='status') if op_type == 'Расходы' else InlineKeyboardButton('💵 Доходы', callback_data='income_status')
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
+        second,
+        InlineKeyboardButton('✏️ Изменить', callback_data='op_edit'),
+    ]])
+    name = (getattr(user, 'full_name', None) or getattr(user, 'first_name', None) or getattr(user, 'username', None) or 'Пользователь')
+    text = render_operation_confirmation(name=name, amount=amount, currency=get_user_currency(chat_id), category=category, op_dt=dt, original=comment, op_kind=op_type)
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown', reply_markup=kb)
 
 
 def _budget_spent(user_id: int, period: str) -> int:
@@ -80,12 +96,14 @@ def _budgets_hub_kb(has_any: bool):
 def _receipt_render_list(cands: list[dict], warning: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     lines = ['🧾 Нашёл операции:', '']
     for i, c in enumerate(cands[:10], start=1):
-        lines.append(f"{i}. {c.get('category') or 'Прочее'} — {int(c.get('amount') or 0)} ₽ — {c.get('merchant') or 'Из изображения'}")
+        amount = int(round(float(c.get('amount') or 0)))
+        label = (c.get('category') or 'Прочее') if (c.get('type') or 'Расходы') == 'Расходы' else 'Доходы'
+        lines.append(f"{i}. {label} — {amount:,} ₽ — {c.get('merchant') or 'Из изображения'}".replace(',', ' '))
     if warning:
         lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
-        [InlineKeyboardButton('✏️ Проверить по одной', callback_data='receipt_review_one')],
+        [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_review_one')],
         [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
     ])
     return '\n'.join(lines), kb
@@ -101,14 +119,16 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
     text = (
         f"Операция {idx + 1} из {len(cands)}\n"
         f"Тип: {c.get('type') or 'Расходы'}\n"
-        f"Сумма: {int(c.get('amount') or 0)} ₽\n"
+        f"Сумма: {int(round(float(c.get('amount') or 0))):,} ₽\n".replace(',', ' ') +
         f"Категория: {c.get('category') or 'Прочее'}\n"
         f"Комментарий: {c.get('merchant') or 'Из изображения'}\n"
         f"Дата: {dts}"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('✅ Записать', callback_data='receipt_save_one')],
-        [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_edit_one')],
+        [InlineKeyboardButton('💰 Сумма', callback_data='rcpt_amt'), InlineKeyboardButton('🏷 Категория', callback_data='rcpt_cat')],
+        [InlineKeyboardButton('📅 Дата', callback_data='rcpt_date'), InlineKeyboardButton('🔁 Тип', callback_data='rcpt_type')],
+        [InlineKeyboardButton('📝 Комментарий', callback_data='rcpt_comment')],
         [InlineKeyboardButton('⏭ Пропустить', callback_data='receipt_skip_one')],
         [InlineKeyboardButton('⬅️ К списку', callback_data='receipt_back_list'), InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
     ])
@@ -325,11 +345,15 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data['edit_ctx'] = last
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('📂 Изменить категорию', callback_data='op_edit_cat')],
-            [InlineKeyboardButton('◀️ Назад', callback_data='op_edit_back')],
+            [InlineKeyboardButton('💰 Сумму', callback_data='op_e_amt')],
+            [InlineKeyboardButton('🏷 Категорию', callback_data='op_edit_cat')],
+            [InlineKeyboardButton('📅 Дату', callback_data='op_e_date')],
+            [InlineKeyboardButton('🔁 Тип', callback_data='op_e_type')],
+            [InlineKeyboardButton('📝 Комментарий', callback_data='op_e_com')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='op_edit_back')],
         ])
         try:
-            await q.edit_message_reply_markup(reply_markup=kb)
+            await q.edit_message_text('Что изменить?', reply_markup=kb)
         except Exception:
             await q.message.reply_text('Что изменить?', reply_markup=kb)
         return
@@ -376,6 +400,49 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await q.message.reply_text('Готово.', reply_markup=kb)
         context.user_data.pop('edit_mode', None)
+        return
+
+    if data == 'op_e_amt':
+        context.user_data['await_op_edit_amount'] = True
+        await q.answer()
+        return await q.message.reply_text('Введите новую сумму:')
+    if data == 'op_e_date':
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Сегодня', callback_data='op_e_date_t'), InlineKeyboardButton('Вчера', callback_data='op_e_date_y')],
+            [InlineKeyboardButton('✏️ Ввести дату', callback_data='op_e_date_i')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='op_edit')],
+        ])
+        await q.answer()
+        return await q.message.reply_text('Выбери дату:', reply_markup=kb)
+    if data == 'op_e_date_t':
+        update_last_operation_fields(cid, op_date=date.today())
+        await q.answer('Дата обновлена')
+        return
+    if data == 'op_e_date_y':
+        update_last_operation_fields(cid, op_date=date.today() - timedelta(days=1))
+        await q.answer('Дата обновлена')
+        return
+    if data == 'op_e_date_i':
+        context.user_data['await_op_edit_date'] = True
+        await q.answer()
+        return await q.message.reply_text('Введи дату (24.05.2026 или 24.05 или сегодня/вчера):')
+    if data == 'op_e_type':
+        cur = _fetch_last_op(cid)
+        new_type = 'Доходы' if cur and cur.get('type') != 'Доходы' else 'Расходы'
+        update_last_operation_fields(cid, op_type=new_type)
+        await q.answer('Тип обновлён')
+        return
+    if data == 'op_e_com':
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('🧹 Очистить', callback_data='op_e_com_c')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='op_edit')],
+        ])
+        context.user_data['await_op_edit_comment'] = True
+        await q.answer()
+        return await q.message.reply_text('Введи новый комментарий:', reply_markup=kb)
+    if data == 'op_e_com_c':
+        update_last_operation_fields(cid, comment='')
+        await q.answer('Комментарий очищен')
         return
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -660,6 +727,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('receipt_candidates', None)
         context.user_data.pop('receipt_warning', None)
         context.user_data.pop('receipt_review_idx', None)
+        context.user_data.pop('receipt_saved_count', None)
+        context.user_data.pop('receipt_skipped_count', None)
         await q.answer('Отменено')
         return await _safe_edit_or_reply(q, '❌ Импорт отменён.')
 
@@ -669,6 +738,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer('Нет данных для проверки', show_alert=True)
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
         context.user_data['receipt_review_idx'] = 0
+        context.user_data['receipt_saved_count'] = 0
+        context.user_data['receipt_skipped_count'] = 0
         await q.answer()
         text, kb = _receipt_render_card(cands, 0)
         return await _safe_edit_or_reply(q, text, reply_markup=kb)
@@ -697,37 +768,111 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             amount = int(cur.get('amount') or 0)
             if amount > 0:
                 insert_operation(cid, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
+                await _send_standard_op_confirmation(context, cid, update.effective_user, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
                 log.info('receipt_review: saved index=%s user=%s', idx, cid)
+                context.user_data['receipt_saved_count'] = int(context.user_data.get('receipt_saved_count') or 0) + 1
                 await q.answer('Сохранено')
         else:
             log.info('receipt_review: skipped index=%s user=%s', idx, cid)
+            context.user_data['receipt_skipped_count'] = int(context.user_data.get('receipt_skipped_count') or 0) + 1
             await q.answer('Пропущено')
         cands.pop(idx)
         context.user_data['receipt_candidates'] = cands
         if not cands:
             context.user_data.pop('receipt_candidates', None)
             context.user_data.pop('receipt_review_idx', None)
-            return await _safe_edit_or_reply(q, '✅ Проверка завершена. Операции обработаны.')
+            saved = int(context.user_data.pop('receipt_saved_count', 0) or 0)
+            skipped = int(context.user_data.pop('receipt_skipped_count', 0) or 0)
+            return await _safe_edit_or_reply(q, f'✅ Готово: записано {saved}, пропущено {skipped}.')
         next_idx = min(idx, len(cands) - 1)
         context.user_data['receipt_review_idx'] = next_idx
         text, kb = _receipt_render_card(cands, next_idx)
         return await _safe_edit_or_reply(q, text, reply_markup=kb)
 
-    if data == 'receipt_edit_one':
+    if data in {'rcpt_amt', 'rcpt_cat', 'rcpt_date', 'rcpt_type', 'rcpt_comment', 'rcpt_back_card', 'rcpt_amt_m100', 'rcpt_amt_m50', 'rcpt_amt_p50', 'rcpt_amt_p100', 'rcpt_cat_zav', 'rcpt_cat_prod', 'rcpt_cat_trans', 'rcpt_cat_other', 'rcpt_date_today', 'rcpt_date_yday', 'rcpt_comment_clear'}:
         cands = context.user_data.get('receipt_candidates') or []
         idx = int(context.user_data.get('receipt_review_idx') or 0)
         if not cands or idx >= len(cands):
             await q.answer('Нет данных', show_alert=True)
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для проверки.')
+        cur = cands[idx]
+        if data == 'rcpt_back_card':
+            await q.answer()
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_amt':
+            await q.answer()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('-100', callback_data='rcpt_amt_m100'), InlineKeyboardButton('-50', callback_data='rcpt_amt_m50'),
+                 InlineKeyboardButton('+50', callback_data='rcpt_amt_p50'), InlineKeyboardButton('+100', callback_data='rcpt_amt_p100')],
+                [InlineKeyboardButton('✏️ Ввести сумму', callback_data='rcpt_amt_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')],
+            ])
+            return await _safe_edit_or_reply(q, 'Корректировка суммы', reply_markup=kb)
+        if data.startswith('rcpt_amt_') and data != 'rcpt_amt_input':
+            delta = {'rcpt_amt_m100': -100, 'rcpt_amt_m50': -50, 'rcpt_amt_p50': 50, 'rcpt_amt_p100': 100}.get(data, 0)
+            cur['amount'] = max(1, int(round(float(cur.get('amount') or 0))) + delta)
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Сумма обновлена')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_cat':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Заведения', callback_data='rcpt_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rcpt_cat_prod')],
+                [InlineKeyboardButton('Транспорт', callback_data='rcpt_cat_trans'), InlineKeyboardButton('Прочее', callback_data='rcpt_cat_other')],
+                [InlineKeyboardButton('✏️ Другая', callback_data='rcpt_cat_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Выберите категорию', reply_markup=kb)
+        if data.startswith('rcpt_cat_') and data not in {'rcpt_cat', 'rcpt_cat_input'}:
+            cur['category'] = {'rcpt_cat_zav': 'Заведения', 'rcpt_cat_prod': 'Продукты', 'rcpt_cat_trans': 'Транспорт', 'rcpt_cat_other': 'Прочее'}.get(data, cur.get('category'))
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Категория обновлена')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_date':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Сегодня', callback_data='rcpt_date_today'), InlineKeyboardButton('Вчера', callback_data='rcpt_date_yday')],
+                [InlineKeyboardButton('✏️ Ввести дату', callback_data='rcpt_date_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Выберите дату', reply_markup=kb)
+        if data == 'rcpt_date_today':
+            cur['date'] = date.today().isoformat()
+        if data == 'rcpt_date_yday':
+            cur['date'] = (date.today() - timedelta(days=1)).isoformat()
+        if data in {'rcpt_date_today', 'rcpt_date_yday'}:
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Дата обновлена')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_type':
+            cur['type'] = 'Доходы' if (cur.get('type') != 'Доходы') else 'Расходы'
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Тип обновлён')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if data == 'rcpt_comment':
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('✏️ Ввести комментарий', callback_data='rcpt_comment_input')], [InlineKeyboardButton('Очистить', callback_data='rcpt_comment_clear')], [InlineKeyboardButton('⬅️ Назад', callback_data='rcpt_back_card')]])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Комментарий', reply_markup=kb)
+        if data == 'rcpt_comment_clear':
+            cur['merchant'] = ''
+            context.user_data['receipt_candidates'] = cands
+            await q.answer('Очищено')
+            text, kb = _receipt_render_card(cands, idx)
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+    if data in {'rcpt_amt_input', 'rcpt_cat_input', 'rcpt_date_input', 'rcpt_comment_input'}:
+        idx = int(context.user_data.get('receipt_review_idx') or 0)
         context.user_data['receipt_edit_idx'] = idx
         context.user_data['await_receipt_edit_text'] = True
+        context.user_data['receipt_edit_field'] = {'rcpt_amt_input': 'amount', 'rcpt_cat_input': 'category', 'rcpt_date_input': 'date', 'rcpt_comment_input': 'comment'}[data]
         await q.answer()
-        cur = cands[idx]
-        return await q.message.reply_text(
-            f"Отправь исправленный текст для операции {idx + 1}.\n"
-            f"Пример: столовая 392\n"
-            f"Сейчас: {cur.get('merchant')} {cur.get('amount')} ₽"
-        )
+        prompts = {'amount': 'Введите сумму числом, например 392', 'category': 'Введите категорию', 'date': 'Введите дату (например 23.05.2026)', 'comment': 'Введите комментарий'}
+        return await q.message.reply_text(prompts[context.user_data['receipt_edit_field']])
 
     if data == 'receipt_confirm_all':
         cands = context.user_data.get('receipt_candidates') or []
@@ -736,6 +881,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для записи.')
         total = 0
         written = 0
+        skipped = 0
         for c in cands:
             try:
                 dt = datetime.fromisoformat(c['date']).date()
@@ -743,8 +889,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 dt = date.today()
             amount = int(c.get('amount') or 0)
             if amount <= 0:
+                skipped += 1
                 continue
             insert_operation(cid, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
+            await _send_standard_op_confirmation(context, cid, update.effective_user, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
             total += amount
             written += 1
         log.info('receipt_confirm_all: inserted=%s user=%s', written, cid)
@@ -756,7 +904,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('📊 Отчёт', callback_data='menu_report')],
             [InlineKeyboardButton('⬅️ Меню', callback_data='start_main')],
         ])
-        return await _safe_edit_or_reply(q, f'✅ Записал {written} операции на сумму {total} ₽', reply_markup=kb)
+        return await _safe_edit_or_reply(q, f'✅ Готово: записано {written}, пропущено {skipped}. Сумма: {total} ₽', reply_markup=kb)
 
     if data == 'notif_morning_on':
         set_smart_morning_limits_enabled(cid, True)
@@ -1286,6 +1434,94 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         txt = await build_report(period, str(cid))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_report')]])
         return await q.edit_message_text(txt, parse_mode='Markdown', reply_markup=kb)
+
+    if data in {'exp_m', 'exp_14', 'exp_custom', 'exp_custom_start_today', 'exp_custom_start_yday', 'exp_custom_start_first', 'exp_custom_start_input',
+                'exp_custom_end_today', 'exp_custom_end_yday', 'exp_custom_end_month', 'exp_custom_end_input', 'exp_dl', 'exp_reset'}:
+        today = date.today()
+        st = context.user_data.setdefault('export_state', {})
+        if data == 'exp_m':
+            st['from'] = today.replace(day=1).isoformat(); st['to'] = today.isoformat()
+        elif data == 'exp_14':
+            st['from'] = (today - timedelta(days=13)).isoformat(); st['to'] = today.isoformat()
+        elif data == 'exp_custom':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Сегодня', callback_data='exp_custom_start_today')],
+                [InlineKeyboardButton('Вчера', callback_data='exp_custom_start_yday')],
+                [InlineKeyboardButton('1 число месяца', callback_data='exp_custom_start_first')],
+                [InlineKeyboardButton('✏️ Ввести дату', callback_data='exp_custom_start_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='exp_reset')],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Выбери начало периода:', reply_markup=kb)
+        elif data.startswith('exp_custom_start_'):
+            if data == 'exp_custom_start_today': st['from'] = today.isoformat()
+            elif data == 'exp_custom_start_yday': st['from'] = (today - timedelta(days=1)).isoformat()
+            elif data == 'exp_custom_start_first': st['from'] = today.replace(day=1).isoformat()
+            elif data == 'exp_custom_start_input':
+                context.user_data['await_export_start'] = True
+                await q.answer()
+                return await q.message.reply_text('Введи дату начала (DD.MM.YYYY или DD.MM или YYYY-MM-DD):')
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Сегодня', callback_data='exp_custom_end_today')],
+                [InlineKeyboardButton('Вчера', callback_data='exp_custom_end_yday')],
+                [InlineKeyboardButton('Конец месяца', callback_data='exp_custom_end_month')],
+                [InlineKeyboardButton('✏️ Ввести дату', callback_data='exp_custom_end_input')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='exp_custom')],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, 'Выбери конец периода:', reply_markup=kb)
+        elif data.startswith('exp_custom_end_'):
+            if data == 'exp_custom_end_today': st['to'] = today.isoformat()
+            elif data == 'exp_custom_end_yday': st['to'] = (today - timedelta(days=1)).isoformat()
+            elif data == 'exp_custom_end_month':
+                nxt = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+                st['to'] = (nxt - timedelta(days=1)).isoformat()
+            elif data == 'exp_custom_end_input':
+                context.user_data['await_export_end'] = True
+                await q.answer()
+                return await q.message.reply_text('Введи дату конца (DD.MM.YYYY или DD.MM или YYYY-MM-DD):')
+        elif data == 'exp_reset':
+            q.data = 'exp_custom'
+            return await callback_handler(update, context)
+        elif data == 'exp_dl':
+            pass
+
+        if data != 'exp_dl':
+            dfrom = date.fromisoformat(st['from']); dto = date.fromisoformat(st['to'])
+            rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM public.operations
+                                WHERE chat_id=%s AND op_date BETWEEN %s AND %s
+                                  AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
+                                ORDER BY op_date, id""", (cid, dfrom, dto))
+            exp = sum(int(r[4]) for r in rows if r[2] == 'Расходы')
+            inc = sum(int(r[4]) for r in rows if r[2] == 'Доходы')
+            st['count'] = len(rows)
+            log.info('export_preview period=%s..%s count=%s user_id=%s', dfrom, dto, len(rows), cid)
+            if not rows:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton('🔁 Выбрать другой период', callback_data='exp_reset')], [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')]])
+                await q.answer()
+                return await _safe_edit_or_reply(q, '📤 Экспорт\n\nЗа выбранный период операций нет.', reply_markup=kb)
+            st['preview_rows'] = [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': 'telegram'} for r in rows]
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Скачать XLSX', callback_data='exp_dl')], [InlineKeyboardButton('🔁 Выбрать другой период', callback_data='exp_reset')], [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')]])
+            await q.answer()
+            return await _safe_edit_or_reply(q, f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?', reply_markup=kb)
+
+        dfrom = date.fromisoformat(st['from']); dto = date.fromisoformat(st['to'])
+        fd, p = tempfile.mkstemp(prefix='kopipaste_export_', suffix='.xlsx')
+        os.close(fd)
+        try:
+            build_export_xlsx(p, st.get('preview_rows') or [], dfrom, dto)
+            fname = f'kopipaste_export_{dfrom.isoformat()}_{dto.isoformat()}.xlsx'
+            with open(p, 'rb') as f:
+                await context.bot.send_document(chat_id=cid, document=f, filename=fname, caption=f'📤 Экспорт готов\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {st.get("count", 0)}')
+            log.info('export_xlsx_generated rows=%s user_id=%s', st.get('count', 0), cid)
+            await q.answer('Готово')
+        except Exception as e:
+            log.warning('export_send_failed reason=%s user_id=%s', type(e).__name__, cid)
+            await q.answer('Ошибка', show_alert=True)
+        finally:
+            if os.path.exists(p):
+                os.remove(p)
+        return
 
     # Аналитика (как было)
     if data == 'menu_analytics':

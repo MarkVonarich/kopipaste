@@ -3,8 +3,7 @@ __version__ = "2026.02.26-01"
 
 from telegram import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-import pandas as pd
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from db.database import get_conn
 from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact
@@ -73,36 +72,16 @@ async def cmd_budget(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("""
-        SELECT id, op_date, type, category, amount, comment
-          FROM public.operations
-         WHERE chat_id=%s
-         ORDER BY op_date, id
-    """, (cid,))
-    rows = cur.fetchall(); cur.close(); conn.close()
-    if not rows:
-        return await update.message.reply_text("Нет данных для экспорта.")
-    df = pd.DataFrame(rows, columns=["id", "date", "type", "category", "amount", "comment"])
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"/tmp/export_{cid}_{ts}"
-    sent = False
-    try:
-        xlsx_path = base + ".xlsx"
-        df.to_excel(xlsx_path, index=False)
-        await context.bot.send_document(chat_id=cid, document=open(xlsx_path, "rb"), filename=f"fin_{ts}.xlsx")
-        sent = True
-    except Exception:
-        pass
-    try:
-        csv_path = base + ".csv"
-        df.to_csv(csv_path, index=False)
-        await context.bot.send_document(chat_id=cid, document=open(csv_path, "rb"), filename=f"fin_{ts}.csv")
-        sent = True
-    except Exception:
-        pass
-    if not sent:
-        await update.message.reply_text("⚠️ Не удалось сформировать файл экспорта (XLSX/CSV).")
+    context.user_data.pop('export_state', None)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
+        [InlineKeyboardButton('🗓 Последние 14 дней', callback_data='exp_14')],
+        [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')],
+    ])
+    import logging
+    logging.getLogger(__name__).info('export_menu_opened user_id=%s', cid)
+    await update.message.reply_text('📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=kb)
 
 
 async def cmd_about(update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,7 +231,7 @@ async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
         f"VOICE_INPUT_ENABLED: {VOICE_INPUT_ENABLED}\n"
         f"VOICE_TRANSCRIBE_PROVIDER: {VOICE_TRANSCRIBE_PROVIDER}\n"
         f"VOICE_TRANSCRIBE_MODEL: {VOICE_TRANSCRIBE_MODEL}\n"
-        f"ffmpeg_available: {bool(shutil.which('ffmpeg'))}\n"
-        f"api_key_loaded: {key_loaded}"
+        f"OPENAI_KEY_LOADED: {key_loaded}\n"
+        f"FFMPEG_AVAILABLE: {bool(shutil.which('ffmpeg'))}"
     )
     await update.message.reply_text(txt)

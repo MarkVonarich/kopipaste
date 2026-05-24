@@ -67,3 +67,11 @@ All further changes follow:
 
 - Voice input v1: added Telegram voice/audio transcription via OpenAI with ffmpeg conversion and reuse of existing text parsing flow.
 - Receipt review UX: added edit action in per-item review and clearer preview lines with type/date markers.
+
+- Stage receipt OCR v1.2: extraction is less conservative for bank screenshots, keeps both incomes and expenses, and drops day totals/headers via deterministic filter without confidence over-pruning.
+- Stage receipt review v1.2: fast per-candidate edit flow added (amount/category/date/type/comment with Back/Cancel) and DB writes only on explicit save actions.
+- Stage voice input v1.1: OpenAI transcription now works with OPENAI_API_KEY fallback to RECEIPT_OCR_API_KEY, optional ffmpeg conversion, admin diagnostics via /admin_voice_status.
+- Stage voice input v1.2: spoken Russian amount words are normalized to digits before text parsing route; voice success no longer falls back to generic voice failure when transcription already succeeded.
+- OCR UX v1.3: preview CTA renamed to “✏️ Изменить”, and OCR saves now emit standard operation confirmation cards with Удалить/Остаток/Изменить buttons.
+- Stage voice edit polish v1: expanded last-operation edit menu (amount/category/date/type/comment) for unified post-save edits.
+- Stage export xlsx v1: /export now opens period menu and sends formatted XLSX (not immediate raw CSV).
