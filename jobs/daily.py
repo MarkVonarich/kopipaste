@@ -20,12 +20,64 @@ from telegram.ext import ContextTypes
 
 from db.database import get_conn
 from db.queries import list_category_limits, get_smart_morning_limits_enabled
+from db.queries import reminders_list, reminder_update
+from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
 
 log = logging.getLogger("finbot.daily")
 
 # Кнопка: «Без операций сегодня»
 INLINE_KB_NOOP = InlineKeyboardMarkup([[InlineKeyboardButton("Без операций сегодня", callback_data="noop_today")]])
+
+
+def _rem_due_rows(today: date):
+    return pg_fetchall("""
+        SELECT id, user_id, title, rem_type, category, amount, event_date, notify_days_before, repeat_rule, repeat_interval_days
+        FROM public.user_reminders
+        WHERE is_active=TRUE AND (event_date - notify_days_before) <= %s AND (event_date - notify_days_before) >= %s
+        ORDER BY user_id, event_date
+    """, (today, today - timedelta(days=3)))
+
+
+def _event_sent(reminder_id: int, event_date: date, notify_days_before: int) -> bool:
+    r = pg_fetchall("""SELECT 1 FROM public.user_reminder_events
+                       WHERE reminder_id=%s AND event_date=%s AND notify_days_before=%s AND event_type='sent' LIMIT 1""",
+                    (reminder_id, event_date, notify_days_before))
+    return bool(r)
+
+
+def _mark_event(reminder_id: int, user_id: int, event_date: date, notify_days_before: int, event_type: str):
+    pg_exec("""INSERT INTO public.user_reminder_events(reminder_id, user_id, event_date, notify_days_before, event_type)
+               VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (reminder_id, user_id, event_date, notify_days_before, event_type))
+
+
+async def user_reminders_job(context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.utcnow().date()
+    scanned = due = sent = skipped = 0
+    try:
+        rows = _rem_due_rows(today)
+        scanned = len(rows)
+        for rid, uid, title, rem_type, category, amount, event_date, ndb, repeat_rule, repeat_days in rows:
+            due += 1
+            if _event_sent(rid, event_date, ndb):
+                skipped += 1
+                continue
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('✅ Записать', callback_data=f'rem_rec|{rid}')],
+                [InlineKeyboardButton('⏰ Завтра', callback_data=f'rem_snz|{rid}'), InlineKeyboardButton('✏️ Изменить', callback_data=f'rem_o|{rid}')],
+                [InlineKeyboardButton('⏸ Отключить', callback_data=f'rem_tog|{rid}')],
+            ])
+            day_txt = 'Сегодня событие' if (event_date - timedelta(days=ndb)) == today else 'Скоро событие'
+            await context.bot.send_message(chat_id=uid, text=f"🔔 {day_txt}\n\n{title} — {int(float(amount))} ₽\n\nКатегория: {category}\nДата: {event_date.strftime('%d.%m')}", reply_markup=kb)
+            _mark_event(rid, uid, event_date, ndb, 'sent')
+            sent += 1
+    except OperationalError:
+        log.exception('user_reminders_job operational_error')
+        return
+    except Exception as e:
+        log.exception('user_reminders_job failed: %s', e)
+    log.info('user_reminders_job: scanned=%s due=%s sent=%s skipped_dedup=%s', scanned, due, sent, skipped)
 
 # ---------------------------
 # Шаблоны
