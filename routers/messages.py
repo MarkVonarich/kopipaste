@@ -227,7 +227,7 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['receipt_candidates'] = [
             {
-                'amount': c.amount,
+                'amount': float(c.amount),
                 'category': c.category,
                 'type': c.op_type,
                 'date': c.op_date.isoformat(),
@@ -239,14 +239,14 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         ]
         context.user_data['receipt_warning'] = result.warning
         lines = ['🧾 Нашёл операции:', '']
-        for i, c in enumerate(result.candidates[:10], start=1):
-            op_icon = '💸' if c.op_type == 'Расходы' else '💰'
-            dts = c.op_date.strftime('%d.%m')
-            lines.append(f"{i}. {op_icon} {c.op_type}: {c.amount} ₽ • {c.category} • {c.merchant} • {dts}")
+        for i, c in enumerate(result.candidates[:20], start=1):
+            amount_i = int(round(float(c.amount)))
+            major = c.category if c.op_type == 'Расходы' else 'Доходы'
+            lines.append(f"{i}. {major} — {amount_i:,} ₽ — {c.merchant}".replace(',', ' '))
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
-            [InlineKeyboardButton('✏️ Проверить по одной', callback_data='receipt_review_one')],
+            [InlineKeyboardButton('✏️ Проверить', callback_data='receipt_review_one')],
             [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
         ])
         if result.warning:
@@ -262,8 +262,6 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
     if not VOICE_INPUT_ENABLED:
         return await emsg.reply_text('Голосовой ввод сейчас выключен.')
     if VOICE_TRANSCRIBE_PROVIDER != 'openai':
-        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
-    if not shutil.which('ffmpeg'):
         return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
     api_key = (os.getenv('OPENAI_API_KEY') or os.getenv('RECEIPT_OCR_API_KEY') or '').strip()
     if not api_key:
@@ -282,16 +280,21 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             dst = os.path.join(td, 'out.mp3')
             f = await media.get_file()
             await f.download_to_drive(custom_path=src)
-            proc = subprocess.run(['ffmpeg', '-y', '-i', src, '-ac', '1', '-ar', '16000', dst], capture_output=True)
-            if proc.returncode != 0:
-                log.warning('voice transcode failed user=%s', update.effective_chat.id)
-                return await emsg.reply_text('Не смог обработать аудио. Попробуй ещё раз.')
-            with open(dst, 'rb') as af:
+            audio_path = src
+            if shutil.which('ffmpeg'):
+                proc = subprocess.run(['ffmpeg', '-y', '-i', src, '-ac', '1', '-ar', '16000', dst], capture_output=True)
+                if proc.returncode == 0:
+                    audio_path = dst
+                else:
+                    log.warning('voice transcode failed user=%s', update.effective_chat.id)
+            else:
+                log.warning('voice: ffmpeg missing user=%s', update.effective_chat.id)
+            with open(audio_path, 'rb') as af:
                 tr = client.audio.transcriptions.create(model=VOICE_TRANSCRIBE_MODEL, file=af)
             text = (getattr(tr, 'text', None) or '').strip()
         if not text:
             return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
-        await emsg.reply_text(f'🎤 Распознал: {text[:180]}')
+        await emsg.reply_text(f'Распознал: {text[:180]}')
         update.message.text = text
         return await handle_text(update, context)
     except Exception as e:
@@ -334,17 +337,31 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         cands = context.user_data.get('receipt_candidates') or []
         if idx < 0 or idx >= len(cands):
             return await emsg.reply_text('Не нашёл операцию для редактирования.')
+        field = context.user_data.pop('receipt_edit_field', 'full')
         try:
-            merch_display, amt_raw, dt, _src_curr = parse_user_input(text)
-            cands[idx]['amount'] = int(amt_raw)
-            cands[idx]['merchant'] = norm_text(merch_display)
-            cands[idx]['date'] = dt.date().isoformat()
-            if re.search(r'зарплат|доход|перевод|пополн', text.lower()):
-                cands[idx]['type'] = 'Доходы'
+            if field == 'amount':
+                v = _parse_amount_input(text)
+                if v is None or v <= 0:
+                    raise ValueError('amount')
+                cands[idx]['amount'] = int(v)
+            elif field == 'comment':
+                cands[idx]['merchant'] = norm_text(text.strip())[:64]
+            elif field == 'date':
+                _m, _a, dt, _src_curr = parse_user_input(f'x 1 {text}')
+                cands[idx]['date'] = dt.date().isoformat()
+            elif field == 'category':
+                cands[idx]['category'] = norm_text(text.strip())[:32] or 'Прочее'
+            else:
+                merch_display, amt_raw, dt, _src_curr = parse_user_input(text)
+                cands[idx]['amount'] = int(amt_raw)
+                cands[idx]['merchant'] = norm_text(merch_display)
+                cands[idx]['date'] = dt.date().isoformat()
+                if re.search(r'зарплат|доход|перевод|пополн', text.lower()):
+                    cands[idx]['type'] = 'Доходы'
             context.user_data['receipt_candidates'] = cands
             context.user_data['receipt_review_idx'] = idx
             context.user_data.pop('receipt_edit_idx', None)
-            return await emsg.reply_text('✅ Операция обновлена. Нажми «Проверить по одной» или «Записать всё».')
+            return await emsg.reply_text('✅ Операция обновлена. Нажми «Проверить» или «Записать всё».')
         except Exception:
             context.user_data['await_receipt_edit_text'] = True
             return await emsg.reply_text('Не понял исправление. Пример: столовая 392')

@@ -14,7 +14,7 @@ log = logging.getLogger("finbot.receipt")
 
 @dataclass
 class ParsedCandidate:
-    amount: int
+    amount: float
     category: str
     op_type: str
     op_date: date
@@ -54,6 +54,7 @@ _DROP_WORDS = (
     'today', 'cashback'
 )
 _DATE_TOTAL_RE = re.compile(r'(сегодня|вчера|январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)', re.IGNORECASE)
+_HEADER_RE = re.compile(r'^\s*(сегодня|вчера|\d{1,2}\s+[а-я]+)\s*$', re.IGNORECASE)
 
 
 def _looks_like_aggregate_row(text: str) -> bool:
@@ -63,6 +64,20 @@ def _looks_like_aggregate_row(text: str) -> bool:
     if any(w in t for w in _DROP_WORDS):
         return True
     return bool(_DATE_TOTAL_RE.search(t) and not re.search(r'[a-zа-я]{4,}', t))
+
+
+def _map_category(v: str | None, op_type: str) -> str:
+    raw = (v or '').strip()
+    t = raw.lower()
+    if 'кафе' in t or 'ресторан' in t:
+        return 'Заведения'
+    if 'супермаркет' in t:
+        return 'Продукты'
+    if 'входящ' in t and 'перевод' in t:
+        return 'Переводы' if op_type == 'Доходы' else 'Прочее'
+    if 'алкогол' in t:
+        return 'Прочее'
+    return _category(raw)
 
 
 def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
@@ -93,7 +108,7 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
         'Игнорируй также: баланс/остаток/доступно/кэшбэк/бонусы/номера карт/кнопки UI/вкладки/заголовки. '
         'Тип: Расходы/Доходы. Положительные операции (входящий перевод/зарплата/пополнение) — Доходы. '
         'Не подменяй сумму строки на соседний дневной итог: бери сумму, визуально связанную с конкретным мерчантом/строкой. '
-        'Если не уверен — лучше не добавляй строку. '
+        'Если не уверен — добавляй строку с низким confidence, но не выбрасывай расходы. '
         'Если receipt с товарами неуверенный — можно вернуть одну итоговую операцию по total.\n\n'
         'JSON schema:\n'
         '{"ok":true|false,"source_type":"bank_screenshot|receipt|unknown",'
@@ -136,26 +151,35 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
     dropped_by_filter = 0
     out: List[ParsedCandidate] = []
     seen = set()
-    for op in ops:
+    for op in ops[:20]:
         try:
-            amount = int(round(float(op.get('amount') or 0)))
+            amount = float(op.get('amount') or 0)
         except Exception:
             continue
         if amount <= 0:
             continue
         merchant = (op.get('merchant') or op.get('comment') or 'Из изображения').strip()[:64]
         raw = (op.get('evidence') or op.get('comment') or op.get('merchant') or '').strip()[:120]
-        if _looks_like_aggregate_row(f'{merchant} {raw} {op.get("category_hint") or ""}'):
+        cat_hint = (op.get('category_hint') or '').strip()
+        merged = f'{merchant} {raw} {cat_hint}'.strip()
+        if _looks_like_aggregate_row(merged):
             dropped_by_filter += 1
             continue
-        key = (amount, merchant.lower(), _op_type(op.get('type')), _safe_date(op.get('op_date')).isoformat())
+        if _HEADER_RE.match((merchant or '').strip()):
+            dropped_by_filter += 1
+            continue
+        if not merchant and not cat_hint:
+            dropped_by_filter += 1
+            continue
+        op_type = _op_type(op.get('type'))
+        key = (round(amount, 2), merchant.lower(), op_type, _safe_date(op.get('op_date')).isoformat())
         if key in seen:
             continue
         seen.add(key)
         out.append(ParsedCandidate(
             amount=amount,
-            category=_category(op.get('category_hint')),
-            op_type=_op_type(op.get('type')),
+            category=_map_category(op.get('category_hint'), op_type),
+            op_type=op_type,
             op_date=_safe_date(op.get('op_date')),
             merchant=merchant,
             confidence=max(0.0, min(1.0, float(op.get('confidence') or 0.0))),
