@@ -16,7 +16,9 @@ from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
+from utils.spoken_numbers import normalize_spoken_money_ru
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
+from db.queries import update_last_operation_fields, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
@@ -55,6 +57,25 @@ def _parse_budget_amount(text: str) -> int | None:
     if not t.isdigit():
         return None
     return int(t)
+
+
+def _parse_flexible_date(text: str):
+    t = (text or '').strip().lower()
+    if t == 'сегодня':
+        return datetime.now().date()
+    if t == 'вчера':
+        from datetime import timedelta
+        return (datetime.now() - timedelta(days=1)).date()
+    try:
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', t):
+            return datetime.strptime(t, '%Y-%m-%d').date()
+        if re.fullmatch(r'\d{1,2}\.\d{1,2}\.\d{4}', t):
+            return datetime.strptime(t, '%d.%m.%Y').date()
+        if re.fullmatch(r'\d{1,2}\.\d{1,2}', t):
+            return datetime.strptime(f'{t}.{datetime.now().year}', '%d.%m.%Y').date()
+    except Exception:
+        return None
+    return None
 
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
     """Reply in markdown, fallback to plain text if telegram rejects entities."""
@@ -227,7 +248,7 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['receipt_candidates'] = [
             {
-                'amount': c.amount,
+                'amount': float(c.amount),
                 'category': c.category,
                 'type': c.op_type,
                 'date': c.op_date.isoformat(),
@@ -239,14 +260,14 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         ]
         context.user_data['receipt_warning'] = result.warning
         lines = ['🧾 Нашёл операции:', '']
-        for i, c in enumerate(result.candidates[:10], start=1):
-            op_icon = '💸' if c.op_type == 'Расходы' else '💰'
-            dts = c.op_date.strftime('%d.%m')
-            lines.append(f"{i}. {op_icon} {c.op_type}: {c.amount} ₽ • {c.category} • {c.merchant} • {dts}")
+        for i, c in enumerate(result.candidates[:20], start=1):
+            amount_i = int(round(float(c.amount)))
+            major = c.category if c.op_type == 'Расходы' else 'Доходы'
+            lines.append(f"{i}. {major} — {amount_i:,} ₽ — {c.merchant}".replace(',', ' '))
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
-            [InlineKeyboardButton('✏️ Проверить по одной', callback_data='receipt_review_one')],
+            [InlineKeyboardButton('✏️ Изменить', callback_data='receipt_review_one')],
             [InlineKeyboardButton('❌ Отмена', callback_data='receipt_cancel')],
         ])
         if result.warning:
@@ -262,8 +283,6 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
     if not VOICE_INPUT_ENABLED:
         return await emsg.reply_text('Голосовой ввод сейчас выключен.')
     if VOICE_TRANSCRIBE_PROVIDER != 'openai':
-        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
-    if not shutil.which('ffmpeg'):
         return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
     api_key = (os.getenv('OPENAI_API_KEY') or os.getenv('RECEIPT_OCR_API_KEY') or '').strip()
     if not api_key:
@@ -282,18 +301,35 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             dst = os.path.join(td, 'out.mp3')
             f = await media.get_file()
             await f.download_to_drive(custom_path=src)
-            proc = subprocess.run(['ffmpeg', '-y', '-i', src, '-ac', '1', '-ar', '16000', dst], capture_output=True)
-            if proc.returncode != 0:
-                log.warning('voice transcode failed user=%s', update.effective_chat.id)
-                return await emsg.reply_text('Не смог обработать аудио. Попробуй ещё раз.')
-            with open(dst, 'rb') as af:
+            audio_path = src
+            if shutil.which('ffmpeg'):
+                proc = subprocess.run(['ffmpeg', '-y', '-i', src, '-ac', '1', '-ar', '16000', dst], capture_output=True)
+                if proc.returncode == 0:
+                    audio_path = dst
+                else:
+                    log.warning('voice transcode failed user=%s', update.effective_chat.id)
+            else:
+                log.warning('voice: ffmpeg missing user=%s', update.effective_chat.id)
+            with open(audio_path, 'rb') as af:
                 tr = client.audio.transcriptions.create(model=VOICE_TRANSCRIBE_MODEL, file=af)
             text = (getattr(tr, 'text', None) or '').strip()
         if not text:
             return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
-        await emsg.reply_text(f'🎤 Распознал: {text[:180]}')
-        update.message.text = text
-        return await handle_text(update, context)
+        log.info('voice_transcribe: ok user=%s', update.effective_chat.id)
+        await emsg.reply_text(f'Распознал: {text[:180]}')
+        normalized_text, changed = normalize_spoken_money_ru(text)
+        log.info('voice_normalized_text: changed=%s user=%s', changed, update.effective_chat.id)
+        try:
+            parse_user_input(normalized_text)
+            parse_ok = True
+        except ValueError:
+            parse_ok = False
+        if not parse_ok:
+            log.info('voice_to_text_flow: failed user=%s', update.effective_chat.id)
+            return await emsg.reply_text(f'Но не понял сумму. Попробуй так: {normalized_text[:120] or "такси 750"}')
+        await _process_free_text(update, context, normalized_text)
+        log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
+        return
     except Exception as e:
         log.warning('voice transcribe failed user=%s reason=%s', update.effective_chat.id, type(e).__name__)
         return await emsg.reply_text('Не смог распознать голос. Попробуй ещё раз или напиши текстом.')
@@ -329,22 +365,149 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
 
+    if context.user_data.pop('await_rem_title_amount', False):
+        try:
+            merch, amt, _dt, _ = parse_user_input(text)
+        except Exception:
+            context.user_data['await_rem_title_amount'] = True
+            return await emsg.reply_text('⚠️ Формат: Название 1990')
+        d = context.user_data.setdefault('rem_draft', {})
+        d['title'] = norm_text(merch)
+        d['amount'] = int(amt)
+        d['category'] = 'Прочее' if d.get('rem_type') != 'Доходы' else 'Переводы'
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('Заведения', callback_data='rem_cat_zav'), InlineKeyboardButton('Продукты', callback_data='rem_cat_prod')],
+            [InlineKeyboardButton('Транспорт', callback_data='rem_cat_tr'), InlineKeyboardButton('Подписки', callback_data='rem_cat_sub')],
+            [InlineKeyboardButton('Прочее', callback_data='rem_cat_other')],
+            [InlineKeyboardButton('✏️ Другая', callback_data='rem_cat_custom')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+        ])
+        return await emsg.reply_text('Выбери категорию:', reply_markup=kb)
+
+    if context.user_data.get('await_rem_edit'):
+        st = context.user_data.pop('await_rem_edit')
+        rid, field = int(st['rid']), st['field']
+        try:
+            if rid == -1:
+                d = context.user_data.setdefault('rem_draft', {})
+                if field == 'category_draft':
+                    d['category'] = norm_text(text)[:64] or 'Прочее'
+                elif field == 'date_draft':
+                    dd = _parse_flexible_date(text)
+                    if not dd:
+                        raise ValueError('date')
+                    d['event_date'] = dd
+                elif field == 'repeat_draft':
+                    n = int((text or '').strip())
+                    if n < 1 or n > 3650:
+                        raise ValueError('repeat')
+                    d['repeat_rule'] = 'custom_days'; d['repeat_interval_days'] = n
+                elif field == 'notify_draft':
+                    n = int((text or '').strip())
+                    if n < 0 or n > 30:
+                        raise ValueError('notify')
+                    d['notify_days_before'] = n
+                return await emsg.reply_text('✅ Сохранено в черновике. Продолжи через кнопки.')
+            if field == 'amount':
+                a = _parse_amount_input(text)
+                if a is None or a <= 0 or a >= 1_000_000_000:
+                    raise ValueError('amount')
+                reminder_update(cid, rid, amount=int(a))
+            elif field == 'category':
+                reminder_update(cid, rid, category=norm_text(text)[:64] or 'Прочее')
+            elif field == 'date':
+                d = _parse_flexible_date(text)
+                if not d:
+                    raise ValueError('date')
+                reminder_update(cid, rid, event_date=d)
+            elif field == 'repeat':
+                t = (text or '').strip().lower()
+                if t.startswith('custom_days:'):
+                    n = int(t.split(':', 1)[1]); reminder_update(cid, rid, repeat_rule='custom_days', repeat_interval_days=n)
+                else:
+                    reminder_update(cid, rid, repeat_rule=t, repeat_interval_days=None)
+            elif field == 'notify':
+                n = int((text or '').strip())
+                if n < 0 or n > 30:
+                    raise ValueError('notify')
+                reminder_update(cid, rid, notify_days_before=n)
+            elif field == 'type':
+                v = 'Доходы' if 'доход' in (text or '').lower() else 'Расходы'
+                reminder_update(cid, rid, rem_type=v)
+        except Exception:
+            context.user_data['await_rem_edit'] = st
+            return await emsg.reply_text('⚠️ Некорректное значение, попробуй ещё раз.')
+        return await emsg.reply_text('✅ Напоминание обновлено. Открой карточку через /reminders')
+
+    if context.user_data.pop('await_op_edit_amount', False):
+        amount = _parse_amount_input(text)
+        if amount is None or amount <= 0 or amount >= 1_000_000_000:
+            context.user_data['await_op_edit_amount'] = True
+            return await emsg.reply_text('⚠️ Неверная сумма. Введите число >0 и <1 000 000 000')
+        row = update_last_operation_fields(cid, amount=int(amount))
+        if not row:
+            return await emsg.reply_text('Не нашёл операцию для изменения.')
+        return await emsg.reply_text('✅ Сумма обновлена.')
+
+    if context.user_data.pop('await_op_edit_date', False):
+        d = _parse_flexible_date(text)
+        if not d:
+            context.user_data['await_op_edit_date'] = True
+            return await emsg.reply_text('⚠️ Не понял дату. Пример: 24.05.2026')
+        row = update_last_operation_fields(cid, op_date=d)
+        if not row:
+            return await emsg.reply_text('Не нашёл операцию для изменения.')
+        return await emsg.reply_text('✅ Дата обновлена.')
+
+    if context.user_data.pop('await_op_edit_comment', False):
+        row = update_last_operation_fields(cid, comment=(text or '').strip()[:200])
+        if not row:
+            return await emsg.reply_text('Не нашёл операцию для изменения.')
+        return await emsg.reply_text('✅ Комментарий обновлён.')
+
+    if context.user_data.get('await_export_start') or context.user_data.get('await_export_end'):
+        d = _parse_flexible_date(text)
+        if not d:
+            return await emsg.reply_text('⚠️ Не понял дату. Формат: DD.MM.YYYY / DD.MM / YYYY-MM-DD')
+        st = context.user_data.setdefault('export_state', {})
+        if context.user_data.get('await_export_start'):
+            st['from'] = d.isoformat()
+            context.user_data.pop('await_export_start', None)
+            return await emsg.reply_text('Дата начала сохранена. Выбери конец периода через /export.')
+        st['to'] = d.isoformat()
+        context.user_data.pop('await_export_end', None)
+        return await emsg.reply_text('Дата конца сохранена. Выбери «Скачать XLSX» через /export.')
+
     if context.user_data.pop('await_receipt_edit_text', False):
         idx = int(context.user_data.get('receipt_edit_idx') or -1)
         cands = context.user_data.get('receipt_candidates') or []
         if idx < 0 or idx >= len(cands):
             return await emsg.reply_text('Не нашёл операцию для редактирования.')
+        field = context.user_data.pop('receipt_edit_field', 'full')
         try:
-            merch_display, amt_raw, dt, _src_curr = parse_user_input(text)
-            cands[idx]['amount'] = int(amt_raw)
-            cands[idx]['merchant'] = norm_text(merch_display)
-            cands[idx]['date'] = dt.date().isoformat()
-            if re.search(r'зарплат|доход|перевод|пополн', text.lower()):
-                cands[idx]['type'] = 'Доходы'
+            if field == 'amount':
+                v = _parse_amount_input(text)
+                if v is None or v <= 0:
+                    raise ValueError('amount')
+                cands[idx]['amount'] = int(v)
+            elif field == 'comment':
+                cands[idx]['merchant'] = norm_text(text.strip())[:64]
+            elif field == 'date':
+                _m, _a, dt, _src_curr = parse_user_input(f'x 1 {text}')
+                cands[idx]['date'] = dt.date().isoformat()
+            elif field == 'category':
+                cands[idx]['category'] = norm_text(text.strip())[:32] or 'Прочее'
+            else:
+                merch_display, amt_raw, dt, _src_curr = parse_user_input(text)
+                cands[idx]['amount'] = int(amt_raw)
+                cands[idx]['merchant'] = norm_text(merch_display)
+                cands[idx]['date'] = dt.date().isoformat()
+                if re.search(r'зарплат|доход|перевод|пополн', text.lower()):
+                    cands[idx]['type'] = 'Доходы'
             context.user_data['receipt_candidates'] = cands
             context.user_data['receipt_review_idx'] = idx
             context.user_data.pop('receipt_edit_idx', None)
-            return await emsg.reply_text('✅ Операция обновлена. Нажми «Проверить по одной» или «Записать всё».')
+            return await emsg.reply_text('✅ Операция обновлена. Нажми «Проверить» или «Записать всё».')
         except Exception:
             context.user_data['await_receipt_edit_text'] = True
             return await emsg.reply_text('Не понял исправление. Пример: столовая 392')

@@ -3,11 +3,10 @@ __version__ = "2026.02.26-01"
 
 from telegram import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-import pandas as pd
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from db.database import get_conn
-from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact
+from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, reminders_list
 from services.ml_train import train_model
 from ui.keyboards import main_menu_kb
 from services.onboarding import onboarding_welcome
@@ -18,6 +17,7 @@ from jobs.daily import previous_week_period, previous_month_period, build_weekly
 from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
 from services.quick import get_quick_buttons
+from db.database import pg_fetchall
 
 
 async def on_startup(app):
@@ -32,6 +32,8 @@ async def on_startup(app):
         BotCommand('budget', 'Показать бюджеты'),
         BotCommand('limits', 'Мои лимиты'),
         BotCommand('export', 'Экспорт XLSX/CSV'),
+        BotCommand('reminders', 'Напоминания'),
+        BotCommand('admin_reminders_preview', 'Диагностика напоминаний (admin)'),
         BotCommand('about', 'О боте и зачем он нужен'),
         BotCommand('mlstats', 'ML-статистика top1/top2'),
         BotCommand('mltrain', 'Обучить ML модель (admin)'),
@@ -73,36 +75,35 @@ async def cmd_budget(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("""
-        SELECT id, op_date, type, category, amount, comment
-          FROM public.operations
-         WHERE chat_id=%s
-         ORDER BY op_date, id
-    """, (cid,))
-    rows = cur.fetchall(); cur.close(); conn.close()
+    context.user_data.pop('export_state', None)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
+        [InlineKeyboardButton('🗓 Последние 14 дней', callback_data='exp_14')],
+        [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')],
+    ])
+    import logging
+    logging.getLogger(__name__).info('export_menu_opened user_id=%s', cid)
+    await update.message.reply_text('📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=kb)
+
+
+async def cmd_reminders(update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    rows = reminders_list(cid, active_only=True)
     if not rows:
-        return await update.message.reply_text("Нет данных для экспорта.")
-    df = pd.DataFrame(rows, columns=["id", "date", "type", "category", "amount", "comment"])
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"/tmp/export_{cid}_{ts}"
-    sent = False
-    try:
-        xlsx_path = base + ".xlsx"
-        df.to_excel(xlsx_path, index=False)
-        await context.bot.send_document(chat_id=cid, document=open(xlsx_path, "rb"), filename=f"fin_{ts}.xlsx")
-        sent = True
-    except Exception:
-        pass
-    try:
-        csv_path = base + ".csv"
-        df.to_csv(csv_path, index=False)
-        await context.bot.send_document(chat_id=cid, document=open(csv_path, "rb"), filename=f"fin_{ts}.csv")
-        sent = True
-    except Exception:
-        pass
-    if not sent:
-        await update.message.reply_text("⚠️ Не удалось сформировать файл экспорта (XLSX/CSV).")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('➕ Добавить', callback_data='rem_add')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+        ])
+        return await update.message.reply_text('🔔 Напоминания\n\nПока ничего нет.\n\nМожно добавить подписку, платёж, будущую трату или доход — я напомню заранее.', reply_markup=kb)
+    lines = ['🔔 Напоминания', '', 'Активные:']
+    btns = []
+    for i, r in enumerate(rows[:5], start=1):
+        lines.append(f"{i}. {r['title']} — {int(r['amount']):,} ₽, {r['event_date'].day} число".replace(',', ' '))
+        btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
+    btns.append([InlineKeyboardButton('➕ Добавить', callback_data='rem_add'), InlineKeyboardButton('📋 Все', callback_data='rem_all')])
+    btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
+    await update.message.reply_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
 
 
 async def cmd_about(update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,7 +253,22 @@ async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
         f"VOICE_INPUT_ENABLED: {VOICE_INPUT_ENABLED}\n"
         f"VOICE_TRANSCRIBE_PROVIDER: {VOICE_TRANSCRIBE_PROVIDER}\n"
         f"VOICE_TRANSCRIBE_MODEL: {VOICE_TRANSCRIBE_MODEL}\n"
-        f"ffmpeg_available: {bool(shutil.which('ffmpeg'))}\n"
-        f"api_key_loaded: {key_loaded}"
+        f"OPENAI_KEY_LOADED: {key_loaded}\n"
+        f"FFMPEG_AVAILABLE: {bool(shutil.which('ffmpeg'))}"
     )
     await update.message.reply_text(txt)
+
+
+async def cmd_admin_reminders_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    uid = update.effective_user.id
+    active = pg_fetchall("SELECT COUNT(*) FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE", (uid,))[0][0]
+    today = datetime.utcnow().date()
+    due = pg_fetchall("SELECT COUNT(*) FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE AND (event_date-notify_days_before)=%s", (uid, today))[0][0]
+    nxt = pg_fetchall("SELECT title, event_date FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE ORDER BY event_date LIMIT 5", (uid,))
+    lines = [f'active: {active}', f'due_today: {due}', 'next5:']
+    for t, d in nxt:
+        lines.append(f'- {t[:20]}: {d}')
+    lines.append('job_enabled: true')
+    await update.message.reply_text('\n'.join(lines))

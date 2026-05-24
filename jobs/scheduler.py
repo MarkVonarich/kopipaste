@@ -5,7 +5,7 @@ import asyncio
 import logging
 from telegram.ext import ContextTypes
 
-from .daily import evening_reminder_job, weekly_report_job, monthly_report_job, smart_morning_limit_job
+from .daily import evening_reminder_job, weekly_report_job, monthly_report_job, smart_morning_limit_job, user_reminders_job
 from services.currency import update_fx_rates
 from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER, ENABLE_SMART_MORNING_LIMITS
 
@@ -66,3 +66,5 @@ def register_jobs(app):
         log.info('Added job "smart_morning_limit"')
     else:
         log.info('Skipped job "smart_morning_limit" by feature flag')
+    app.job_queue.run_repeating(user_reminders_job, interval=300, first=260, name="user_reminders_job")
+    log.info('Added job "user_reminders_job"')
