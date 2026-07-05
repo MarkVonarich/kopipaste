@@ -375,11 +375,21 @@ def reminder_get(user_id: int, rid: int):
 
 
 def reminder_insert(user_id: int, payload: dict) -> int:
-    rows = pg_fetchall("""INSERT INTO public.user_reminders
-        (user_id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,now())
-        RETURNING id""", (user_id, payload['title'], payload['rem_type'], payload['category'], payload['amount'], payload.get('currency', 'RUB'), payload['event_date'], payload['repeat_rule'], payload.get('repeat_interval_days'), payload['notify_days_before']))
-    return int(rows[0][0])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.user_reminders
+                (user_id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,now())
+                RETURNING id""", (user_id, payload['title'], payload['rem_type'], payload['category'], payload['amount'], payload.get('currency', 'RUB'), payload['event_date'], payload['repeat_rule'], payload.get('repeat_interval_days'), payload['notify_days_before']))
+            rid = int(cur.fetchone()[0])
+        conn.commit()
+        return rid
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def reminder_update(user_id: int, rid: int, **fields):
