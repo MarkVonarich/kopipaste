@@ -165,8 +165,8 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
 def _export_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'), InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
-        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14'), InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
-        [InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
+        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14')],
+        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m'), InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
         [InlineKeyboardButton('📆 Текущий год', callback_data='exp_y'), InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py')],
         [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
         [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
