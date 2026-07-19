@@ -11,12 +11,14 @@ from datetime import datetime, timedelta, date
 from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
+from services.export_flow import parse_export_date, validate_export_period
 from services.records import get_user_alias, record_operation
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
 from utils.spoken_numbers import normalize_spoken_money_ru
+from db.database import pg_fetchall
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
 from db.queries import update_last_operation_fields, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
@@ -187,6 +189,39 @@ def _reminder_notify_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton('За 3 дня', callback_data='rem_n_3'), InlineKeyboardButton('За неделю', callback_data='rem_n_7')],
         [InlineKeyboardButton('✏️ Свой вариант', callback_data='rem_n_in')],
     ])
+
+
+def _export_end_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Сегодня', callback_data='exp_custom_end_today'), InlineKeyboardButton('Вчера', callback_data='exp_custom_end_yday')],
+        [InlineKeyboardButton('Конец месяца', callback_data='exp_custom_end_month')],
+        [InlineKeyboardButton('✏️ Ввести дату', callback_data='exp_custom_end_input')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='exp_custom'), InlineKeyboardButton('❌ Отмена', callback_data='exp_cancel')],
+    ])
+
+
+def _export_start_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Сегодня', callback_data='exp_custom_start_today'), InlineKeyboardButton('Вчера', callback_data='exp_custom_start_yday')],
+        [InlineKeyboardButton('1 число месяца', callback_data='exp_custom_start_first')],
+        [InlineKeyboardButton('✏️ Ввести дату', callback_data='exp_custom_start_input')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='exp_menu'), InlineKeyboardButton('❌ Отмена', callback_data='exp_cancel')],
+    ])
+
+
+def _export_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Скачать XLSX', callback_data='exp_dl')],
+        [InlineKeyboardButton('🔁 Изменить период', callback_data='exp_custom'), InlineKeyboardButton('❌ Отмена', callback_data='exp_cancel')],
+    ])
+
+
+def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
+    rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram') FROM public.operations
+                        WHERE chat_id=%s AND op_date BETWEEN %s AND %s
+                          AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
+                        ORDER BY op_date, id""", (chat_id, dfrom, dto))
+    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
 
 
 def _reminder_confirmation(d: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -656,17 +691,38 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         return await emsg.reply_text('✅ Комментарий обновлён.')
 
     if context.user_data.get('await_export_start') or context.user_data.get('await_export_end'):
-        d = _parse_flexible_date(text)
+        d = parse_export_date(text)
         if not d:
-            return await emsg.reply_text('⚠️ Не понял дату. Формат: DD.MM.YYYY / DD.MM / YYYY-MM-DD')
+            return await emsg.reply_text('⚠️ Не понял дату. Формат: DD.MM.YYYY / DD.MM / YYYY-MM-DD', reply_markup=_export_end_kb() if context.user_data.get('await_export_end') else _export_start_kb())
         st = context.user_data.setdefault('export_state', {})
         if context.user_data.get('await_export_start'):
             st['from'] = d.isoformat()
+            st['mode'] = 'custom'
+            st['step'] = 'end'
             context.user_data.pop('await_export_start', None)
-            return await emsg.reply_text('Дата начала сохранена. Выбери конец периода через /export.')
+            context.user_data['await_export_end'] = True
+            return await emsg.reply_text('Дата начала сохранена. Теперь выбери или введи конец периода:', reply_markup=_export_end_kb())
         st['to'] = d.isoformat()
         context.user_data.pop('await_export_end', None)
-        return await emsg.reply_text('Дата конца сохранена. Выбери «Скачать XLSX» через /export.')
+        dfrom = date.fromisoformat(st['from'])
+        dto = date.fromisoformat(st['to'])
+        ok, error = validate_export_period(dfrom, dto)
+        if not ok:
+            st.pop('to', None)
+            context.user_data['await_export_end'] = True
+            msg = 'Дата конца не может быть раньше даты начала.' if error == 'end_before_start' else 'Период слишком большой. Выберите диапазон до 5 лет.'
+            return await emsg.reply_text(f'⚠️ {msg}\n\nВведите конец периода ещё раз:', reply_markup=_export_end_kb())
+        rows = _export_rows(cid, dfrom, dto)
+        exp = sum(int(r['amount']) for r in rows if r['type'] == 'Расходы')
+        inc = sum(int(r['amount']) for r in rows if r['type'] == 'Доходы')
+        st['count'] = len(rows)
+        st['preview_rows'] = rows
+        st['step'] = 'confirm'
+        return await emsg.reply_text(
+            f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\n'
+            f'Операций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?',
+            reply_markup=_export_confirm_kb(),
+        )
 
     if context.user_data.pop('await_receipt_edit_text', False):
         idx = int(context.user_data.get('receipt_edit_idx') or -1)
