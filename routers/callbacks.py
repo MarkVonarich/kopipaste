@@ -17,7 +17,7 @@ from db.queries import (
     reminders_list, reminder_insert, reminder_get, reminder_update, reminder_delete
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
-from ui.keyboards import ml_top2_kb
+from ui.keyboards import help_menu_kb, main_menu_kb, ml_top2_kb, settings_menu_kb
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
@@ -585,19 +585,33 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='start_main')]])
         return await q.edit_message_text(txt, reply_markup=kb, disable_web_page_preview=True)
 
+    if data == 'menu_help':
+        txt = (
+            "❓ Помощь\n\n"
+            "Пишите операции обычным текстом: «кофе 250», «зарплата 70000», "
+            "«такси 900 вчера». Можно отправить голосовое или фото чека, если эти функции включены.\n\n"
+            "Через кнопки доступны бюджеты, лимиты, напоминания, экспорт и настройки. "
+            "Команды меню: /start, /settings, /help."
+        )
+        return await q.edit_message_text(txt, reply_markup=help_menu_kb(), disable_web_page_preview=True)
+
     # Настройки
     if data == 'menu_settings':
+        return await q.edit_message_text('⚙️ Настройки:', reply_markup=settings_menu_kb())
+
+    if data == 'workspace_menu':
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
-             InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
-            [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
-            [InlineKeyboardButton('🔔 Напоминания', callback_data='rem_menu')],
-            [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets')],
-            [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
-            [InlineKeyboardButton('📉 Лимиты по категориям', callback_data='cl_menu')],
-            [InlineKeyboardButton('◀️ Назад', callback_data='start_main')],
+            [InlineKeyboardButton('Личное пространство', callback_data='workspace_personal')],
+            [InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')],
         ])
-        return await q.edit_message_text('⚙️ Настройки:', reply_markup=kb)
+        return await q.edit_message_text(
+            '🧩 Пространства\n\nСейчас все личные операции остаются в личном пространстве. '
+            'Основа для семейных, рабочих и групповых пространств готовится в backend-слое.',
+            reply_markup=kb,
+        )
+
+    if data == 'workspace_personal':
+        return await q.answer('Личное пространство выбрано')
 
     if data == 'rem_menu':
         rows = reminders_list(cid, active_only=True)

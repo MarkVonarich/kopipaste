@@ -1,14 +1,20 @@
 # routers/commands.py — v2026.02.26-01
 __version__ = "2026.02.26-01"
 
-from telegram import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from telegram.ext import ContextTypes
 from datetime import datetime, date, timedelta
 
 from db.database import get_conn
 from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, reminders_list
 from services.ml_train import train_model
-from ui.keyboards import main_menu_kb
+from ui.keyboards import help_menu_kb, main_menu_kb, settings_menu_kb
 from services.onboarding import onboarding_welcome
 from settings import ADMIN_USER_IDS, VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL
 import os
@@ -26,22 +32,25 @@ async def on_startup(app):
 
     load_global_cache()
     update_fx_rates()
-    await app.bot.set_my_commands([
-        BotCommand('start', 'Главное меню / онбординг'),
+    public_commands = [
+        BotCommand('start', 'Главное меню'),
         BotCommand('settings', 'Настройки'),
-        BotCommand('budget', 'Показать бюджеты'),
-        BotCommand('limits', 'Мои лимиты'),
-        BotCommand('export', 'Экспорт XLSX/CSV'),
-        BotCommand('reminders', 'Напоминания'),
+        BotCommand('help', 'Помощь'),
+    ]
+    await app.bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
+
+    admin_commands = public_commands + [
         BotCommand('admin_reminders_preview', 'Диагностика напоминаний (admin)'),
-        BotCommand('about', 'О боте и зачем он нужен'),
-        BotCommand('mlstats', 'ML-статистика top1/top2'),
+        BotCommand('mlstats', 'ML-статистика (admin)'),
         BotCommand('mltrain', 'Обучить ML модель (admin)'),
         BotCommand('admin_weekly_report_preview', 'Превью недельного отчёта (admin)'),
         BotCommand('admin_monthly_report_preview', 'Превью месячного отчёта (admin)'),
         BotCommand('admin_smart_morning_preview', 'Превью утреннего лимит-сигнала (admin)'),
         BotCommand('admin_category_learning_debug', 'Диагностика global category learning (admin)'),
-    ])
+        BotCommand('admin_voice_status', 'Статус voice/OCR ключей (admin)'),
+    ]
+    for admin_id in ADMIN_USER_IDS:
+        await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
 
 
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,15 +64,21 @@ async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
-         InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
-        [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
-        [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets')],
-        [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
-        [InlineKeyboardButton('◀️ В меню', callback_data='start_main')],
-    ])
-    await update.message.reply_text('⚙️ Настройки:', reply_markup=kb)
+    await update.message.reply_text('⚙️ Настройки:', reply_markup=settings_menu_kb())
+
+
+async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
+    from settings import SUPPORT_USERNAME
+
+    txt = (
+        "❓ Помощь\n\n"
+        "Пишите операции обычным текстом: «кофе 250», «зарплата 70000», "
+        "«такси 900 вчера». Можно отправить голосовое или фото чека, если эти функции включены.\n\n"
+        "Через кнопки доступны бюджеты, лимиты, напоминания, экспорт и настройки. "
+        "Команды меню: /start, /settings, /help.\n\n"
+        "Поддержка: @" + SUPPORT_USERNAME.lstrip('@')
+    )
+    await update.message.reply_text(txt, disable_web_page_preview=True, reply_markup=help_menu_kb())
 
 
 async def cmd_budget(update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,21 +122,12 @@ async def cmd_reminders(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_about(update, context: ContextTypes.DEFAULT_TYPE):
-    from settings import SUPPORT_USERNAME
-    txt = (
-        "Я *КопиPaste* — делаю учёт денег простым и быстрым.\n\n"
-        "⚙️ Как пользоваться:\n"
-        "• Пишите коротко: «молоко 150», «пицца 450 вчера», «зарплата 70 000».\n"
-        "• Если я знаю вашу привычную категорию — запишу сразу.\n"
-        "• Если нет — подскажу и запомню ваш выбор.\n\n"
-        "🎯 Зачем это всё: регулярный учёт помогает увидеть, куда утекают деньги, и снижает лишние траты.\n\n"
-        "Команды: /start /settings /budget /export /mlstats\n"
-        "Поддержка: @" + SUPPORT_USERNAME.lstrip('@')
-    )
-    await update.message.reply_text(txt, parse_mode='Markdown', disable_web_page_preview=True)
+    return await cmd_help(update, context)
 
 
 async def cmd_mlstats(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
     cid = update.effective_chat.id
     stats = get_ml_stats(cid, days=30)
     picks = stats.get('picks', 0)

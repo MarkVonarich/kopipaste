@@ -189,6 +189,40 @@ def bump_global_alias(norm_text: str, typ: str, category: str, inc: int = 1):
     """, (norm_text, typ, category, inc))
 
 
+def cleanup_action_tokens(ttl_minutes: int = 10, hard_delete_days: int = 7) -> dict:
+    """Expire stale draft tokens and delete old finished/expired tokens."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.action_tokens
+                   SET status = 'expired'
+                 WHERE status = 'draft'
+                   AND COALESCE(expires_at, created_at + (%s || ' minutes')::interval) < now()
+                """,
+                (int(ttl_minutes),),
+            )
+            expired = cur.rowcount
+
+            cur.execute(
+                """
+                DELETE FROM public.action_tokens
+                 WHERE status IN ('committed', 'cancelled', 'expired')
+                   AND created_at < now() - (%s || ' days')::interval
+                """,
+                (int(hard_delete_days),),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        return {"expired": int(expired), "deleted": int(deleted)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 
 def get_user_top_categories(user_id: int, op_type: str = 'Расходы', lookback_ops: int = 50, top_n: int = 2) -> List[str]:
     rows = pg_fetchall("""
