@@ -18,7 +18,7 @@ from logging_config import setup_logging
 from settings import TELEGRAM_TOKEN
 
 from routers.commands import (
-    cmd_start, cmd_settings, cmd_budget, cmd_export, cmd_about, cmd_limits,
+    cmd_start, cmd_settings, cmd_help, cmd_budget, cmd_export, cmd_about, cmd_limits,
     cmd_mlstats, cmd_mltrain, on_startup,
     cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
     cmd_admin_category_learning_debug,
@@ -63,6 +63,7 @@ def main():
     # Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("budget", cmd_budget))
     app.add_handler(CommandHandler("limits", cmd_limits))
     app.add_handler(CommandHandler("export", cmd_export))

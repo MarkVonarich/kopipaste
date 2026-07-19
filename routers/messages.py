@@ -7,8 +7,8 @@ import os
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
-from telegram import ReplyKeyboardRemove
+from datetime import datetime, timedelta, date
+from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
 from services.records import get_user_alias, record_operation
@@ -138,6 +138,91 @@ def _parse_reminder_event_date(text: str, today):
         return None
     return None
 
+
+def _fmt_reminder_money(v: int) -> str:
+    return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+def _next_monthly_date(dt: date) -> date:
+    y, m = dt.year, dt.month + 1
+    if m > 12:
+        y, m = y + 1, 1
+    from calendar import monthrange
+    d = min(dt.day, monthrange(y, m)[1])
+    return date(y, m, d)
+
+
+def _reminder_repeat_label(r: str, d: dict) -> str:
+    return {
+        'none': 'не повторять',
+        'weekly': 'каждую неделю',
+        'monthly': 'каждый месяц',
+        'yearly': 'каждый год',
+        'custom_days': f"каждые {int(d.get('repeat_interval_days') or 1)} дней",
+    }.get(r or 'none', r or 'none')
+
+
+def _reminder_date_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Сегодня', callback_data='rem_dt_today'), InlineKeyboardButton('Завтра', callback_data='rem_dt_tom')],
+        [InlineKeyboardButton('1 число', callback_data='rem_dt_1'), InlineKeyboardButton('15 число', callback_data='rem_dt_15')],
+        [InlineKeyboardButton('✏️ Ввести дату', callback_data='rem_dt_in')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+    ])
+
+
+def _reminder_repeat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Не повторять', callback_data='rem_r_none')],
+        [InlineKeyboardButton('Каждую неделю', callback_data='rem_r_week'), InlineKeyboardButton('Каждый месяц', callback_data='rem_r_month')],
+        [InlineKeyboardButton('Каждый год', callback_data='rem_r_year'), InlineKeyboardButton('Свой период', callback_data='rem_r_custom')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
+    ])
+
+
+def _reminder_notify_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('В день события', callback_data='rem_n_0')],
+        [InlineKeyboardButton('За 1 день', callback_data='rem_n_1'), InlineKeyboardButton('За 2 дня', callback_data='rem_n_2')],
+        [InlineKeyboardButton('За 3 дня', callback_data='rem_n_3'), InlineKeyboardButton('За неделю', callback_data='rem_n_7')],
+        [InlineKeyboardButton('✏️ Свой вариант', callback_data='rem_n_in')],
+    ])
+
+
+def _reminder_confirmation(d: dict) -> tuple[str, InlineKeyboardMarkup]:
+    ev = d.get('event_date')
+    rpt = d.get('repeat_rule', 'none')
+    next_after = None
+    if rpt == 'weekly':
+        next_after = ev + timedelta(days=7)
+    elif rpt == 'monthly':
+        next_after = _next_monthly_date(ev)
+    elif rpt == 'yearly':
+        try:
+            next_after = ev.replace(year=ev.year + 1)
+        except Exception:
+            next_after = ev.replace(month=2, day=28, year=ev.year + 1)
+    elif rpt == 'custom_days':
+        next_after = ev + timedelta(days=int(d.get('repeat_interval_days') or 1))
+    date_label = 'Первое списание' if rpt != 'none' else 'Дата'
+    txt = (
+        f"🔔 Напоминание\n\n"
+        f"{d.get('title','—')} — {_fmt_reminder_money(int(d.get('amount',0)))}\n"
+        f"Тип: {d.get('rem_type','Расходы')}\n"
+        f"Категория: {d.get('category','Прочее')}\n"
+        f"{date_label}: {ev.strftime('%d.%m.%Y')}\n"
+        f"Повтор: {_reminder_repeat_label(rpt, d)}"
+        + (f"\nСледующее после этого: {next_after.strftime('%d.%m.%Y')}" if next_after else '')
+        + f"\nНапомнить: за {d.get('notify_days_before',1)} дня"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Сохранить', callback_data='rem_save')],
+        [InlineKeyboardButton('✏️ Изменить', callback_data='rem_add')],
+        [InlineKeyboardButton('❌ Отмена', callback_data='rem_menu')],
+    ])
+    return txt, kb
+
+
 async def _safe_reply(emsg, text_md: str, reply_markup=None):
     """Reply in markdown, fallback to plain text if telegram rejects entities."""
     try:
@@ -221,6 +306,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         'amt': amt_final,
         'time': dt,
         'type': op_type,
+        'source': context.user_data.get('operation_source') or 'text',
         'note': note,
         'ml_cat1': cat1,
         'ml_cat2': cat2,
@@ -388,6 +474,7 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
         if not parse_ok:
             log.info('voice_to_text_flow: failed user=%s', update.effective_chat.id)
             return await emsg.reply_text(f'Но не понял сумму. Попробуй так: {normalized_text[:120] or "такси 750"}')
+        context.user_data['operation_source'] = 'voice'
         await _process_free_text(update, context, normalized_text)
         log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
         return
@@ -484,6 +571,10 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 d = context.user_data.setdefault('rem_draft', {})
                 if field == 'category_draft':
                     d['category'] = norm_text(text)[:64] or 'Прочее'
+                    return await emsg.reply_text(
+                        'Когда первое событие?\n\nМожно написать:\n19\n19 число\n19.06\n19.06.2026\nзавтра\n\nДля регулярных платежей это будет первая дата, дальше повтор настроим следующим шагом.',
+                        reply_markup=_reminder_date_kb(),
+                    )
                 elif field == 'date_draft':
                     dd = _parse_reminder_event_date(text, datetime.now().date())
                     log.info('reminder_date_input raw=%s parsed_ok=%s user=%s', (text or '')[:32], bool(dd), cid)
@@ -491,17 +582,20 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                         return await emsg.reply_text('Не понял дату. Напиши, например: 19, 19 число или 19.06.2026')
                     d['event_date'] = dd
                     log.info('reminder_date_selected source=manual event_date=%s user=%s', dd.isoformat(), cid)
+                    return await emsg.reply_text('Как часто повторять?', reply_markup=_reminder_repeat_kb())
                 elif field == 'repeat_draft':
                     n = int((text or '').strip())
                     if n < 1 or n > 3650:
                         raise ValueError('repeat')
                     d['repeat_rule'] = 'custom_days'; d['repeat_interval_days'] = n
+                    return await emsg.reply_text('Когда напомнить?', reply_markup=_reminder_notify_kb())
                 elif field == 'notify_draft':
                     n = int((text or '').strip())
                     if n < 0 or n > 30:
                         raise ValueError('notify')
                     d['notify_days_before'] = n
-                return await emsg.reply_text('✅ Сохранено в черновике. Продолжи через кнопки.')
+                    txt, kb = _reminder_confirmation(d)
+                    return await emsg.reply_text(txt, reply_markup=kb)
             if field == 'amount':
                 a = _parse_amount_input(text)
                 if a is None or a <= 0 or a >= 1_000_000_000:

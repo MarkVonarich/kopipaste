@@ -10,3 +10,4 @@ scikit-learn
 joblib
 openai
 openpyxl
+pytest

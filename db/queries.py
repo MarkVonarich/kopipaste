@@ -131,12 +131,24 @@ def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int
     iso = op_date.isocalendar()
     week_start = op_date.fromordinal(op_date.toordinal() - (op_date.isoweekday() - 1))
     weekday = op_date.isoweekday()  # 1..7 (Mon..Sun)
-    pg_exec("""
-      INSERT INTO public.operations
-        (chat_id, user_id, op_date, type, category, amount, comment, week_start, iso_year, iso_week, weekday)
-      VALUES
-        (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (chat_id, chat_id, op_date, typ, category, amount, comment, week_start, int(iso.year), int(iso.week), int(weekday)))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+              INSERT INTO public.operations
+                (chat_id, user_id, op_date, type, category, amount, comment, week_start, iso_year, iso_week, weekday)
+              VALUES
+                (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              RETURNING id
+            """, (chat_id, chat_id, op_date, typ, category, amount, comment, week_start, int(iso.year), int(iso.week), int(weekday)))
+            row = cur.fetchone()
+        conn.commit()
+        return int(row[0]) if row else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def delete_last_operation(chat_id: int):
     pg_exec("""
@@ -187,6 +199,40 @@ def bump_global_alias(norm_text: str, typ: str, category: str, inc: int = 1):
            SET popularity = public.global_aliases.popularity + EXCLUDED.popularity,
                updated_at = now()
     """, (norm_text, typ, category, inc))
+
+
+def cleanup_action_tokens(ttl_minutes: int = 10, hard_delete_days: int = 7) -> dict:
+    """Expire stale draft tokens and delete old finished/expired tokens."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.action_tokens
+                   SET status = 'expired'
+                 WHERE status = 'draft'
+                   AND COALESCE(expires_at, created_at + (%s || ' minutes')::interval) < now()
+                """,
+                (int(ttl_minutes),),
+            )
+            expired = cur.rowcount
+
+            cur.execute(
+                """
+                DELETE FROM public.action_tokens
+                 WHERE status IN ('committed', 'cancelled', 'expired')
+                   AND created_at < now() - (%s || ' days')::interval
+                """,
+                (int(hard_delete_days),),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        return {"expired": int(expired), "deleted": int(deleted)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 
@@ -375,11 +421,21 @@ def reminder_get(user_id: int, rid: int):
 
 
 def reminder_insert(user_id: int, payload: dict) -> int:
-    rows = pg_fetchall("""INSERT INTO public.user_reminders
-        (user_id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,now())
-        RETURNING id""", (user_id, payload['title'], payload['rem_type'], payload['category'], payload['amount'], payload.get('currency', 'RUB'), payload['event_date'], payload['repeat_rule'], payload.get('repeat_interval_days'), payload['notify_days_before']))
-    return int(rows[0][0])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.user_reminders
+                (user_id, title, rem_type, category, amount, currency, event_date, repeat_rule, repeat_interval_days, notify_days_before, is_active, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,now())
+                RETURNING id""", (user_id, payload['title'], payload['rem_type'], payload['category'], payload['amount'], payload.get('currency', 'RUB'), payload['event_date'], payload['repeat_rule'], payload.get('repeat_interval_days'), payload['notify_days_before']))
+            rid = int(cur.fetchone()[0])
+        conn.commit()
+        return rid
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def reminder_update(user_id: int, rid: int, **fields):

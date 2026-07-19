@@ -17,11 +17,11 @@ from db.queries import (
     reminders_list, reminder_insert, reminder_get, reminder_update, reminder_delete
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
-from ui.keyboards import ml_top2_kb
+from ui.keyboards import help_menu_kb, main_menu_kb, ml_top2_kb, settings_menu_kb
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
-from db.queries import insert_operation
+from services.operations import record_financial_operation
 from ui.messages import render_operation_confirmation
 from services.export_xlsx import build_export_xlsx
 import tempfile
@@ -585,19 +585,33 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='start_main')]])
         return await q.edit_message_text(txt, reply_markup=kb, disable_web_page_preview=True)
 
+    if data == 'menu_help':
+        txt = (
+            "❓ Помощь\n\n"
+            "Пишите операции обычным текстом: «кофе 250», «зарплата 70000», "
+            "«такси 900 вчера». Можно отправить голосовое или фото чека, если эти функции включены.\n\n"
+            "Через кнопки доступны бюджеты, лимиты, напоминания, экспорт и настройки. "
+            "Команды меню: /start, /settings, /help."
+        )
+        return await q.edit_message_text(txt, reply_markup=help_menu_kb(), disable_web_page_preview=True)
+
     # Настройки
     if data == 'menu_settings':
+        return await q.edit_message_text('⚙️ Настройки:', reply_markup=settings_menu_kb())
+
+    if data == 'workspace_menu':
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
-             InlineKeyboardButton('⏰ Напоминание', callback_data='menu_reminder')],
-            [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications')],
-            [InlineKeyboardButton('🔔 Напоминания', callback_data='rem_menu')],
-            [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets')],
-            [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
-            [InlineKeyboardButton('📉 Лимиты по категориям', callback_data='cl_menu')],
-            [InlineKeyboardButton('◀️ Назад', callback_data='start_main')],
+            [InlineKeyboardButton('Личное пространство', callback_data='workspace_personal')],
+            [InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')],
         ])
-        return await q.edit_message_text('⚙️ Настройки:', reply_markup=kb)
+        return await q.edit_message_text(
+            '🧩 Пространства\n\nСейчас все личные операции остаются в личном пространстве. '
+            'Основа для семейных, рабочих и групповых пространств готовится в backend-слое.',
+            reply_markup=kb,
+        )
+
+    if data == 'workspace_personal':
+        return await q.answer('Личное пространство выбрано')
 
     if data == 'rem_menu':
         rows = reminders_list(cid, active_only=True)
@@ -952,7 +966,18 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 dt = date.today()
             amount = int(cur.get('amount') or 0)
             if amount > 0:
-                insert_operation(cid, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
+                record_financial_operation(
+                    chat_id=cid,
+                    actor_user_id=update.effective_user.id,
+                    op_date=dt,
+                    op_type=cur.get('type') or 'Расходы',
+                    category=cur.get('category') or 'Другое',
+                    amount=amount,
+                    comment=cur.get('merchant') or 'From image',
+                    source='ocr',
+                    chat_type=getattr(update.effective_chat, 'type', 'private') or 'private',
+                    raw_text=cur.get('raw_text') or cur.get('merchant'),
+                )
                 await _send_standard_op_confirmation(context, cid, update.effective_user, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
                 log.info('receipt_review: saved index=%s user=%s', idx, cid)
                 context.user_data['receipt_saved_count'] = int(context.user_data.get('receipt_saved_count') or 0) + 1
@@ -1076,7 +1101,18 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             if amount <= 0:
                 skipped += 1
                 continue
-            insert_operation(cid, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
+            record_financial_operation(
+                chat_id=cid,
+                actor_user_id=update.effective_user.id,
+                op_date=dt,
+                op_type=c.get('type') or 'Расходы',
+                category=c.get('category') or 'Другое',
+                amount=amount,
+                comment=c.get('merchant') or 'From image',
+                source='ocr',
+                chat_type=getattr(update.effective_chat, 'type', 'private') or 'private',
+                raw_text=c.get('raw_text') or c.get('merchant'),
+            )
             await _send_standard_op_confirmation(context, cid, update.effective_user, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
             total += amount
             written += 1
@@ -1620,14 +1656,27 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_report')]])
         return await q.edit_message_text(txt, parse_mode='Markdown', reply_markup=kb)
 
-    if data in {'exp_m', 'exp_14', 'exp_custom', 'exp_custom_start_today', 'exp_custom_start_yday', 'exp_custom_start_first', 'exp_custom_start_input',
+    if data in {'exp_today', 'exp_7', 'exp_14', 'exp_m', 'exp_pm', 'exp_y', 'exp_py', 'exp_custom', 'exp_custom_start_today', 'exp_custom_start_yday', 'exp_custom_start_first', 'exp_custom_start_input',
                 'exp_custom_end_today', 'exp_custom_end_yday', 'exp_custom_end_month', 'exp_custom_end_input', 'exp_dl', 'exp_reset'}:
         today = date.today()
         st = context.user_data.setdefault('export_state', {})
-        if data == 'exp_m':
-            st['from'] = today.replace(day=1).isoformat(); st['to'] = today.isoformat()
+        if data == 'exp_today':
+            st['from'] = today.isoformat(); st['to'] = today.isoformat()
+        elif data == 'exp_7':
+            st['from'] = (today - timedelta(days=6)).isoformat(); st['to'] = today.isoformat()
         elif data == 'exp_14':
             st['from'] = (today - timedelta(days=13)).isoformat(); st['to'] = today.isoformat()
+        elif data == 'exp_m':
+            st['from'] = today.replace(day=1).isoformat(); st['to'] = today.isoformat()
+        elif data == 'exp_pm':
+            first_this_month = today.replace(day=1)
+            prev_end = first_this_month - timedelta(days=1)
+            st['from'] = prev_end.replace(day=1).isoformat(); st['to'] = prev_end.isoformat()
+        elif data == 'exp_y':
+            st['from'] = today.replace(month=1, day=1).isoformat(); st['to'] = today.isoformat()
+        elif data == 'exp_py':
+            prev_year = today.year - 1
+            st['from'] = date(prev_year, 1, 1).isoformat(); st['to'] = date(prev_year, 12, 31).isoformat()
         elif data == 'exp_custom':
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton('Сегодня', callback_data='exp_custom_start_today')],
@@ -1673,7 +1722,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
         if data != 'exp_dl':
             dfrom = date.fromisoformat(st['from']); dto = date.fromisoformat(st['to'])
-            rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM public.operations
+            rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram') FROM public.operations
                                 WHERE chat_id=%s AND op_date BETWEEN %s AND %s
                                   AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
                                 ORDER BY op_date, id""", (cid, dfrom, dto))
@@ -1685,7 +1734,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='exp_menu')]])
                 await q.answer()
                 return await _safe_edit_or_reply(q, '📤 Экспорт\n\nЗа выбранный период операций нет.', reply_markup=kb)
-            st['preview_rows'] = [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': 'telegram'} for r in rows]
+            st['preview_rows'] = [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
             kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Скачать XLSX', callback_data='exp_dl')], [InlineKeyboardButton('⬅️ Назад', callback_data='exp_menu')]])
             await q.answer()
             return await _safe_edit_or_reply(q, f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?', reply_markup=kb)
@@ -1710,7 +1759,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'exp_menu':
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m'), InlineKeyboardButton('🗓 Последние 14 дней', callback_data='exp_14')],
+            [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'), InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
+            [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14'), InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
+            [InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
+            [InlineKeyboardButton('📆 Текущий год', callback_data='exp_y'), InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py')],
             [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
             [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
         ])
@@ -1743,7 +1795,18 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
         if not r:
             return await q.answer('Не найдено', show_alert=True)
-        insert_operation(cid, r['event_date'], r['rem_type'], r['category'], int(r['amount']), r['title'])
+        record_financial_operation(
+            chat_id=cid,
+            actor_user_id=update.effective_user.id,
+            op_date=r['event_date'],
+            op_type=r['rem_type'],
+            category=r['category'],
+            amount=int(r['amount']),
+            comment=r['title'],
+            source='reminder',
+            chat_type=getattr(update.effective_chat, 'type', 'private') or 'private',
+            raw_text=r['title'],
+        )
         await _send_standard_op_confirmation(context, cid, update.effective_user, r['event_date'], r['rem_type'], r['category'], int(r['amount']), r['title'])
         if r['repeat_rule'] == 'none':
             reminder_update(cid, rid, is_active=False)

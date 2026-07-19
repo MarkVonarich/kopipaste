@@ -59,6 +59,9 @@ def pg_fetchall(sql: str, params=()):
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
