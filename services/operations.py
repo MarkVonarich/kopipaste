@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from typing import Literal
@@ -13,6 +14,7 @@ from services.activity import record_financial_activity
 from services.workspaces import WorkspaceContext, can_add_operation, resolve_workspace
 
 OperationSource = Literal["text", "voice", "ocr", "reminder", "import", "miniapp", "api"]
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -170,34 +172,14 @@ def _record_activity_safely(*, actor_user_id: int, workspace_id: int | None, ope
         )
     except errors.UndefinedTable:
         pass
-
-
-def _recorded_from_payload(
-    *,
-    operation_id: int | None,
-    workspace_id: int | None,
-    chat_id: int,
-    actor_user_id: int,
-    compatibility_user_id: int,
-    currency: str,
-    category: str,
-    payload: dict,
-) -> RecordedOperation:
-    dt = date.fromisoformat(payload["op_date"])
-    return RecordedOperation(
-        operation_id=operation_id,
-        workspace_id=workspace_id,
-        actor_user_id=actor_user_id,
-        user_id=compatibility_user_id,
-        chat_id=chat_id,
-        amount=int(payload.get("amount") or 0),
-        currency=currency,
-        type=payload.get("type") or "Расходы",
-        category=category,
-        operation_date=dt,
-        source=payload.get("source") or "text",
-        comment=payload.get("merchant") or "From group",
-    )
+    except Exception as e:
+        log.warning(
+            "financial_activity_log_failed operation_id=%s workspace_id=%s source=%s reason=%s",
+            operation_id,
+            workspace_id,
+            source,
+            type(e).__name__,
+        )
 
 
 def commit_operation_draft(
@@ -252,16 +234,6 @@ def commit_operation_draft(
                 return {
                     "status": "already_committed",
                     "operation_id": committed_operation_id,
-                    "recorded": _recorded_from_payload(
-                        operation_id=committed_operation_id,
-                        workspace_id=row_workspace_id,
-                        chat_id=row_chat_id,
-                        actor_user_id=row_actor_user_id,
-                        compatibility_user_id=compatibility_user_id,
-                        currency=currency,
-                        category=category,
-                        payload=payload,
-                    ),
                 }
             if status != "draft":
                 conn.rollback()
@@ -343,6 +315,87 @@ def commit_operation_draft(
         metadata=metadata or {"chat_id": chat_id, "draft_id": draft_id},
     )
     return {"status": "committed", "recorded": recorded, "operation_id": recorded.operation_id if recorded else None}
+
+
+def cancel_operation_draft(
+    *,
+    draft_id: str,
+    actor_user_id: int,
+    chat_id: int,
+    workspace_id: int | None,
+) -> dict:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT draft_id, workspace_id, chat_id, actor_user_id, status, committed_operation_id
+                  FROM public.operation_drafts
+                 WHERE draft_id=%s
+                 FOR UPDATE
+                """,
+                (draft_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return {"status": "not_found"}
+
+            row_workspace_id = int(row[1]) if row[1] is not None else None
+            row_chat_id = int(row[2])
+            row_actor_user_id = int(row[3])
+            status = row[4]
+            committed_operation_id = int(row[5]) if row[5] is not None else None
+
+            if row_actor_user_id != int(actor_user_id):
+                conn.rollback()
+                return {"status": "wrong_actor"}
+            if row_chat_id != int(chat_id) or row_workspace_id != workspace_id:
+                conn.rollback()
+                return {"status": "scope_mismatch"}
+            if status == "committed":
+                conn.commit()
+                return {"status": "already_committed", "operation_id": committed_operation_id}
+            if status != "draft":
+                conn.rollback()
+                return {"status": status or "expired"}
+
+            cur.execute(
+                """
+                UPDATE public.operation_drafts
+                   SET status='expired', updated_at=now()
+                 WHERE draft_id=%s AND status='draft' AND expires_at < now()
+                 RETURNING status
+                """,
+                (draft_id,),
+            )
+            expired = cur.fetchone()
+            if expired:
+                conn.commit()
+                return {"status": expired[0]}
+
+            cur.execute(
+                """
+                UPDATE public.operation_drafts
+                   SET status='cancelled', updated_at=now()
+                 WHERE draft_id=%s AND actor_user_id=%s AND chat_id=%s
+                   AND workspace_id IS NOT DISTINCT FROM %s
+                   AND status='draft'
+                 RETURNING status
+                """,
+                (draft_id, actor_user_id, chat_id, workspace_id),
+            )
+            cancelled = cur.fetchone()
+            if not cancelled:
+                conn.rollback()
+                return {"status": "conflict"}
+        conn.commit()
+        return {"status": cancelled[0]}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def record_financial_operation(

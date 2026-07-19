@@ -23,7 +23,7 @@ from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.categories import get_or_create_custom_category
-from services.operations import commit_operation_draft, load_operation_draft, record_financial_operation
+from services.operations import cancel_operation_draft, commit_operation_draft, load_operation_draft, record_financial_operation
 from services.reminder_totals import render_reminder_totals
 from services.workspaces import create_group_workspace, is_active_telegram_member, join_group_workspace, resolve_workspace
 from ui.messages import render_operation_confirmation
@@ -284,12 +284,20 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
     payload = draft.get('payload') or {}
     if action == 'gcancel':
-        if draft.get('status') != 'draft':
-            return await q.answer('This operation is already completed.', show_alert=True)
-        pg_exec("UPDATE public.operation_drafts SET status='cancelled', updated_at=now() WHERE draft_id=%s", (draft_id,))
+        workspace_id = draft.get('workspace_id')
+        result = cancel_operation_draft(
+            draft_id=draft_id,
+            actor_user_id=actor_user_id,
+            chat_id=draft['chat_id'],
+            workspace_id=workspace_id,
+        )
         st = context.user_data.get('await_group_custom_category')
-        if isinstance(st, dict) and st.get('draft_id') == draft_id:
+        if isinstance(st, dict) and st.get('draft_id') == draft_id and result['status'] in {'cancelled', 'already_committed', 'expired'}:
             context.user_data.pop('await_group_custom_category', None)
+        if result['status'] == 'already_committed':
+            return await q.answer('Операция уже была сохранена', show_alert=True)
+        if result['status'] != 'cancelled':
+            return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
         await q.answer('Отменено')
         return await _safe_edit_or_reply(q, 'Операция отменена.')
     if action == 'gadd':
@@ -321,6 +329,8 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
     )
     if result['status'] not in {'committed', 'already_committed'}:
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
+    if result['status'] == 'already_committed':
+        return await q.answer('Операция уже была сохранена', show_alert=True)
     recorded = result['recorded']
     user_name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(actor_user_id)
     text = (

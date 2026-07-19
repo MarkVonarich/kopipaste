@@ -13,7 +13,7 @@ from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardBu
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
 from services.export_flow import clear_export_wait_flags, parse_export_date, validate_export_period
-from services.categories import get_or_create_custom_category
+from services.categories import get_or_create_custom_category, normalize_category_name
 from services.operations import category_options, commit_operation_draft, create_operation_draft, load_operation_draft, record_financial_operation
 from services.records import get_user_alias, record_operation
 from services.workspaces import resolve_workspace
@@ -678,6 +678,9 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('await_group_custom_category', None)
             return await emsg.reply_text('Этот черновик операции больше не подходит к текущему чату или пользователю. Отправьте операцию заново.')
         draft = load_operation_draft(draft_id, actor_user_id=update.effective_user.id)
+        if draft and draft.get('status') == 'committed':
+            context.user_data.pop('await_group_custom_category', None)
+            return await emsg.reply_text('Операция уже была сохранена.')
         if not draft or draft.get('status') != 'draft':
             context.user_data.pop('await_group_custom_category', None)
             return await emsg.reply_text('This operation draft has expired. Send the operation again.')
@@ -690,26 +693,29 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('await_group_custom_category', None)
             return await emsg.reply_text('В этом пространстве у вас нет прав добавлять операции.')
         try:
-            cat = get_or_create_custom_category(
-                workspace_id=workspace.workspace_id,
-                user_id=update.effective_user.id,
-                op_type=payload.get('type') or 'Расходы',
-                name=text,
-            )
+            category_name = normalize_category_name(text)
         except ValueError:
             return await emsg.reply_text('⚠️ Введите название категории.')
         result = commit_operation_draft(
             draft_id=draft_id,
             actor_user_id=update.effective_user.id,
-            category=cat.name,
+            category=category_name,
             chat_id=draft['chat_id'],
             workspace_id=workspace.workspace_id,
             chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
-            metadata={'draft_id': draft_id, 'custom_category_created': cat.created},
+            metadata={'draft_id': draft_id, 'custom_category_requested': True},
         )
         context.user_data.pop('await_group_custom_category', None)
-        if result['status'] not in {'committed', 'already_committed'}:
+        if result['status'] == 'already_committed':
+            return await emsg.reply_text('Операция уже была сохранена.')
+        if result['status'] != 'committed':
             return await emsg.reply_text('This operation draft has expired. Send the operation again.')
+        cat = get_or_create_custom_category(
+            workspace_id=workspace.workspace_id,
+            user_id=update.effective_user.id,
+            op_type=payload.get('type') or 'Расходы',
+            name=category_name,
+        )
         recorded = result['recorded']
         name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(update.effective_user.id)
         return await emsg.reply_text(
