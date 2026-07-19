@@ -92,8 +92,10 @@ async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     context.user_data.pop('export_state', None)
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
-        [InlineKeyboardButton('🗓 Последние 14 дней', callback_data='exp_14')],
+        [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'), InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
+        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14'), InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
+        [InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
+        [InlineKeyboardButton('📆 Текущий год', callback_data='exp_y'), InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py')],
         [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
         [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')],
     ])

@@ -131,12 +131,24 @@ def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int
     iso = op_date.isocalendar()
     week_start = op_date.fromordinal(op_date.toordinal() - (op_date.isoweekday() - 1))
     weekday = op_date.isoweekday()  # 1..7 (Mon..Sun)
-    pg_exec("""
-      INSERT INTO public.operations
-        (chat_id, user_id, op_date, type, category, amount, comment, week_start, iso_year, iso_week, weekday)
-      VALUES
-        (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (chat_id, chat_id, op_date, typ, category, amount, comment, week_start, int(iso.year), int(iso.week), int(weekday)))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+              INSERT INTO public.operations
+                (chat_id, user_id, op_date, type, category, amount, comment, week_start, iso_year, iso_week, weekday)
+              VALUES
+                (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              RETURNING id
+            """, (chat_id, chat_id, op_date, typ, category, amount, comment, week_start, int(iso.year), int(iso.week), int(weekday)))
+            row = cur.fetchone()
+        conn.commit()
+        return int(row[0]) if row else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def delete_last_operation(chat_id: int):
     pg_exec("""

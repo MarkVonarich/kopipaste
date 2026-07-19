@@ -16,6 +16,7 @@ from db.queries import (
 from cache.global_dict import bump_global_popularity, global_suggestions
 from utils.text import norm_text, format_date_ru_with_weekday
 from db.database import get_conn, pg_fetchall, pg_exec
+from services.operations import record_financial_operation
 
 log = logging.getLogger("finbot.records")
 
@@ -219,8 +220,27 @@ async def record_operation(cat: str, amt: int, dt,
         if ut and not _is_bot_hint(ut):
             orig_text = ut
 
-    # Сохраняем операцию в БД
-    insert_operation(cid, dt.date(), typ, cat, amt, 'From Telegram')
+    user = getattr(update, 'effective_user', None)
+    actor_user_id = getattr(user, 'id', cid) or cid
+    chat = getattr(update, 'effective_chat', None)
+    chat_type = getattr(chat, 'type', 'private') or 'private'
+    pending = context.user_data.get('pending') or {}
+    source = pending.get('source') or context.user_data.get('operation_source') or 'text'
+
+    # Сохраняем операцию в БД через единый слой.
+    recorded = record_financial_operation(
+        chat_id=cid,
+        actor_user_id=actor_user_id,
+        op_date=dt.date(),
+        op_type=typ,
+        category=cat,
+        amount=amt,
+        comment='From Telegram',
+        source=source,
+        chat_type=chat_type,
+        raw_text=orig_text if orig_text and not _is_bot_hint(orig_text) else None,
+        metadata={'note': note} if note else None,
+    )
 
     # Пишем raw_text в последнюю запись
     if orig_text and not _is_bot_hint(orig_text):
@@ -229,13 +249,8 @@ async def record_operation(cat: str, amt: int, dt,
             cur.execute("""
                 UPDATE public.operations
                    SET raw_text = %s
-                 WHERE id = (
-                     SELECT id FROM public.operations
-                      WHERE chat_id=%s
-                      ORDER BY id DESC
-                      LIMIT 1
-                 )
-            """, (orig_text, cid))
+                 WHERE id = %s
+            """, (orig_text, recorded.operation_id))
             conn.commit(); conn.close()
         except Exception as e:
             log.warning("raw_text UPDATE failed: %s", e)
@@ -257,7 +272,6 @@ async def record_operation(cat: str, amt: int, dt,
     ]])
 
     # Имя пользователя
-    user = getattr(update, 'effective_user', None)
     name = (getattr(user, 'full_name', None)
             or getattr(user, 'first_name', None)
             or getattr(user, 'username', None)
@@ -312,6 +326,7 @@ async def record_operation(cat: str, amt: int, dt,
 
     # Очистим batch_item_text, чтобы не «липло»
     context.user_data["batch_item_text"] = ""
+    context.user_data.pop("operation_source", None)
 
     # После записи — проверяем лимиты по категории (только для Расходов)
     try:

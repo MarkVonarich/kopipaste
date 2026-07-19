@@ -306,6 +306,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         'amt': amt_final,
         'time': dt,
         'type': op_type,
+        'source': context.user_data.get('operation_source') or 'text',
         'note': note,
         'ml_cat1': cat1,
         'ml_cat2': cat2,
@@ -473,6 +474,7 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
         if not parse_ok:
             log.info('voice_to_text_flow: failed user=%s', update.effective_chat.id)
             return await emsg.reply_text(f'Но не понял сумму. Попробуй так: {normalized_text[:120] or "такси 750"}')
+        context.user_data['operation_source'] = 'voice'
         await _process_free_text(update, context, normalized_text)
         log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
         return

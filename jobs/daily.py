@@ -23,6 +23,7 @@ from db.queries import list_category_limits, get_smart_morning_limits_enabled
 from db.queries import reminders_list, reminder_update
 from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
+from services.activity import has_financial_activity_today
 
 log = logging.getLogger("finbot.daily")
 
@@ -208,6 +209,32 @@ def _local_today(user_id: int):
     return _local_now(user_id).date()
 
 
+def _user_timezone_name(user_id: int) -> str:
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT COALESCE(np.timezone, uws.timezone, 'Europe/Moscow')
+              FROM public.users u
+              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
+              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
+             WHERE u.user_id=%s
+             LIMIT 1
+            """,
+            (user_id,),
+        )
+        if rows and rows[0][0]:
+            return str(rows[0][0])
+    except Exception:
+        pass
+    off_min, _ = _user_tz_and_hour(user_id)
+    return {
+        0: "UTC",
+        60: "Europe/Berlin",
+        120: "Europe/Helsinki",
+        180: "Europe/Moscow",
+    }.get(off_min, "UTC")
+
+
 def _period_from_local_date(user_id: int) -> date:
     return _local_now(user_id).date()
 
@@ -278,14 +305,7 @@ def _sum_by_type(user_id: int, start: date, end: date) -> tuple[float, float]:
     return float(row[0] or 0), float(row[1] or 0)
 
 def _has_ops_today(user_id: int) -> bool:
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("""
-        SELECT COUNT(*) FROM public.operations
-         WHERE chat_id=%s AND op_date=%s
-    """,(user_id, _local_today(user_id)))
-    n = cur.fetchone()[0]
-    conn.close()
-    return (n or 0) > 0
+    return has_financial_activity_today(user_id, _user_timezone_name(user_id))
 
 def _recent_template_ids(user_id: int, kind: str, lookback_days: int = 14) -> set[int]:
     conn = get_conn(); cur = conn.cursor()
