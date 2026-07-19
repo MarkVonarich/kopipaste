@@ -1,4 +1,4 @@
-from services.receipt_parser import _classify_provider_error, _extract_json, candidates_from_provider_payload
+from services.receipt_parser import _classify_provider_error, _extract_json, _provider_api_key, candidates_from_provider_payload, ocr_credential_diagnostic
 
 
 def test_receipt_payload_one_valid_operation():
@@ -58,3 +58,23 @@ def test_no_operation_result():
     ops, warning = candidates_from_provider_payload({"ok": False, "operations": []})
     assert ops == []
     assert warning == "no_operations"
+
+
+def test_ocr_credential_precedence_prefers_openai_api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("RECEIPT_OCR_API_KEY", "receipt-secret")
+    diag = ocr_credential_diagnostic()
+    assert diag == {
+        "OPENAI_API_KEY_configured": True,
+        "RECEIPT_OCR_API_KEY_configured": True,
+        "selected_source": "OPENAI_API_KEY",
+    }
+    assert _provider_api_key() == "openai-secret"
+
+
+def test_ocr_credential_diagnostic_hides_values(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("RECEIPT_OCR_API_KEY", "receipt-secret")
+    diag = ocr_credential_diagnostic()
+    assert diag["selected_source"] == "RECEIPT_OCR_API_KEY"
+    assert "receipt-secret" not in str(diag)

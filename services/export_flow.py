@@ -44,6 +44,16 @@ def validate_export_period(start: date, end: date, max_days: int = MAX_EXPORT_DA
     return True, None
 
 
+def clear_export_wait_flags(user_data: dict) -> None:
+    user_data.pop("await_export_start", None)
+    user_data.pop("await_export_end", None)
+
+
+def export_state_has_period(user_data: dict) -> bool:
+    st = user_data.get("export_state") or {}
+    return bool(st.get("from") and st.get("to"))
+
+
 def preset_period(key: str, today: date | None = None) -> ExportPeriod:
     today = today or date.today()
     if key == "today":

@@ -8,17 +8,18 @@ import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, date
+from decimal import Decimal, InvalidOperation
 from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
-from services.export_flow import parse_export_date, validate_export_period
+from services.export_flow import clear_export_wait_flags, parse_export_date, validate_export_period
 from services.categories import get_or_create_custom_category
-from services.operations import category_options, create_operation_draft, load_operation_draft, mark_operation_draft_committed, record_financial_operation
+from services.operations import category_options, commit_operation_draft, create_operation_draft, load_operation_draft, record_financial_operation
 from services.records import get_user_alias, record_operation
 from services.workspaces import resolve_workspace
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
-from utils.parsing import parse_user_input, split_wo_date, parse_day_list
+from utils.parsing import FRACTIONAL_AMOUNT_ERROR, parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
 from utils.spoken_numbers import normalize_spoken_money
 from db.database import pg_fetchall
@@ -43,6 +44,16 @@ def _md_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`")
 
 
+def _integer_major_amount(value) -> int | None:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if amount <= 0 or amount != amount.to_integral_value():
+        return None
+    return int(amount)
+
+
 
 
 def _parse_amount_input(text: str) -> int | None:
@@ -51,10 +62,12 @@ def _parse_amount_input(text: str) -> int | None:
     if not m:
         return None
     try:
-        val = float(m.group(0))
-    except Exception:
+        amount = Decimal(m.group(0))
+    except InvalidOperation:
         return None
-    return int(val)
+    if amount <= 0 or amount != amount.to_integral_value():
+        return None
+    return int(amount)
 
 
 def _parse_budget_amount(text: str) -> int | None:
@@ -74,9 +87,12 @@ def _parse_reminder_title_amount(text: str) -> tuple[str, int] | None:
     last = m[-1]
     amt_raw = last.group(1).replace(' ', '').replace(',', '.')
     try:
-        amt = int(float(amt_raw))
-    except Exception:
+        amount = Decimal(amt_raw)
+    except InvalidOperation:
         return None
+    if amount <= 0 or amount != amount.to_integral_value():
+        return None
+    amt = int(amount)
     title = (src[:last.start()] + src[last.end():]).strip()
     if not title:
         return None
@@ -308,6 +324,12 @@ def _group_setup_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def _group_join_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('➕ Присоединиться к пространству группы', callback_data='group_join')],
+    ])
+
+
 def _group_category_kb(draft_id: str, cats: list[str]) -> InlineKeyboardMarkup:
     opts = category_options(cats)
     rows = [[InlineKeyboardButton(cat, callback_data=f'gpick|{draft_id}|{key}')] for key, cat in opts.items()]
@@ -329,10 +351,15 @@ async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_
             reply_markup=_group_setup_kb(),
         )
     if workspace.role not in {'owner', 'admin', 'member'}:
-        return await emsg.reply_text('В этой группе у вас нет прав добавлять операции. Попросите администратора пространства добавить вас.')
+        return await emsg.reply_text(
+            'Эта группа уже подключена. Нажмите кнопку ниже, чтобы присоединиться как участник и записывать операции.',
+            reply_markup=_group_join_kb(),
+        )
     try:
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
-    except ValueError:
+    except ValueError as e:
+        if str(e) == FRACTIONAL_AMOUNT_ERROR:
+            return await emsg.reply_text('Дробные суммы с копейками пока не поддерживаются. Введите целую сумму, например: coffee 12')
         return await emsg.reply_text('Не понял сумму. Пример: coffee 200')
     merch = norm_text(merch_display)
     amt_final, note = convert_amount_if_needed(actor_user_id, amt_raw, src_curr or detect_currency_token(text))
@@ -376,6 +403,8 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
     except ValueError as e:
         reason = str(e)
+        if reason == FRACTIONAL_AMOUNT_ERROR:
+            return await emsg.reply_text("⚠️ Дробные суммы с копейками пока не поддерживаются. Введите целую сумму, например: «кофе 250».")
         if reason == "no_amount":
             base, dt = split_wo_date(text)
             base = base.strip() or "операция"
@@ -523,24 +552,30 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         if not result.candidates:
             return await emsg.reply_text(_ocr_warning_message(result.warning))
 
-        context.user_data['receipt_candidates'] = [
-            {
-                'amount': float(c.amount),
+        prepared = []
+        skipped_fractional = 0
+        for c in result.candidates:
+            amount = _integer_major_amount(c.amount)
+            if amount is None:
+                skipped_fractional += 1
+                continue
+            prepared.append({
+                'amount': amount,
                 'category': c.category,
                 'type': c.op_type,
                 'date': c.op_date.isoformat(),
                 'merchant': c.merchant,
                 'confidence': c.confidence,
                 'raw_text': c.raw_text,
-            }
-            for c in result.candidates
-        ]
-        context.user_data['receipt_warning'] = result.warning
+            })
+        if not prepared:
+            return await emsg.reply_text('Нашёл только дробные суммы, а запись копеек пока не поддерживается. Добавьте операции целыми суммами вручную.')
+        context.user_data['receipt_candidates'] = prepared
+        context.user_data['receipt_warning'] = result.warning or ('fractional_amounts_skipped' if skipped_fractional else None)
         lines = ['🧾 Нашёл операции:', '']
-        for i, c in enumerate(result.candidates[:20], start=1):
-            amount_i = int(round(float(c.amount)))
-            major = c.category if c.op_type == 'Расходы' else 'Доходы'
-            lines.append(f"{i}. {major} — {amount_i:,} ₽ — {c.merchant}".replace(',', ' '))
+        for i, c in enumerate(prepared[:20], start=1):
+            major = c['category'] if c['type'] == 'Расходы' else 'Доходы'
+            lines.append(f"{i}. {major} — {int(c['amount']):,} ₽ — {c['merchant']}".replace(',', ' '))
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
@@ -549,6 +584,8 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         ])
         if result.warning:
             lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
+        if skipped_fractional:
+            lines.append('\n⚠️ Строки с дробными суммами пропущены: копейки пока не поддерживаются.')
         await emsg.reply_text('\n'.join(lines), reply_markup=kb)
     except Exception as e:
         log.exception('receipt parse failed user=%s err=%s', cid, e)
@@ -599,9 +636,16 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
         try:
             parse_user_input(normalized_text)
             parse_ok = True
-        except ValueError:
+            parse_error = None
+        except ValueError as e:
             parse_ok = False
+            parse_error = str(e)
         if not parse_ok:
+            if parse_error == FRACTIONAL_AMOUNT_ERROR:
+                return await emsg.reply_text(
+                    f'Распознал текст, но дробные суммы с копейками пока не поддерживаются: {normalized_text[:120]}\n'
+                    'Скажи или напиши целую сумму, например: coffee 12 dollars'
+                )
             log.info('voice_to_text_flow: amount_not_found lang=%s user=%s', lang, update.effective_chat.id)
             return await emsg.reply_text(f'Распознал текст, но не нашёл сумму: {normalized_text[:120]}\nПример: coffee 2 dollars')
         context.user_data['operation_source'] = 'voice'
@@ -623,14 +667,27 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     emsg = update.effective_message
 
     if context.user_data.get('await_group_custom_category'):
-        draft_id = context.user_data.get('await_group_custom_category')
+        st = context.user_data.get('await_group_custom_category') or {}
+        if not isinstance(st, dict):
+            st = {'draft_id': st}
+        draft_id = st.get('draft_id')
+        if not _is_group_chat(update):
+            context.user_data.pop('await_group_custom_category', None)
+            return await emsg.reply_text('Черновик операции был создан в группе. Вернитесь в тот групповой чат и начните запись заново.')
+        if int(st.get('chat_id') or 0) != int(update.effective_chat.id) or int(st.get('actor_user_id') or 0) != int(update.effective_user.id):
+            context.user_data.pop('await_group_custom_category', None)
+            return await emsg.reply_text('Этот черновик операции больше не подходит к текущему чату или пользователю. Отправьте операцию заново.')
         draft = load_operation_draft(draft_id, actor_user_id=update.effective_user.id)
         if not draft or draft.get('status') != 'draft':
             context.user_data.pop('await_group_custom_category', None)
             return await emsg.reply_text('This operation draft has expired. Send the operation again.')
+        if int(draft['chat_id']) != int(st.get('chat_id')) or draft.get('workspace_id') != st.get('workspace_id'):
+            context.user_data.pop('await_group_custom_category', None)
+            return await emsg.reply_text('Этот черновик операции больше не подходит к текущему пространству. Отправьте операцию заново.')
         payload = draft.get('payload') or {}
         workspace = resolve_workspace(draft['chat_id'], update.effective_user.id, getattr(update.effective_chat, 'type', 'group'))
         if not workspace.is_configured or workspace.role not in {'owner', 'admin', 'member'}:
+            context.user_data.pop('await_group_custom_category', None)
             return await emsg.reply_text('В этом пространстве у вас нет прав добавлять операции.')
         try:
             cat = get_or_create_custom_category(
@@ -641,22 +698,19 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             )
         except ValueError:
             return await emsg.reply_text('⚠️ Введите название категории.')
-        recorded = record_financial_operation(
-            chat_id=draft['chat_id'],
+        result = commit_operation_draft(
+            draft_id=draft_id,
             actor_user_id=update.effective_user.id,
-            op_date=date.fromisoformat(payload['op_date']),
-            op_type=payload.get('type') or 'Расходы',
             category=cat.name,
-            amount=int(payload.get('amount') or 0),
-            comment=payload.get('merchant') or 'From group',
-            source=payload.get('source') or 'text',
+            chat_id=draft['chat_id'],
+            workspace_id=workspace.workspace_id,
             chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
-            workspace=workspace,
-            raw_text=payload.get('raw_text'),
             metadata={'draft_id': draft_id, 'custom_category_created': cat.created},
         )
-        mark_operation_draft_committed(draft_id, recorded.operation_id)
         context.user_data.pop('await_group_custom_category', None)
+        if result['status'] not in {'committed', 'already_committed'}:
+            return await emsg.reply_text('This operation draft has expired. Send the operation again.')
+        recorded = result['recorded']
         name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(update.effective_user.id)
         return await emsg.reply_text(
             f"✅ Операция записана\n\n{cat.name} — {recorded.amount} {recorded.currency}\n"
@@ -839,7 +893,10 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['await_export_end'] = True
             return await emsg.reply_text('Дата начала сохранена. Теперь выбери или введи конец периода:', reply_markup=_export_end_kb())
         st['to'] = d.isoformat()
-        context.user_data.pop('await_export_end', None)
+        clear_export_wait_flags(context.user_data)
+        if not st.get('from'):
+            context.user_data.pop('export_state', None)
+            return await emsg.reply_text('📤 Сессия экспорта устарела. Выбери период заново.', reply_markup=_export_start_kb())
         dfrom = date.fromisoformat(st['from'])
         dto = date.fromisoformat(st['to'])
         ok, error = validate_export_period(dfrom, dto)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from services.i18n import format_money
+from services.i18n import format_money, t
 
 AVERAGE_DAYS_PER_MONTH = 30.4375
 
@@ -55,10 +55,10 @@ def render_reminder_totals(rows: list[dict], locale: str = 'ru') -> str:
         return [format_money(round(amount), currency, locale) for currency, amount in sorted(values.items())]
 
     return (
-        "Recurring per month:\n"
-        f"Expenses: {', '.join(lines_for('recurring_expenses_monthly'))}\n"
-        f"Income: {', '.join(lines_for('recurring_income_monthly'))}\n\n"
-        "One-time upcoming:\n"
-        f"Expenses: {', '.join(lines_for('one_time_expenses'))}\n"
-        f"Income: {', '.join(lines_for('one_time_income'))}"
+        f"{t('reminders.recurring_per_month', locale)}:\n"
+        f"{t('reminders.expenses', locale)}: {', '.join(lines_for('recurring_expenses_monthly'))}\n"
+        f"{t('reminders.income', locale)}: {', '.join(lines_for('recurring_income_monthly'))}\n\n"
+        f"{t('reminders.one_time_upcoming', locale)}:\n"
+        f"{t('reminders.expenses', locale)}: {', '.join(lines_for('one_time_expenses'))}\n"
+        f"{t('reminders.income', locale)}: {', '.join(lines_for('one_time_income'))}"
     )

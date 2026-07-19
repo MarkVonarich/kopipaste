@@ -80,8 +80,24 @@ def _map_category(v: str | None, op_type: str) -> str:
     return _category(raw)
 
 
+def ocr_credential_diagnostic() -> dict:
+    openai_key = (os.getenv('OPENAI_API_KEY') or '').strip()
+    receipt_key = (os.getenv('RECEIPT_OCR_API_KEY') or '').strip()
+    selected = 'OPENAI_API_KEY' if openai_key else ('RECEIPT_OCR_API_KEY' if receipt_key else 'none')
+    return {
+        'OPENAI_API_KEY_configured': bool(openai_key),
+        'RECEIPT_OCR_API_KEY_configured': bool(receipt_key),
+        'selected_source': selected,
+    }
+
+
 def _provider_api_key() -> str:
-    return (os.getenv('RECEIPT_OCR_API_KEY') or os.getenv('OPENAI_API_KEY') or '').strip()
+    diag = ocr_credential_diagnostic()
+    if diag['selected_source'] == 'OPENAI_API_KEY':
+        return (os.getenv('OPENAI_API_KEY') or '').strip()
+    if diag['selected_source'] == 'RECEIPT_OCR_API_KEY':
+        return (os.getenv('RECEIPT_OCR_API_KEY') or '').strip()
+    return ''
 
 
 def _extract_json(text: str) -> dict | None:

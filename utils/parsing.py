@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import dateparser
 
 DATE_TOKENS = {"вчера", "сегодня"}
+FRACTIONAL_AMOUNT_ERROR = "fractional_amount"
 
 _CURRENCY_ALIASES = {
     "usd": "USD", "dollar": "USD", "dollars": "USD", "buck": "USD", "bucks": "USD",
@@ -59,13 +60,18 @@ def _extract_trailing_date(tokens):
     m = re.match(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?$", last)
     if m:
         d, mth, y = m.group(1), m.group(2), m.group(3)
-        if y is None:
-            dt = datetime.strptime(f"{d}.{mth}", "%d.%m").replace(year=datetime.now().year)
-        else:
-            if len(y) == 2:
-                dt = datetime.strptime(f"{d}.{mth}.{y}", "%d.%m.%y")  # 25 -> 2025
+        if not (1 <= int(d) <= 31 and 1 <= int(mth) <= 12):
+            return tokens, datetime.now()
+        try:
+            if y is None:
+                dt = datetime.strptime(f"{d}.{mth}", "%d.%m").replace(year=datetime.now().year)
             else:
-                dt = datetime.strptime(f"{d}.{mth}.{y}", "%d.%m.%Y")
+                if len(y) == 2:
+                    dt = datetime.strptime(f"{d}.{mth}.{y}", "%d.%m.%y")  # 25 -> 2025
+                else:
+                    dt = datetime.strptime(f"{d}.{mth}.{y}", "%d.%m.%Y")
+        except ValueError:
+            return tokens, datetime.now()
         return tokens[:-1], dt
 
     # чисто числовой 1–3 — не дата (чтобы 'кола 20' не путать)
@@ -100,7 +106,7 @@ def parse_user_input(text: str):
 
     # число: целое/десятичное, с пробелами/точками как разделителями тысяч
     matches = list(re.finditer(
-        r"(?<!\d)(\d+(?:[.,]\d+)?|\d{1,3}(?:[ \.,]\d{3})+(?:[.,]\d+)?)",
+        r"(?<!\d)(\d{1,3}(?:[ \.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)",
         no_date
     ))
     if not matches:
@@ -108,14 +114,18 @@ def parse_user_input(text: str):
 
     m = matches[-1]
     raw_match = m.group(0)
-    decimal = re.fullmatch(r"\d+[.,]\d{1,2}", raw_match)
     raw = raw_match.replace(" ", "")
+    decimal = re.fullmatch(r"\d+(?:[.,]\d{3})*[.,]\d{1,2}", raw)
     if decimal:
-        raw = raw.replace(",", ".")
+        integer_part, cents = re.split(r"[.,](?=\d{1,2}$)", raw, maxsplit=1)
+        cents = cents.ljust(2, "0")
+        if int(cents) != 0:
+            raise ValueError(FRACTIONAL_AMOUNT_ERROR)
+        raw = re.sub(r"[.,]", "", integer_part)
     else:
         raw = re.sub(r"[ \.,]", "", raw)
     try:
-        amt = int(round(float(raw))) if decimal else int(raw)
+        amt = int(raw)
     except ValueError:
         raise ValueError("bad_amount")
     if amt <= 0:

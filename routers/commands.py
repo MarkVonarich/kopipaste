@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 from datetime import datetime, date, timedelta
 
 from db.database import get_conn
-from db.queries import ensure_user, get_user_budgets, get_user_currency, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, reminders_list
+from db.queries import ensure_user, get_user_budgets, get_user_currency, get_user_locale, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, reminders_list
 from services.ml_train import train_model
 from ui.keyboards import help_menu_kb, main_menu_kb, settings_menu_kb
 from services.onboarding import onboarding_welcome
@@ -24,6 +24,7 @@ from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
 from services.quick import get_quick_buttons
 from services.reminder_totals import render_reminder_totals
+from services.receipt_parser import ocr_credential_diagnostic
 from services.activity import has_financial_activity_today
 from db.database import pg_fetchall
 
@@ -121,7 +122,7 @@ async def cmd_reminders(update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(rows[:5], start=1):
         lines.append(f"{i}. {r['title']} — {int(r['amount']):,} ₽, {r['event_date'].day} число".replace(',', ' '))
         btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
-    lines.extend(['', render_reminder_totals(rows)])
+    lines.extend(['', render_reminder_totals(rows, get_user_locale(cid))])
     btns.append([InlineKeyboardButton('➕ Добавить', callback_data='rem_add'), InlineKeyboardButton('📋 Все', callback_data='rem_all')])
     btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
     await update.message.reply_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
@@ -260,12 +261,14 @@ async def cmd_admin_category_learning_debug(update, context: ContextTypes.DEFAUL
 async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         return await update.message.reply_text('⛔ Команда только для администратора.')
-    key_loaded = bool((os.getenv('OPENAI_API_KEY') or os.getenv('RECEIPT_OCR_API_KEY') or '').strip())
+    ocr_diag = ocr_credential_diagnostic()
     txt = (
         f"VOICE_INPUT_ENABLED: {VOICE_INPUT_ENABLED}\n"
         f"VOICE_TRANSCRIBE_PROVIDER: {VOICE_TRANSCRIBE_PROVIDER}\n"
         f"VOICE_TRANSCRIBE_MODEL: {VOICE_TRANSCRIBE_MODEL}\n"
-        f"OPENAI_KEY_LOADED: {key_loaded}\n"
+        f"OPENAI_API_KEY configured: {ocr_diag['OPENAI_API_KEY_configured']}\n"
+        f"RECEIPT_OCR_API_KEY configured: {ocr_diag['RECEIPT_OCR_API_KEY_configured']}\n"
+        f"OCR credential source: {ocr_diag['selected_source']}\n"
         f"FFMPEG_AVAILABLE: {bool(shutil.which('ffmpeg'))}"
     )
     await update.message.reply_text(txt)

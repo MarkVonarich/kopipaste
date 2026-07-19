@@ -12,6 +12,7 @@ WorkspaceRole = Literal["owner", "admin", "member", "viewer"]
 
 WRITE_ROLES = {"owner", "admin", "member"}
 ADMIN_ROLES = {"owner", "admin"}
+ACTIVE_TELEGRAM_STATUSES = {"creator", "administrator", "member"}
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,21 @@ def can_edit_operation(ctx: WorkspaceContext, operation_actor_user_id: int | Non
     return ctx.role == "member" and operation_actor_user_id == ctx.actor_user_id
 
 
+def is_active_telegram_member(status: str | None, is_member: bool | None = None) -> bool:
+    status_value = (status or "").strip().lower()
+    if status_value in ACTIVE_TELEGRAM_STATUSES:
+        return True
+    if status_value == "restricted":
+        return bool(is_member)
+    return False
+
+
+def membership_role_after_join(existing_role: str | None) -> str:
+    if existing_role in ADMIN_ROLES:
+        return existing_role
+    return "member"
+
+
 def list_accessible_workspaces(user_id: int) -> list[dict]:
     ensure_personal_workspace(user_id)
     try:
@@ -262,6 +278,50 @@ def create_group_workspace(chat_id: int, owner_user_id: int, title: str | None =
             )
         conn.commit()
         return workspace_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def join_group_workspace(chat_id: int, user_id: int) -> WorkspaceContext:
+    ensure_user(user_id)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name
+                  FROM public.workspaces
+                 WHERE telegram_chat_id=%s AND archived_at IS NULL
+                 LIMIT 1
+                """,
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("workspace_not_configured")
+            workspace_id, name = int(row[0]), row[1]
+            cur.execute(
+                """
+                INSERT INTO public.workspace_members (workspace_id, user_id, role, status)
+                VALUES (%s, %s, 'member', 'active')
+                ON CONFLICT (workspace_id, user_id) DO UPDATE
+                   SET role=CASE
+                         WHEN public.workspace_members.role IN ('owner', 'admin')
+                           THEN public.workspace_members.role
+                         ELSE 'member'
+                       END,
+                       status='active',
+                       updated_at=now()
+                RETURNING role
+                """,
+                (workspace_id, user_id),
+            )
+            role = cur.fetchone()[0]
+        conn.commit()
+        return WorkspaceContext(workspace_id, chat_id, user_id, "group", role, name, True)
     except Exception:
         conn.rollback()
         raise

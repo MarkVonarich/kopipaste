@@ -87,6 +87,10 @@ def get_user_currency(user_id: int) -> str:
     rows = pg_fetchall("SELECT currency FROM public.users WHERE user_id=%s", (user_id,))
     return (rows[0][0] if rows else "RUB") or "RUB"
 
+def get_user_locale(user_id: int) -> str:
+    rows = pg_fetchall("SELECT COALESCE(locale,'ru') FROM public.users WHERE user_id=%s", (user_id,))
+    return (rows[0][0] if rows else "ru") or "ru"
+
 def get_user_tz(user_id: int) -> int:
     rows = pg_fetchall("SELECT COALESCE(tz_offset_min,180) FROM public.users WHERE user_id=%s", (user_id,))
     return int(rows[0][0] if rows else 180)

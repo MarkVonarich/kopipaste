@@ -39,6 +39,29 @@ def test_english_decimal_money_phrase():
     assert lang == "en"
     assert text == "taxi 12.50 USD"
     assert detect_currency_token(text) == "USD"
+    try:
+        parse_user_input(text)
+    except ValueError as e:
+        assert str(e) == "fractional_amount"
+    else:
+        raise AssertionError("fractional amount must not be silently rounded")
+
+
+def test_fractional_numeric_amount_is_rejected():
+    for raw in ["taxi 12.50 USD", "coffee 2.99", "пирожок 10,01"]:
+        try:
+            parse_user_input(raw)
+        except ValueError as e:
+            assert str(e) == "fractional_amount"
+        else:
+            raise AssertionError(f"{raw} must not be silently rounded")
+
+
+def test_zero_fraction_numeric_amount_still_parses_as_integer():
+    merch, amount, _dt, currency = parse_user_input("taxi 12.00 USD")
+    assert merch == "taxi"
+    assert amount == 12
+    assert currency == "USD"
 
 
 def test_english_income_semantics_amount_and_currency():

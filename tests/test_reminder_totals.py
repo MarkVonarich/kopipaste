@@ -1,4 +1,4 @@
-from services.reminder_totals import monthly_equivalent, reminder_totals
+from services.reminder_totals import monthly_equivalent, reminder_totals, render_reminder_totals
 
 
 def test_monthly_equivalent_rules():
@@ -22,3 +22,13 @@ def test_reminder_totals_separate_type_and_currency():
     assert round(totals["recurring_income_monthly"]["RUB"], 2) == 21666.67
     assert totals["one_time_expenses"]["RUB"] == 700
     assert totals["one_time_income"]["USD"] == 900
+
+
+def test_reminder_total_headings_are_localized_ru_en():
+    rows = [{"amount": 1200, "currency": "RUB", "rem_type": "Расходы", "repeat_rule": "monthly"}]
+    ru = render_reminder_totals(rows, "ru")
+    en = render_reminder_totals(rows, "en")
+    assert "Повторяющиеся в месяц" in ru
+    assert "Расходы:" in ru
+    assert "Recurring per month" in en
+    assert "Expenses:" in en

@@ -4,12 +4,13 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.error import BadRequest
 from db.database import get_conn, pg_fetchall, pg_exec
 from datetime import datetime, timedelta, date
+from decimal import Decimal, InvalidOperation
 from telegram.ext import ContextTypes
 from db.queries import (
     upsert_user_alias, update_user_field, set_budget,
     get_user_currency, get_user_budgets, delete_last_operation,
     set_category_limit, get_category_limit, list_category_limits, delete_category_limit,
-    get_user_tz, log_category_feedback, insert_ml_observation,
+    get_user_locale, get_user_tz, log_category_feedback, insert_ml_observation,
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
@@ -22,12 +23,12 @@ from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.categories import get_or_create_custom_category
-from services.operations import load_operation_draft, mark_operation_draft_committed, record_financial_operation
+from services.operations import commit_operation_draft, load_operation_draft, record_financial_operation
 from services.reminder_totals import render_reminder_totals
-from services.workspaces import create_group_workspace, resolve_workspace
+from services.workspaces import create_group_workspace, is_active_telegram_member, join_group_workspace, resolve_workspace
 from ui.messages import render_operation_confirmation
 from services.export_xlsx import build_export_xlsx
-from services.export_flow import parse_export_date, preset_period, validate_export_period
+from services.export_flow import clear_export_wait_flags, export_state_has_period, parse_export_date, preset_period, validate_export_period
 import tempfile
 import os
 
@@ -36,6 +37,16 @@ log = logging.getLogger(__name__)
 
 def _fmt_money(v: int) -> str:
     return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+def _integer_major_amount(value) -> int | None:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if amount <= 0 or amount != amount.to_integral_value():
+        return None
+    return int(amount)
 
 
 def _next_monthly_date(dt: date) -> date:
@@ -123,9 +134,10 @@ def _budgets_hub_kb(has_any: bool):
 def _receipt_render_list(cands: list[dict], warning: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     lines = ['🧾 Нашёл операции:', '']
     for i, c in enumerate(cands[:10], start=1):
-        amount = int(round(float(c.get('amount') or 0)))
+        amount = _integer_major_amount(c.get('amount'))
+        amount_label = f"{amount:,} ₽".replace(',', ' ') if amount is not None else 'дробная сумма'
         label = (c.get('category') or 'Прочее') if (c.get('type') or 'Расходы') == 'Расходы' else 'Доходы'
-        lines.append(f"{i}. {label} — {amount:,} ₽ — {c.get('merchant') or 'Из изображения'}".replace(',', ' '))
+        lines.append(f"{i}. {label} — {amount_label} — {c.get('merchant') or 'Из изображения'}")
     if warning:
         lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
     kb = InlineKeyboardMarkup([
@@ -146,7 +158,7 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
     text = (
         f"Операция {idx + 1} из {len(cands)}\n"
         f"Тип: {c.get('type') or 'Расходы'}\n"
-        f"Сумма: {int(round(float(c.get('amount') or 0))):,} ₽\n".replace(',', ' ') +
+        f"Сумма: {_fmt_money(amount) if (amount := _integer_major_amount(c.get('amount'))) is not None else 'дробная сумма не поддерживается'}\n" +
         f"Категория: {c.get('category') or 'Прочее'}\n"
         f"Комментарий: {c.get('merchant') or 'Из изображения'}\n"
         f"Дата: {dts}"
@@ -215,6 +227,7 @@ def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
 
 async def _export_preview(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     st = context.user_data.setdefault('export_state', {})
+    clear_export_wait_flags(context.user_data)
     dfrom = date.fromisoformat(st['from'])
     dto = date.fromisoformat(st['to'])
     ok, error = validate_export_period(dfrom, dto)
@@ -245,6 +258,15 @@ async def _is_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
         return False
 
 
+async def _is_group_active_member(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return is_active_telegram_member(getattr(member, 'status', ''), getattr(member, 'is_member', None))
+    except Exception as e:
+        log.warning('group_member_check_failed chat_id=%s user_id=%s reason=%s', chat_id, user_id, type(e).__name__)
+        return False
+
+
 async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYPE, data: str):
     q = update.callback_query
     actor_user_id = update.effective_user.id
@@ -258,15 +280,27 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
     if draft.get('status') == 'wrong_actor':
         return await q.answer('Only the person who started this operation can finish it.', show_alert=True)
-    if draft.get('status') != 'draft':
+    if draft.get('status') not in {'draft', 'committed'}:
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
     payload = draft.get('payload') or {}
     if action == 'gcancel':
+        if draft.get('status') != 'draft':
+            return await q.answer('This operation is already completed.', show_alert=True)
         pg_exec("UPDATE public.operation_drafts SET status='cancelled', updated_at=now() WHERE draft_id=%s", (draft_id,))
+        st = context.user_data.get('await_group_custom_category')
+        if isinstance(st, dict) and st.get('draft_id') == draft_id:
+            context.user_data.pop('await_group_custom_category', None)
         await q.answer('Отменено')
         return await _safe_edit_or_reply(q, 'Операция отменена.')
     if action == 'gadd':
-        context.user_data['await_group_custom_category'] = draft_id
+        if draft.get('status') != 'draft':
+            return await q.answer('This operation is already completed.', show_alert=True)
+        context.user_data['await_group_custom_category'] = {
+            'draft_id': draft_id,
+            'chat_id': draft['chat_id'],
+            'workspace_id': draft.get('workspace_id'),
+            'actor_user_id': actor_user_id,
+        }
         await q.answer()
         return await q.message.reply_text('Введите название новой категории:')
     options = payload.get('category_options') or {}
@@ -276,21 +310,18 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
     workspace = resolve_workspace(draft['chat_id'], actor_user_id, getattr(update.effective_chat, 'type', 'group'))
     if not workspace.is_configured or workspace.role not in {'owner', 'admin', 'member'}:
         return await q.answer('You do not have permission to add operations in this workspace.', show_alert=True)
-    recorded = record_financial_operation(
-        chat_id=draft['chat_id'],
+    result = commit_operation_draft(
+        draft_id=draft_id,
         actor_user_id=actor_user_id,
-        op_date=date.fromisoformat(payload['op_date']),
-        op_type=payload.get('type') or 'Расходы',
         category=category,
-        amount=int(payload.get('amount') or 0),
-        comment=payload.get('merchant') or 'From group',
-        source=payload.get('source') or 'text',
+        chat_id=draft['chat_id'],
+        workspace_id=workspace.workspace_id,
         chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
-        workspace=workspace,
-        raw_text=payload.get('raw_text'),
         metadata={'draft_id': draft_id},
     )
-    mark_operation_draft_committed(draft_id, recorded.operation_id)
+    if result['status'] not in {'committed', 'already_committed'}:
+        return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
+    recorded = result['recorded']
     user_name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(actor_user_id)
     text = (
         f"✅ Операция записана\n\n"
@@ -298,9 +329,8 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
         f"Пространство: {workspace.name}\n"
         f"Добавил(а): {user_name}"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton('✏️ Изменить', callback_data='op_edit')]])
-    await q.answer('Сохранено')
-    return await _safe_edit_or_reply(q, text, reply_markup=kb)
+    await q.answer('Уже сохранено' if result['status'] == 'already_committed' else 'Сохранено')
+    return await _safe_edit_or_reply(q, text)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
@@ -631,7 +661,21 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer('Пространство создано')
         return await _safe_edit_or_reply(
             q,
-            f'🧩 Пространство группы создано.\n\nID: {workspace_id}\nТеперь администратор может записывать операции в этой группе.',
+            f'🧩 Пространство группы создано.\n\nID: {workspace_id}\nУчастники группы могут присоединиться кнопкой в сообщении бота и записывать операции.',
+        )
+
+    if data == 'group_join':
+        chat = update.effective_chat
+        user = update.effective_user
+        if not chat or getattr(chat, 'type', 'private') not in {'group', 'supergroup'}:
+            return await q.answer('Присоединиться можно только из группы.', show_alert=True)
+        if not await _is_group_active_member(context, chat.id, user.id):
+            return await q.answer('Не вижу вас активным участником этой группы.', show_alert=True)
+        workspace = join_group_workspace(chat.id, user.id)
+        await q.answer('Готово')
+        return await _safe_edit_or_reply(
+            q,
+            f'✅ Вы присоединились к пространству группы.\n\nПространство: {workspace.name}\nТеперь можно записывать операции в этом чате.',
         )
 
     if data.startswith(('gpick|', 'gadd|', 'gcancel|')):
@@ -685,6 +729,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     # Главное меню
     if data in ('start_main', 'back_main'):
+        context.user_data.pop('await_group_custom_category', None)
+        clear_export_wait_flags(context.user_data)
         return await q.edit_message_text('🔷 Главное меню:', reply_markup=main_menu_kb())
 
     # ── Онбординг (как было) ──
@@ -784,7 +830,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         for i, r in enumerate(rows[:5], start=1):
             lines.append(f"{i}. {r['title']} — {_fmt_money(int(r['amount']))}, {r['event_date'].day} число")
             btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
-        lines.extend(['', render_reminder_totals(rows)])
+        lines.extend(['', render_reminder_totals(rows, get_user_locale(cid))])
         btns += _reminders_menu_kb(True).inline_keyboard
         return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
 
@@ -1127,8 +1173,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 dt = datetime.fromisoformat(cur.get('date') or '').date()
             except Exception:
                 dt = date.today()
-            amount = int(cur.get('amount') or 0)
-            if amount > 0:
+            amount = _integer_major_amount(cur.get('amount'))
+            if amount is None:
+                await q.answer('Дробные суммы пока не поддерживаются', show_alert=True)
+            else:
                 record_financial_operation(
                     chat_id=cid,
                     actor_user_id=update.effective_user.id,
@@ -1184,7 +1232,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await _safe_edit_or_reply(q, 'Корректировка суммы', reply_markup=kb)
         if data.startswith('rcpt_amt_') and data != 'rcpt_amt_input':
             delta = {'rcpt_amt_m100': -100, 'rcpt_amt_m50': -50, 'rcpt_amt_p50': 50, 'rcpt_amt_p100': 100}.get(data, 0)
-            cur['amount'] = max(1, int(round(float(cur.get('amount') or 0))) + delta)
+            cur['amount'] = max(1, (_integer_major_amount(cur.get('amount')) or 1) + delta)
             context.user_data['receipt_candidates'] = cands
             await q.answer('Сумма обновлена')
             text, kb = _receipt_render_card(cands, idx)
@@ -1260,8 +1308,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 dt = datetime.fromisoformat(c['date']).date()
             except Exception:
                 dt = date.today()
-            amount = int(c.get('amount') or 0)
-            if amount <= 0:
+            amount = _integer_major_amount(c.get('amount'))
+            if amount is None:
                 skipped += 1
                 continue
             record_financial_operation(
@@ -1839,26 +1887,33 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         today = date.today()
         st = context.user_data.setdefault('export_state', {})
         if data == 'exp_today':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('today', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_7':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('7', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_14':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('14', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_m':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('month', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_pm':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('previous_month', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_y':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('year', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_py':
+            clear_export_wait_flags(context.user_data)
             period = preset_period('previous_year', today); st['from'] = period.start.isoformat(); st['to'] = period.end.isoformat()
         elif data == 'exp_custom':
             context.user_data['export_state'] = {'mode': 'custom', 'step': 'start'}
-            context.user_data.pop('await_export_start', None)
-            context.user_data.pop('await_export_end', None)
+            clear_export_wait_flags(context.user_data)
             await q.answer()
             return await _safe_edit_or_reply(q, 'Выбери начало периода или введи дату:', reply_markup=_export_start_kb())
         elif data.startswith('exp_custom_start_'):
+            clear_export_wait_flags(context.user_data)
             if data == 'exp_custom_start_today': st['from'] = today.isoformat()
             elif data == 'exp_custom_start_yday': st['from'] = (today - timedelta(days=1)).isoformat()
             elif data == 'exp_custom_start_first': st['from'] = today.replace(day=1).isoformat()
@@ -1871,6 +1926,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return await _safe_edit_or_reply(q, 'Начало сохранено. Теперь выбери конец периода или введи дату:', reply_markup=_export_end_kb())
         elif data.startswith('exp_custom_end_'):
+            context.user_data.pop('await_export_end', None)
             if data == 'exp_custom_end_today': st['to'] = today.isoformat()
             elif data == 'exp_custom_end_yday': st['to'] = (today - timedelta(days=1)).isoformat()
             elif data == 'exp_custom_end_month':
@@ -1887,8 +1943,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await callback_handler(update, context)
         elif data == 'exp_cancel':
             context.user_data.pop('export_state', None)
-            context.user_data.pop('await_export_start', None)
-            context.user_data.pop('await_export_end', None)
+            clear_export_wait_flags(context.user_data)
             await q.answer('Отменено')
             return await _safe_edit_or_reply(q, '📤 Экспорт отменён.', reply_markup=_export_menu_kb())
         elif data == 'exp_dl':
@@ -1896,8 +1951,15 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
         if data != 'exp_dl':
             await q.answer()
+            if not export_state_has_period(context.user_data):
+                clear_export_wait_flags(context.user_data)
+                return await _safe_edit_or_reply(q, '📤 Сессия экспорта устарела. Выбери период заново.', reply_markup=_export_menu_kb())
             return await _export_preview(q, context, cid)
 
+        if not export_state_has_period(context.user_data):
+            clear_export_wait_flags(context.user_data)
+            await q.answer('Сессия экспорта устарела', show_alert=True)
+            return await _safe_edit_or_reply(q, '📤 Сессия экспорта устарела. Выбери период заново.', reply_markup=_export_menu_kb())
         dfrom = date.fromisoformat(st['from']); dto = date.fromisoformat(st['to'])
         fd, p = tempfile.mkstemp(prefix='kopipaste_export_', suffix='.xlsx')
         os.close(fd)
@@ -1910,6 +1972,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer('Готово')
             workspace = 'Личное пространство'
             context.user_data.pop('export_state', None)
+            clear_export_wait_flags(context.user_data)
             return await _safe_edit_or_reply(
                 q,
                 f'✅ Экспорт завершён\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\n'
@@ -1925,6 +1988,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'exp_menu':
+        clear_export_wait_flags(context.user_data)
         return await _safe_edit_or_reply(q, '📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=_export_menu_kb())
 
     if data.startswith('rem_tog|'):

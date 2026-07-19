@@ -11,12 +11,20 @@ TRANSLATIONS = {
         "notifications.inactivity.reason": "Сегодня еще не было успешных записей.",
         "privacy.title": "Приватность",
         "help.commands": "Команды меню: /start, /settings, /help.",
+        "reminders.recurring_per_month": "Повторяющиеся в месяц",
+        "reminders.one_time_upcoming": "Разовые предстоящие",
+        "reminders.expenses": "Расходы",
+        "reminders.income": "Доходы",
     },
     "en": {
         "workspace.personal": "Personal space",
         "notifications.inactivity.reason": "No successful records today yet.",
         "privacy.title": "Privacy",
         "help.commands": "Menu commands: /start, /settings, /help.",
+        "reminders.recurring_per_month": "Recurring per month",
+        "reminders.one_time_upcoming": "One-time upcoming",
+        "reminders.expenses": "Expenses",
+        "reminders.income": "Income",
     },
 }
 
