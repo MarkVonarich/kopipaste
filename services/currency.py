@@ -124,14 +124,14 @@ def get_rate(src: str, dst: str) -> Optional[float]:
 
 _SYMBOL_MAP = {"$":"USD","€":"EUR","₽":"RUB","₴":"UAH","₺":"TRY","₸":"KZT","¥":"CNY","£":"GBP"}
 _ALIAS_MAP = {
-    "usd":"USD","dollar":"USD","bucks":"USD","бакс":"USD","баксов":"USD",
-    "eur":"EUR","euro":"EUR","евро":"EUR",
-    "rub":"RUB","р":"RUB","руб":"RUB","руб.":"RUB","₽":"RUB",
+    "usd":"USD","dollar":"USD","dollars":"USD","buck":"USD","bucks":"USD","бакс":"USD","баксов":"USD",
+    "eur":"EUR","euro":"EUR","euros":"EUR","евро":"EUR",
+    "rub":"RUB","ruble":"RUB","rubles":"RUB","р":"RUB","руб":"RUB","руб.":"RUB","₽":"RUB",
     "byn":"BYN","белр":"BYN",
     "kzt":"KZT","тг":"KZT","тенге":"KZT","₸":"KZT",
     "uah":"UAH","грн":"UAH","₴":"UAH",
     "try":"TRY","lira":"TRY","лира":"TRY","₺":"TRY",
-    "gbp":"GBP","funt":"GBP","фунт":"GBP","£":"GBP",
+    "gbp":"GBP","pound":"GBP","pounds":"GBP","funt":"GBP","фунт":"GBP","£":"GBP",
     "cny":"CNY","yuan":"CNY","юань":"CNY","¥":"CNY",
     "gel":"GEL","rsd":"RSD","aed":"AED","thb":"THB","vnd":"VND","krw":"KRW","amd":"AMD","azn":"AZN","egp":"EGP",
 }

@@ -45,10 +45,10 @@ async def prompt_category_menu(update, context: ContextTypes.DEFAULT_TYPE, inclu
 
     rows = []
     if include_add_button:
-        rows.append([InlineKeyboardButton('➕ Добавить категорию', callback_data='add_cat')])
+        rows.append([InlineKeyboardButton('➕ Новая категория', callback_data='add_cat')])
     for c in cats:
         rows.append([InlineKeyboardButton(c, callback_data=f"use_cat|{c}")])
-    rows.append([InlineKeyboardButton('◀️ Назад', callback_data='start_main')])
+    rows.append([InlineKeyboardButton('◀️ Назад', callback_data='start_main'), InlineKeyboardButton('❌ Отмена', callback_data='start_main')])
 
     title = 'Выберите категорию ⬇️'
     if merch_disp:

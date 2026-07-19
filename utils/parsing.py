@@ -7,13 +7,34 @@ import dateparser
 
 DATE_TOKENS = {"вчера", "сегодня"}
 
+_CURRENCY_ALIASES = {
+    "usd": "USD", "dollar": "USD", "dollars": "USD", "buck": "USD", "bucks": "USD",
+    "eur": "EUR", "euro": "EUR", "euros": "EUR",
+    "gbp": "GBP", "pound": "GBP", "pounds": "GBP",
+    "rub": "RUB", "ruble": "RUB", "rubles": "RUB", "руб": "RUB", "рубль": "RUB", "рубля": "RUB", "рублей": "RUB", "р": "RUB",
+}
+_CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "₽": "RUB"}
+
+
+def _detect_currency_token(text: str) -> str | None:
+    for symbol, code in _CURRENCY_SYMBOLS.items():
+        if symbol in (text or ""):
+            return code
+    tokens = re.findall(r"[A-Za-zА-Яа-яё]+", (text or "").lower())
+    for token in tokens:
+        if token.upper() in {"USD", "EUR", "GBP", "RUB"}:
+            return token.upper()
+        if token in _CURRENCY_ALIASES:
+            return _CURRENCY_ALIASES[token]
+    return None
+
 def _clean_currency_tokens(text: str) -> str:
     """
     Аккуратно вычищает токены валюты (руб, rub, знак ₽) как отдельные слова
     или рядом с числом. Не удаляет букву 'р' внутри слов типа 'вчера'.
     """
-    text = re.sub(r"(?i)\b(?:rub|руб(?:\.|ля|лей)?|р)\b\.?", "", text)
-    text = re.sub(r"\s*₽", "", text)
+    text = re.sub(r"(?i)\b(?:usd|dollars?|bucks?|eur|euros?|gbp|pounds?|rub|rubles?|руб(?:\.|ль|ля|лей)?|р)\b\.?", "", text)
+    text = re.sub(r"\s*[$€£₽]", "", text)
     return text
 
 def _extract_trailing_date(tokens):
@@ -72,11 +93,10 @@ def parse_user_input(text: str):
     if not text or not text.strip():
         raise ValueError("empty")
 
+    src_curr = _detect_currency_token(text)
     no_date, dt = split_wo_date(text)
     if not no_date:
         raise ValueError("empty")
-
-    src_curr = None
 
     # число: целое/десятичное, с пробелами/точками как разделителями тысяч
     matches = list(re.finditer(
@@ -87,9 +107,15 @@ def parse_user_input(text: str):
         raise ValueError("no_amount")
 
     m = matches[-1]
-    raw = re.sub(r"[ \.,]", "", m.group(0))
+    raw_match = m.group(0)
+    decimal = re.fullmatch(r"\d+[.,]\d{1,2}", raw_match)
+    raw = raw_match.replace(" ", "")
+    if decimal:
+        raw = raw.replace(",", ".")
+    else:
+        raw = re.sub(r"[ \.,]", "", raw)
     try:
-        amt = int(raw)
+        amt = int(round(float(raw))) if decimal else int(raw)
     except ValueError:
         raise ValueError("bad_amount")
     if amt <= 0:
@@ -97,6 +123,7 @@ def parse_user_input(text: str):
 
     merch = (no_date[:m.start()] + no_date[m.end():]).strip()
     merch = re.sub(r"\s+", " ", merch)
+    merch = merch.strip(" ,.;:-")
     if not merch:
         merch = "операция"
 

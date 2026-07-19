@@ -11,12 +11,17 @@ from datetime import datetime, timedelta, date
 from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
+from services.export_flow import parse_export_date, validate_export_period
+from services.categories import get_or_create_custom_category
+from services.operations import category_options, create_operation_draft, load_operation_draft, mark_operation_draft_committed, record_financial_operation
 from services.records import get_user_alias, record_operation
+from services.workspaces import resolve_workspace
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from utils.spoken_numbers import normalize_spoken_money_ru
+from utils.spoken_numbers import normalize_spoken_money
+from db.database import pg_fetchall
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
 from db.queries import update_last_operation_fields, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
@@ -189,6 +194,57 @@ def _reminder_notify_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def _export_end_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Сегодня', callback_data='exp_custom_end_today'), InlineKeyboardButton('Вчера', callback_data='exp_custom_end_yday')],
+        [InlineKeyboardButton('Конец месяца', callback_data='exp_custom_end_month')],
+        [InlineKeyboardButton('✏️ Ввести дату', callback_data='exp_custom_end_input')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='exp_custom'), InlineKeyboardButton('❌ Отмена', callback_data='exp_cancel')],
+    ])
+
+
+def _export_start_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Сегодня', callback_data='exp_custom_start_today'), InlineKeyboardButton('Вчера', callback_data='exp_custom_start_yday')],
+        [InlineKeyboardButton('1 число месяца', callback_data='exp_custom_start_first')],
+        [InlineKeyboardButton('✏️ Ввести дату', callback_data='exp_custom_start_input')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='exp_menu'), InlineKeyboardButton('❌ Отмена', callback_data='exp_cancel')],
+    ])
+
+
+def _export_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Скачать XLSX', callback_data='exp_dl')],
+        [InlineKeyboardButton('🔁 Изменить период', callback_data='exp_custom'), InlineKeyboardButton('❌ Отмена', callback_data='exp_cancel')],
+    ])
+
+
+def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
+    rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram') FROM public.operations
+                        WHERE chat_id=%s AND op_date BETWEEN %s AND %s
+                          AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
+                        ORDER BY op_date, id""", (chat_id, dfrom, dto))
+    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
+
+
+def _ocr_warning_message(warning: str | None) -> str:
+    if warning == 'insufficient_quota':
+        return 'Recognition is temporarily unavailable because the service configuration requires attention.'
+    if warning == 'rate_limit':
+        return 'The recognition service is busy. Try again shortly.'
+    if warning == 'auth_error':
+        return 'Recognition is temporarily unavailable.'
+    if warning == 'network_error':
+        return 'Could not reach the recognition service. Try again.'
+    if warning == 'no_operations':
+        return 'Не нашёл финансовых операций на изображении.'
+    if warning == 'malformed_response':
+        return 'Сервис распознавания вернул неожиданный ответ. Попробуй ещё раз.'
+    if warning in {'image_too_large', 'empty_image'}:
+        return 'Не удалось прочитать изображение. Попробуй отправить скриншот крупнее.'
+    return 'Не смог распознать фото. Попробуй ещё раз или пришли скрин крупнее.'
+
+
 def _reminder_confirmation(d: dict) -> tuple[str, InlineKeyboardMarkup]:
     ev = d.get('event_date')
     rpt = d.get('repeat_rule', 'none')
@@ -233,6 +289,77 @@ async def _safe_reply(emsg, text_md: str, reply_markup=None):
         return await emsg.reply_text(plain, reply_markup=reply_markup)
 
 
+def _is_group_chat(update) -> bool:
+    chat_type = getattr(update.effective_chat, 'type', 'private') if update.effective_chat else 'private'
+    return chat_type in {'group', 'supergroup'}
+
+
+def _guess_operation_type_from_text(text: str, merchant: str = "") -> str:
+    t = f"{text or ''} {merchant or ''}".lower()
+    if re.search(r"\b(salary|income|paycheck|wage|bonus|refund|cashback)\b", t) or re.search(r"зарплат|доход|пополн|кэшбэк|кешбэк", t):
+        return 'Доходы'
+    return 'Расходы'
+
+
+def _group_setup_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🧩 Создать пространство группы', callback_data='group_setup')],
+        [InlineKeyboardButton('❌ Отмена', callback_data='noop_back')],
+    ])
+
+
+def _group_category_kb(draft_id: str, cats: list[str]) -> InlineKeyboardMarkup:
+    opts = category_options(cats)
+    rows = [[InlineKeyboardButton(cat, callback_data=f'gpick|{draft_id}|{key}')] for key, cat in opts.items()]
+    rows.append([InlineKeyboardButton('➕ Новая категория', callback_data=f'gadd|{draft_id}')])
+    rows.append([InlineKeyboardButton('❌ Отмена', callback_data=f'gcancel|{draft_id}')])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_text: str):
+    text = input_text or ""
+    chat_id = update.effective_chat.id
+    actor_user_id = update.effective_user.id
+    emsg = update.effective_message
+    workspace = resolve_workspace(chat_id, actor_user_id, getattr(update.effective_chat, 'type', 'group'))
+    if not workspace.is_configured:
+        return await emsg.reply_text(
+            'Эта группа ещё не подключена к отдельному финансовому пространству. '
+            'Администратор группы может создать его кнопкой ниже.',
+            reply_markup=_group_setup_kb(),
+        )
+    if workspace.role not in {'owner', 'admin', 'member'}:
+        return await emsg.reply_text('В этой группе у вас нет прав добавлять операции. Попросите администратора пространства добавить вас.')
+    try:
+        merch_display, amt_raw, dt, src_curr = parse_user_input(text)
+    except ValueError:
+        return await emsg.reply_text('Не понял сумму. Пример: coffee 200')
+    merch = norm_text(merch_display)
+    amt_final, note = convert_amount_if_needed(actor_user_id, amt_raw, src_curr or detect_currency_token(text))
+    op_type = _guess_operation_type_from_text(text, merch)
+    top2, sugg_meta = get_top2_suggestions(actor_user_id, normalize_for_ml(text), op_type)
+    if len(top2) < 2:
+        top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
+    cats = [top2[0]['cat'], top2[1]['cat']]
+    draft_id = create_operation_draft(
+        workspace=workspace,
+        amount=amt_final,
+        op_type=op_type,
+        merchant=merch,
+        op_date=dt,
+        source=context.user_data.get('operation_source') or 'text',
+        raw_text=text,
+        categories=cats,
+        note=note,
+    )
+    log.info('group_operation_draft_created chat_id=%s actor_user_id=%s workspace_id=%s draft_id=%s source=%s', chat_id, actor_user_id, workspace.workspace_id, draft_id, sugg_meta.get('source', 'baseline'))
+    return await _safe_reply(
+        emsg,
+        f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}\nПространство: {_md_escape(workspace.name)}",
+        reply_markup=_group_category_kb(draft_id, cats),
+    )
+
+
 async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_text: str):
     """
     Одна строка → тот же старый флоу.
@@ -241,6 +368,9 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
     text = input_text or ""
     cid  = update.effective_chat.id
     emsg = update.effective_message  # универсальный объект сообщения (и для callback'ов тоже)
+
+    if _is_group_chat(update):
+        return await _process_group_text(update, context, text)
 
     try:
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
@@ -295,7 +425,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             pass
         return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
-    op_type = 'Расходы'
+    op_type = _guess_operation_type_from_text(text, merch)
     normalized = normalize_for_ml(text)
     top2, sugg_meta = get_top2_suggestions(cid, normalized, op_type)
     if len(top2) < 2:
@@ -387,11 +517,11 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         if not result.configured:
             return await emsg.reply_text('Фото получил, но распознавание пока не настроено на сервере.')
 
-        if result.warning in {'provider_error', 'image_too_large', 'openai_pkg_missing'}:
-            return await emsg.reply_text('Не смог распознать фото. Попробуй ещё раз или пришли скрин крупнее.')
+        if result.warning in {'provider_error', 'auth_error', 'insufficient_quota', 'rate_limit', 'network_error', 'image_too_large', 'empty_image', 'openai_pkg_missing', 'malformed_response'}:
+            return await emsg.reply_text(_ocr_warning_message(result.warning))
 
         if not result.candidates:
-            return await emsg.reply_text('Не удалось уверенно извлечь операции с этого изображения. Попробуй фото покрупнее.')
+            return await emsg.reply_text(_ocr_warning_message(result.warning))
 
         context.user_data['receipt_candidates'] = [
             {
@@ -464,16 +594,16 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
         log.info('voice_transcribe: ok user=%s', update.effective_chat.id)
         await emsg.reply_text(f'Распознал: {text[:180]}')
-        normalized_text, changed = normalize_spoken_money_ru(text)
-        log.info('voice_normalized_text: changed=%s user=%s', changed, update.effective_chat.id)
+        normalized_text, changed, lang = normalize_spoken_money(text)
+        log.info('voice_normalized_text: changed=%s lang=%s user=%s', changed, lang, update.effective_chat.id)
         try:
             parse_user_input(normalized_text)
             parse_ok = True
         except ValueError:
             parse_ok = False
         if not parse_ok:
-            log.info('voice_to_text_flow: failed user=%s', update.effective_chat.id)
-            return await emsg.reply_text(f'Но не понял сумму. Попробуй так: {normalized_text[:120] or "такси 750"}')
+            log.info('voice_to_text_flow: amount_not_found lang=%s user=%s', lang, update.effective_chat.id)
+            return await emsg.reply_text(f'Распознал текст, но не нашёл сумму: {normalized_text[:120]}\nПример: coffee 2 dollars')
         context.user_data['operation_source'] = 'voice'
         await _process_free_text(update, context, normalized_text)
         log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
@@ -491,6 +621,47 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     cid  = update.effective_chat.id
     emsg = update.effective_message
+
+    if context.user_data.get('await_group_custom_category'):
+        draft_id = context.user_data.get('await_group_custom_category')
+        draft = load_operation_draft(draft_id, actor_user_id=update.effective_user.id)
+        if not draft or draft.get('status') != 'draft':
+            context.user_data.pop('await_group_custom_category', None)
+            return await emsg.reply_text('This operation draft has expired. Send the operation again.')
+        payload = draft.get('payload') or {}
+        workspace = resolve_workspace(draft['chat_id'], update.effective_user.id, getattr(update.effective_chat, 'type', 'group'))
+        if not workspace.is_configured or workspace.role not in {'owner', 'admin', 'member'}:
+            return await emsg.reply_text('В этом пространстве у вас нет прав добавлять операции.')
+        try:
+            cat = get_or_create_custom_category(
+                workspace_id=workspace.workspace_id,
+                user_id=update.effective_user.id,
+                op_type=payload.get('type') or 'Расходы',
+                name=text,
+            )
+        except ValueError:
+            return await emsg.reply_text('⚠️ Введите название категории.')
+        recorded = record_financial_operation(
+            chat_id=draft['chat_id'],
+            actor_user_id=update.effective_user.id,
+            op_date=date.fromisoformat(payload['op_date']),
+            op_type=payload.get('type') or 'Расходы',
+            category=cat.name,
+            amount=int(payload.get('amount') or 0),
+            comment=payload.get('merchant') or 'From group',
+            source=payload.get('source') or 'text',
+            chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
+            workspace=workspace,
+            raw_text=payload.get('raw_text'),
+            metadata={'draft_id': draft_id, 'custom_category_created': cat.created},
+        )
+        mark_operation_draft_committed(draft_id, recorded.operation_id)
+        context.user_data.pop('await_group_custom_category', None)
+        name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(update.effective_user.id)
+        return await emsg.reply_text(
+            f"✅ Операция записана\n\n{cat.name} — {recorded.amount} {recorded.currency}\n"
+            f"Пространство: {workspace.name}\nДобавил(а): {name}"
+        )
 
     if context.user_data.get('lim_edit_amount'):
         st = context.user_data.get('lim_edit_amount') or {}
@@ -656,17 +827,38 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         return await emsg.reply_text('✅ Комментарий обновлён.')
 
     if context.user_data.get('await_export_start') or context.user_data.get('await_export_end'):
-        d = _parse_flexible_date(text)
+        d = parse_export_date(text)
         if not d:
-            return await emsg.reply_text('⚠️ Не понял дату. Формат: DD.MM.YYYY / DD.MM / YYYY-MM-DD')
+            return await emsg.reply_text('⚠️ Не понял дату. Формат: DD.MM.YYYY / DD.MM / YYYY-MM-DD', reply_markup=_export_end_kb() if context.user_data.get('await_export_end') else _export_start_kb())
         st = context.user_data.setdefault('export_state', {})
         if context.user_data.get('await_export_start'):
             st['from'] = d.isoformat()
+            st['mode'] = 'custom'
+            st['step'] = 'end'
             context.user_data.pop('await_export_start', None)
-            return await emsg.reply_text('Дата начала сохранена. Выбери конец периода через /export.')
+            context.user_data['await_export_end'] = True
+            return await emsg.reply_text('Дата начала сохранена. Теперь выбери или введи конец периода:', reply_markup=_export_end_kb())
         st['to'] = d.isoformat()
         context.user_data.pop('await_export_end', None)
-        return await emsg.reply_text('Дата конца сохранена. Выбери «Скачать XLSX» через /export.')
+        dfrom = date.fromisoformat(st['from'])
+        dto = date.fromisoformat(st['to'])
+        ok, error = validate_export_period(dfrom, dto)
+        if not ok:
+            st.pop('to', None)
+            context.user_data['await_export_end'] = True
+            msg = 'Дата конца не может быть раньше даты начала.' if error == 'end_before_start' else 'Период слишком большой. Выберите диапазон до 5 лет.'
+            return await emsg.reply_text(f'⚠️ {msg}\n\nВведите конец периода ещё раз:', reply_markup=_export_end_kb())
+        rows = _export_rows(cid, dfrom, dto)
+        exp = sum(int(r['amount']) for r in rows if r['type'] == 'Расходы')
+        inc = sum(int(r['amount']) for r in rows if r['type'] == 'Доходы')
+        st['count'] = len(rows)
+        st['preview_rows'] = rows
+        st['step'] = 'confirm'
+        return await emsg.reply_text(
+            f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\n'
+            f'Операций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?',
+            reply_markup=_export_confirm_kb(),
+        )
 
     if context.user_data.pop('await_receipt_edit_text', False):
         idx = int(context.user_data.get('receipt_edit_idx') or -1)
@@ -793,10 +985,21 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         amt = p.get('amt', 0)
         dt  = p.get('time', datetime.now())
         note = p.get('note')
+        workspace = resolve_workspace(cid, update.effective_user.id, getattr(update.effective_chat, 'type', 'private') or 'private')
+        try:
+            cat_result = get_or_create_custom_category(
+                workspace_id=workspace.workspace_id,
+                user_id=update.effective_user.id,
+                op_type=typ,
+                name=new_cat,
+            )
+        except ValueError:
+            context.user_data['adding_category'] = True
+            return await emsg.reply_text("⚠️ Введите название категории")
         alias_norm = normalize_alias_text(context.user_data.get('batch_item_text') or merch)
-        record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, new_cat, typ, 'accept')
-        context.user_data['batch_item_text'] = text
-        return await record_operation(new_cat, amt, dt, typ, update, context, note)
+        record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, cat_result.name, typ, 'accept')
+        await emsg.reply_text('✅ Категория сохранена.' if cat_result.created else '✅ Такая категория уже есть, использую её.')
+        return await record_operation(cat_result.name, amt, dt, typ, update, context, note)
 
     if context.user_data.pop('await_amount', False):
         src_curr = detect_currency_token(text or "")

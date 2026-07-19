@@ -80,9 +80,103 @@ def _map_category(v: str | None, op_type: str) -> str:
     return _category(raw)
 
 
+def _provider_api_key() -> str:
+    return (os.getenv('RECEIPT_OCR_API_KEY') or os.getenv('OPENAI_API_KEY') or '').strip()
+
+
+def _extract_json(text: str) -> dict | None:
+    raw = (text or '').strip()
+    if raw.startswith('```'):
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.IGNORECASE)
+        raw = re.sub(r'\s*```$', '', raw)
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def _classify_provider_error(exc: Exception) -> str:
+    status = getattr(exc, 'status_code', None)
+    code = getattr(exc, 'code', None) or getattr(getattr(exc, 'body', None), 'code', None)
+    msg = str(exc).lower()
+    if status in {401, 403} or 'auth' in msg or 'api key' in msg:
+        return 'auth_error'
+    if status == 429 and ('quota' in msg or code == 'insufficient_quota'):
+        return 'insufficient_quota'
+    if status == 429 or 'rate limit' in msg:
+        return 'rate_limit'
+    if 'connection' in msg or 'timeout' in msg or 'network' in msg:
+        return 'network_error'
+    return 'provider_error'
+
+
+def candidates_from_provider_payload(data: dict) -> tuple[list[ParsedCandidate], str | None]:
+    if not isinstance(data, dict):
+        return [], 'malformed_response'
+    if not data.get('ok'):
+        return [], 'no_operations'
+    ops = data.get('operations') or []
+    if not isinstance(ops, list):
+        return [], 'malformed_response'
+    dropped_by_filter = 0
+    out: List[ParsedCandidate] = []
+    seen = set()
+    for op in ops[:30]:
+        if not isinstance(op, dict):
+            dropped_by_filter += 1
+            continue
+        try:
+            amount = abs(float(op.get('amount') or 0))
+        except Exception:
+            dropped_by_filter += 1
+            continue
+        if amount <= 0:
+            dropped_by_filter += 1
+            continue
+        merchant = (op.get('merchant') or op.get('comment') or 'Из изображения').strip()[:64]
+        raw = (op.get('evidence') or op.get('comment') or op.get('merchant') or '').strip()[:120]
+        cat_hint = (op.get('category_hint') or '').strip()
+        merged = f'{merchant} {raw} {cat_hint}'.strip()
+        if _looks_like_aggregate_row(merged) or _HEADER_RE.match((merchant or '').strip()):
+            dropped_by_filter += 1
+            continue
+        if not merchant and not cat_hint:
+            dropped_by_filter += 1
+            continue
+        op_type = _op_type(op.get('type'))
+        op_date = _safe_date(op.get('op_date'))
+        key = (round(amount, 2), merchant.lower(), op_type, op_date.isoformat())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ParsedCandidate(
+            amount=amount,
+            category=_map_category(op.get('category_hint'), op_type),
+            op_type=op_type,
+            op_date=op_date,
+            merchant=merchant,
+            confidence=max(0.0, min(1.0, float(op.get('confidence') or 0.0))),
+            raw_text=raw,
+        ))
+    warning = 'partial_rows_skipped' if dropped_by_filter and out else None
+    if out and any(c.confidence < 0.6 for c in out):
+        warning = warning or 'low_confidence'
+    if not out:
+        warning = 'no_operations'
+    return out, warning
+
+
 def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
     provider = os.getenv('RECEIPT_OCR_PROVIDER', 'openai').strip().lower()
-    api_key = os.getenv('RECEIPT_OCR_API_KEY', '').strip()
+    api_key = _provider_api_key()
     model = os.getenv('RECEIPT_OCR_MODEL', 'gpt-4.1-mini').strip() or 'gpt-4.1-mini'
 
     if provider != 'openai' or not api_key:
@@ -102,6 +196,7 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
 
     prompt = (
         'Ты парсер финансовых операций с фото/скриншотов. '
+        'Поддерживай как одиночные чеки, так и списки банковских транзакций. '
         'Верни строго JSON без markdown и без пояснений. '
         'Извлекай только реальные строки транзакций. '
         'Игнорируй агрегаты по дням и итоги: "20 мая −416,99", "Сегодня −2 496", "Итого", "Всего", "За день". '
@@ -138,53 +233,17 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
             temperature=0,
         )
         txt = (resp.output_text or '').strip()
-        data = json.loads(txt)
+        data = _extract_json(txt)
     except Exception as e:
-        log.warning('receipt_ocr: failed reason=%s', type(e).__name__)
-        return ParseResult(configured=True, candidates=[], warning='provider_error')
+        request_id = getattr(e, 'request_id', None)
+        log.warning('receipt_ocr: failed reason=%s warning=%s status=%s code=%s request_id=%s', type(e).__name__, _classify_provider_error(e), getattr(e, 'status_code', None), getattr(e, 'code', None), request_id)
+        return ParseResult(configured=True, candidates=[], warning=_classify_provider_error(e))
 
-    if not isinstance(data, dict) or not data.get('ok'):
-        return ParseResult(configured=True, candidates=[], warning='not_confident')
+    if data is None:
+        log.warning('receipt_ocr: malformed_json user=%s bytes=%s model=%s', user_id, len(image_bytes), model)
+        return ParseResult(configured=True, candidates=[], warning='malformed_response')
 
-    ops = data.get('operations') or []
+    out, warning = candidates_from_provider_payload(data)
     ignored = data.get('ignored_rows') or []
-    dropped_by_filter = 0
-    out: List[ParsedCandidate] = []
-    seen = set()
-    for op in ops[:20]:
-        try:
-            amount = float(op.get('amount') or 0)
-        except Exception:
-            continue
-        if amount <= 0:
-            continue
-        merchant = (op.get('merchant') or op.get('comment') or 'Из изображения').strip()[:64]
-        raw = (op.get('evidence') or op.get('comment') or op.get('merchant') or '').strip()[:120]
-        cat_hint = (op.get('category_hint') or '').strip()
-        merged = f'{merchant} {raw} {cat_hint}'.strip()
-        if _looks_like_aggregate_row(merged):
-            dropped_by_filter += 1
-            continue
-        if _HEADER_RE.match((merchant or '').strip()):
-            dropped_by_filter += 1
-            continue
-        if not merchant and not cat_hint:
-            dropped_by_filter += 1
-            continue
-        op_type = _op_type(op.get('type'))
-        key = (round(amount, 2), merchant.lower(), op_type, _safe_date(op.get('op_date')).isoformat())
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(ParsedCandidate(
-            amount=amount,
-            category=_map_category(op.get('category_hint'), op_type),
-            op_type=op_type,
-            op_date=_safe_date(op.get('op_date')),
-            merchant=merchant,
-            confidence=max(0.0, min(1.0, float(op.get('confidence') or 0.0))),
-            raw_text=raw,
-        ))
-
-    log.info('receipt_ocr: parsed candidates=%s ignored=%s dropped_by_filter=%s user=%s', len(out), len(ignored), dropped_by_filter, user_id)
-    return ParseResult(configured=True, candidates=out, warning=('low_confidence' if any(c.confidence < 0.6 for c in out) else None))
+    log.info('receipt_ocr: parsed candidates=%s ignored=%s warning=%s user=%s', len(out), len(ignored), warning, user_id)
+    return ParseResult(configured=True, candidates=out, warning=warning)

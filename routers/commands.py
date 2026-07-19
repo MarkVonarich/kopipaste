@@ -23,6 +23,8 @@ from jobs.daily import previous_week_period, previous_month_period, build_weekly
 from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
 from services.quick import get_quick_buttons
+from services.reminder_totals import render_reminder_totals
+from services.activity import has_financial_activity_today
 from db.database import pg_fetchall
 
 
@@ -48,6 +50,7 @@ async def on_startup(app):
         BotCommand('admin_smart_morning_preview', 'Превью утреннего лимит-сигнала (admin)'),
         BotCommand('admin_category_learning_debug', 'Диагностика global category learning (admin)'),
         BotCommand('admin_voice_status', 'Статус voice/OCR ключей (admin)'),
+        BotCommand('admin_activity_status', 'Статус activity/inactivity (admin)'),
     ]
     for admin_id in ADMIN_USER_IDS:
         await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
@@ -93,8 +96,8 @@ async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('export_state', None)
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'), InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
-        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14'), InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m')],
-        [InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
+        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14')],
+        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m'), InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
         [InlineKeyboardButton('📆 Текущий год', callback_data='exp_y'), InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py')],
         [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
         [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')],
@@ -118,6 +121,7 @@ async def cmd_reminders(update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(rows[:5], start=1):
         lines.append(f"{i}. {r['title']} — {int(r['amount']):,} ₽, {r['event_date'].day} число".replace(',', ' '))
         btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
+    lines.extend(['', render_reminder_totals(rows)])
     btns.append([InlineKeyboardButton('➕ Добавить', callback_data='rem_add'), InlineKeyboardButton('📋 Все', callback_data='rem_all')])
     btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
     await update.message.reply_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
@@ -265,6 +269,38 @@ async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
         f"FFMPEG_AVAILABLE: {bool(shutil.which('ffmpeg'))}"
     )
     await update.message.reply_text(txt)
+
+
+async def cmd_admin_activity_status(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    uid = int(context.args[0]) if context.args else update.effective_user.id
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT COALESCE(np.timezone, uws.timezone, 'Europe/Moscow')
+              FROM public.users u
+              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
+              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
+             WHERE u.user_id=%s
+             LIMIT 1
+            """,
+            (uid,),
+        )
+        tz_name = rows[0][0] if rows and rows[0][0] else 'Europe/Moscow'
+    except Exception:
+        tz_name = 'Europe/Moscow'
+    active = has_financial_activity_today(uid, tz_name)
+    try:
+        event_count = pg_fetchall(
+            "SELECT COUNT(*) FROM public.financial_activity_events WHERE user_id=%s AND local_date=CURRENT_DATE",
+            (uid,),
+        )[0][0]
+    except Exception:
+        event_count = 'n/a'
+    await update.message.reply_text(
+        f"activity_status\nuser_id: {uid}\ntimezone: {tz_name}\nactivity_today: {active}\nactivity_events_today_utc: {event_count}"
+    )
 
 
 async def cmd_admin_reminders_preview(update, context: ContextTypes.DEFAULT_TYPE):
