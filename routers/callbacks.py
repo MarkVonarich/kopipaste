@@ -23,6 +23,7 @@ from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.categories import get_or_create_custom_category
 from services.operations import load_operation_draft, mark_operation_draft_committed, record_financial_operation
+from services.reminder_totals import render_reminder_totals
 from services.workspaces import create_group_workspace, resolve_workspace
 from ui.messages import render_operation_confirmation
 from services.export_xlsx import build_export_xlsx
@@ -783,6 +784,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         for i, r in enumerate(rows[:5], start=1):
             lines.append(f"{i}. {r['title']} — {_fmt_money(int(r['amount']))}, {r['event_date'].day} число")
             btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
+        lines.extend(['', render_reminder_totals(rows)])
         btns += _reminders_menu_kb(True).inline_keyboard
         return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
 

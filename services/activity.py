@@ -28,6 +28,19 @@ def record_financial_activity(
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            if operation_id is not None:
+                cur.execute(
+                    """
+                    SELECT 1
+                      FROM public.financial_activity_events
+                     WHERE operation_id=%s AND activity_type='operation_recorded'
+                     LIMIT 1
+                    """,
+                    (operation_id,),
+                )
+                if cur.fetchone():
+                    conn.commit()
+                    return
             cur.execute(
                 """
                 INSERT INTO public.financial_activity_events
