@@ -227,6 +227,24 @@ def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
     return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
 
 
+def _ocr_warning_message(warning: str | None) -> str:
+    if warning == 'insufficient_quota':
+        return 'Recognition is temporarily unavailable because the service configuration requires attention.'
+    if warning == 'rate_limit':
+        return 'The recognition service is busy. Try again shortly.'
+    if warning == 'auth_error':
+        return 'Recognition is temporarily unavailable.'
+    if warning == 'network_error':
+        return 'Could not reach the recognition service. Try again.'
+    if warning == 'no_operations':
+        return 'Не нашёл финансовых операций на изображении.'
+    if warning == 'malformed_response':
+        return 'Сервис распознавания вернул неожиданный ответ. Попробуй ещё раз.'
+    if warning in {'image_too_large', 'empty_image'}:
+        return 'Не удалось прочитать изображение. Попробуй отправить скриншот крупнее.'
+    return 'Не смог распознать фото. Попробуй ещё раз или пришли скрин крупнее.'
+
+
 def _reminder_confirmation(d: dict) -> tuple[str, InlineKeyboardMarkup]:
     ev = d.get('event_date')
     rpt = d.get('repeat_rule', 'none')
@@ -499,11 +517,11 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         if not result.configured:
             return await emsg.reply_text('Фото получил, но распознавание пока не настроено на сервере.')
 
-        if result.warning in {'provider_error', 'image_too_large', 'openai_pkg_missing'}:
-            return await emsg.reply_text('Не смог распознать фото. Попробуй ещё раз или пришли скрин крупнее.')
+        if result.warning in {'provider_error', 'auth_error', 'insufficient_quota', 'rate_limit', 'network_error', 'image_too_large', 'empty_image', 'openai_pkg_missing', 'malformed_response'}:
+            return await emsg.reply_text(_ocr_warning_message(result.warning))
 
         if not result.candidates:
-            return await emsg.reply_text('Не удалось уверенно извлечь операции с этого изображения. Попробуй фото покрупнее.')
+            return await emsg.reply_text(_ocr_warning_message(result.warning))
 
         context.user_data['receipt_candidates'] = [
             {
