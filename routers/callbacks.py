@@ -1655,7 +1655,17 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        return await prompt_category_menu(update, context, include_add_button=False)
+        return await prompt_category_menu(update, context, include_add_button=True)
+
+    if data == 'ml_new_cat':
+        p = context.user_data.get('pending', {})
+        merch = p.get('merch') or 'операция'
+        context.user_data['adding_category'] = True
+        await q.answer()
+        return await q.message.reply_text(
+            f'Введите название новой категории для "{merch}":',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отмена', callback_data='start_main')]]),
+        )
 
     if data == 'ml_toggle_income':
         p = context.user_data.get('pending', {})
@@ -1754,7 +1764,12 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'add_cat':
         p = context.user_data.get('pending', {})
         merch = p.get('merch') or 'операция'
-        return await q.edit_message_text(f'Введите название новой категории для "{merch}":')
+        context.user_data['adding_category'] = True
+        await q.answer()
+        return await q.message.reply_text(
+            f'Введите название новой категории для "{merch}":',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отмена', callback_data='start_main')]]),
+        )
 
     if data.startswith('use_cat|'):
         # если находимся в мастере лимитов — переходим к набору суммы, НЕ пишем операцию

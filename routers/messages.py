@@ -985,10 +985,21 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         amt = p.get('amt', 0)
         dt  = p.get('time', datetime.now())
         note = p.get('note')
+        workspace = resolve_workspace(cid, update.effective_user.id, getattr(update.effective_chat, 'type', 'private') or 'private')
+        try:
+            cat_result = get_or_create_custom_category(
+                workspace_id=workspace.workspace_id,
+                user_id=update.effective_user.id,
+                op_type=typ,
+                name=new_cat,
+            )
+        except ValueError:
+            context.user_data['adding_category'] = True
+            return await emsg.reply_text("⚠️ Введите название категории")
         alias_norm = normalize_alias_text(context.user_data.get('batch_item_text') or merch)
-        record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, new_cat, typ, 'accept')
-        context.user_data['batch_item_text'] = text
-        return await record_operation(new_cat, amt, dt, typ, update, context, note)
+        record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, cat_result.name, typ, 'accept')
+        await emsg.reply_text('✅ Категория сохранена.' if cat_result.created else '✅ Такая категория уже есть, использую её.')
+        return await record_operation(cat_result.name, amt, dt, typ, update, context, note)
 
     if context.user_data.pop('await_amount', False):
         src_curr = detect_currency_token(text or "")
