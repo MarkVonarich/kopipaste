@@ -21,7 +21,9 @@ from ui.keyboards import help_menu_kb, main_menu_kb, ml_top2_kb, settings_menu_k
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
-from services.operations import record_financial_operation
+from services.categories import get_or_create_custom_category
+from services.operations import load_operation_draft, mark_operation_draft_committed, record_financial_operation
+from services.workspaces import create_group_workspace, resolve_workspace
 from ui.messages import render_operation_confirmation
 from services.export_xlsx import build_export_xlsx
 from services.export_flow import parse_export_date, preset_period, validate_export_period
@@ -231,6 +233,73 @@ async def _export_preview(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         f'Операций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?',
         reply_markup=_export_confirm_kb(),
     )
+
+
+async def _is_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return getattr(member, 'status', '') in {'creator', 'administrator'}
+    except Exception as e:
+        log.warning('group_admin_check_failed chat_id=%s user_id=%s reason=%s', chat_id, user_id, type(e).__name__)
+        return False
+
+
+async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYPE, data: str):
+    q = update.callback_query
+    actor_user_id = update.effective_user.id
+    parts = data.split('|', 2)
+    action = parts[0]
+    draft_id = parts[1] if len(parts) > 1 else ''
+    choice = parts[2] if len(parts) > 2 else ''
+
+    draft = load_operation_draft(draft_id, actor_user_id=actor_user_id)
+    if not draft:
+        return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
+    if draft.get('status') == 'wrong_actor':
+        return await q.answer('Only the person who started this operation can finish it.', show_alert=True)
+    if draft.get('status') != 'draft':
+        return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
+    payload = draft.get('payload') or {}
+    if action == 'gcancel':
+        pg_exec("UPDATE public.operation_drafts SET status='cancelled', updated_at=now() WHERE draft_id=%s", (draft_id,))
+        await q.answer('Отменено')
+        return await _safe_edit_or_reply(q, 'Операция отменена.')
+    if action == 'gadd':
+        context.user_data['await_group_custom_category'] = draft_id
+        await q.answer()
+        return await q.message.reply_text('Введите название новой категории:')
+    options = payload.get('category_options') or {}
+    category = options.get(choice)
+    if not category:
+        return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
+    workspace = resolve_workspace(draft['chat_id'], actor_user_id, getattr(update.effective_chat, 'type', 'group'))
+    if not workspace.is_configured or workspace.role not in {'owner', 'admin', 'member'}:
+        return await q.answer('You do not have permission to add operations in this workspace.', show_alert=True)
+    recorded = record_financial_operation(
+        chat_id=draft['chat_id'],
+        actor_user_id=actor_user_id,
+        op_date=date.fromisoformat(payload['op_date']),
+        op_type=payload.get('type') or 'Расходы',
+        category=category,
+        amount=int(payload.get('amount') or 0),
+        comment=payload.get('merchant') or 'From group',
+        source=payload.get('source') or 'text',
+        chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
+        workspace=workspace,
+        raw_text=payload.get('raw_text'),
+        metadata={'draft_id': draft_id},
+    )
+    mark_operation_draft_committed(draft_id, recorded.operation_id)
+    user_name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(actor_user_id)
+    text = (
+        f"✅ Операция записана\n\n"
+        f"{category} — {recorded.amount} {recorded.currency}\n"
+        f"Пространство: {workspace.name}\n"
+        f"Добавил(а): {user_name}"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton('✏️ Изменить', callback_data='op_edit')]])
+    await q.answer('Сохранено')
+    return await _safe_edit_or_reply(q, text, reply_markup=kb)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Вспомогалки для меню лимитов
@@ -549,6 +618,23 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
+
+    if data == 'group_setup':
+        chat = update.effective_chat
+        user = update.effective_user
+        if not chat or getattr(chat, 'type', 'private') not in {'group', 'supergroup'}:
+            return await q.answer('Эта настройка доступна только в группе.', show_alert=True)
+        if not await _is_group_admin(context, chat.id, user.id):
+            return await q.answer('Создать пространство может только администратор группы.', show_alert=True)
+        workspace_id = create_group_workspace(chat.id, user.id, getattr(chat, 'title', None))
+        await q.answer('Пространство создано')
+        return await _safe_edit_or_reply(
+            q,
+            f'🧩 Пространство группы создано.\n\nID: {workspace_id}\nТеперь администратор может записывать операции в этой группе.',
+        )
+
+    if data.startswith(('gpick|', 'gadd|', 'gcancel|')):
+        return await _handle_group_draft_callback(update, context, data)
 
     # === NOOP ("Без операций сегодня") ===
     if data == 'noop_today':

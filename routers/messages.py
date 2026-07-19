@@ -12,7 +12,10 @@ from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardBu
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
 from services.export_flow import parse_export_date, validate_export_period
+from services.categories import get_or_create_custom_category
+from services.operations import category_options, create_operation_draft, load_operation_draft, mark_operation_draft_committed, record_financial_operation
 from services.records import get_user_alias, record_operation
+from services.workspaces import resolve_workspace
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
@@ -268,6 +271,70 @@ async def _safe_reply(emsg, text_md: str, reply_markup=None):
         return await emsg.reply_text(plain, reply_markup=reply_markup)
 
 
+def _is_group_chat(update) -> bool:
+    chat_type = getattr(update.effective_chat, 'type', 'private') if update.effective_chat else 'private'
+    return chat_type in {'group', 'supergroup'}
+
+
+def _group_setup_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🧩 Создать пространство группы', callback_data='group_setup')],
+        [InlineKeyboardButton('❌ Отмена', callback_data='noop_back')],
+    ])
+
+
+def _group_category_kb(draft_id: str, cats: list[str]) -> InlineKeyboardMarkup:
+    opts = category_options(cats)
+    rows = [[InlineKeyboardButton(cat, callback_data=f'gpick|{draft_id}|{key}')] for key, cat in opts.items()]
+    rows.append([InlineKeyboardButton('➕ Новая категория', callback_data=f'gadd|{draft_id}')])
+    rows.append([InlineKeyboardButton('❌ Отмена', callback_data=f'gcancel|{draft_id}')])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_text: str):
+    text = input_text or ""
+    chat_id = update.effective_chat.id
+    actor_user_id = update.effective_user.id
+    emsg = update.effective_message
+    workspace = resolve_workspace(chat_id, actor_user_id, getattr(update.effective_chat, 'type', 'group'))
+    if not workspace.is_configured:
+        return await emsg.reply_text(
+            'Эта группа ещё не подключена к отдельному финансовому пространству. '
+            'Администратор группы может создать его кнопкой ниже.',
+            reply_markup=_group_setup_kb(),
+        )
+    if workspace.role not in {'owner', 'admin', 'member'}:
+        return await emsg.reply_text('В этой группе у вас нет прав добавлять операции. Попросите администратора пространства добавить вас.')
+    try:
+        merch_display, amt_raw, dt, src_curr = parse_user_input(text)
+    except ValueError:
+        return await emsg.reply_text('Не понял сумму. Пример: coffee 200')
+    merch = norm_text(merch_display)
+    amt_final, note = convert_amount_if_needed(actor_user_id, amt_raw, src_curr or detect_currency_token(text))
+    op_type = 'Расходы'
+    top2, sugg_meta = get_top2_suggestions(actor_user_id, normalize_for_ml(text), op_type)
+    if len(top2) < 2:
+        top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
+    cats = [top2[0]['cat'], top2[1]['cat']]
+    draft_id = create_operation_draft(
+        workspace=workspace,
+        amount=amt_final,
+        op_type=op_type,
+        merchant=merch,
+        op_date=dt,
+        source=context.user_data.get('operation_source') or 'text',
+        raw_text=text,
+        categories=cats,
+        note=note,
+    )
+    log.info('group_operation_draft_created chat_id=%s actor_user_id=%s workspace_id=%s draft_id=%s source=%s', chat_id, actor_user_id, workspace.workspace_id, draft_id, sugg_meta.get('source', 'baseline'))
+    return await _safe_reply(
+        emsg,
+        f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}\nПространство: {_md_escape(workspace.name)}",
+        reply_markup=_group_category_kb(draft_id, cats),
+    )
+
+
 async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_text: str):
     """
     Одна строка → тот же старый флоу.
@@ -276,6 +343,9 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
     text = input_text or ""
     cid  = update.effective_chat.id
     emsg = update.effective_message  # универсальный объект сообщения (и для callback'ов тоже)
+
+    if _is_group_chat(update):
+        return await _process_group_text(update, context, text)
 
     try:
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
@@ -526,6 +596,47 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     cid  = update.effective_chat.id
     emsg = update.effective_message
+
+    if context.user_data.get('await_group_custom_category'):
+        draft_id = context.user_data.get('await_group_custom_category')
+        draft = load_operation_draft(draft_id, actor_user_id=update.effective_user.id)
+        if not draft or draft.get('status') != 'draft':
+            context.user_data.pop('await_group_custom_category', None)
+            return await emsg.reply_text('This operation draft has expired. Send the operation again.')
+        payload = draft.get('payload') or {}
+        workspace = resolve_workspace(draft['chat_id'], update.effective_user.id, getattr(update.effective_chat, 'type', 'group'))
+        if not workspace.is_configured or workspace.role not in {'owner', 'admin', 'member'}:
+            return await emsg.reply_text('В этом пространстве у вас нет прав добавлять операции.')
+        try:
+            cat = get_or_create_custom_category(
+                workspace_id=workspace.workspace_id,
+                user_id=update.effective_user.id,
+                op_type=payload.get('type') or 'Расходы',
+                name=text,
+            )
+        except ValueError:
+            return await emsg.reply_text('⚠️ Введите название категории.')
+        recorded = record_financial_operation(
+            chat_id=draft['chat_id'],
+            actor_user_id=update.effective_user.id,
+            op_date=date.fromisoformat(payload['op_date']),
+            op_type=payload.get('type') or 'Расходы',
+            category=cat.name,
+            amount=int(payload.get('amount') or 0),
+            comment=payload.get('merchant') or 'From group',
+            source=payload.get('source') or 'text',
+            chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
+            workspace=workspace,
+            raw_text=payload.get('raw_text'),
+            metadata={'draft_id': draft_id, 'custom_category_created': cat.created},
+        )
+        mark_operation_draft_committed(draft_id, recorded.operation_id)
+        context.user_data.pop('await_group_custom_category', None)
+        name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(update.effective_user.id)
+        return await emsg.reply_text(
+            f"✅ Операция записана\n\n{cat.name} — {recorded.amount} {recorded.currency}\n"
+            f"Пространство: {workspace.name}\nДобавил(а): {name}"
+        )
 
     if context.user_data.get('lim_edit_amount'):
         st = context.user_data.get('lim_edit_amount') or {}

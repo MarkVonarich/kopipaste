@@ -223,3 +223,47 @@ def set_active_workspace(user_id: int, workspace_id: int) -> bool:
         raise
     finally:
         conn.close()
+
+
+def create_group_workspace(chat_id: int, owner_user_id: int, title: str | None = None) -> int:
+    name = (title or f"Group {chat_id}").strip()[:120]
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.workspaces (name, kind, owner_user_id, telegram_chat_id)
+                VALUES (%s, 'group', %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (name, owner_user_id, chat_id),
+            )
+            cur.execute(
+                """
+                SELECT id
+                  FROM public.workspaces
+                 WHERE telegram_chat_id=%s AND archived_at IS NULL
+                 LIMIT 1
+                """,
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise RuntimeError("group workspace was not created")
+            workspace_id = int(row[0])
+            cur.execute(
+                """
+                INSERT INTO public.workspace_members (workspace_id, user_id, role, status)
+                VALUES (%s, %s, 'owner', 'active')
+                ON CONFLICT (workspace_id, user_id) DO UPDATE
+                   SET role='owner', status='active', updated_at=now()
+                """,
+                (workspace_id, owner_user_id),
+            )
+        conn.commit()
+        return workspace_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
