@@ -20,7 +20,7 @@ from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from utils.spoken_numbers import normalize_spoken_money_ru
+from utils.spoken_numbers import normalize_spoken_money
 from db.database import pg_fetchall
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
 from db.queries import update_last_operation_fields, get_last_operation, reminder_insert, reminder_update
@@ -276,6 +276,13 @@ def _is_group_chat(update) -> bool:
     return chat_type in {'group', 'supergroup'}
 
 
+def _guess_operation_type_from_text(text: str, merchant: str = "") -> str:
+    t = f"{text or ''} {merchant or ''}".lower()
+    if re.search(r"\b(salary|income|paycheck|wage|bonus|refund|cashback)\b", t) or re.search(r"зарплат|доход|пополн|кэшбэк|кешбэк", t):
+        return 'Доходы'
+    return 'Расходы'
+
+
 def _group_setup_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('🧩 Создать пространство группы', callback_data='group_setup')],
@@ -311,7 +318,7 @@ async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_
         return await emsg.reply_text('Не понял сумму. Пример: coffee 200')
     merch = norm_text(merch_display)
     amt_final, note = convert_amount_if_needed(actor_user_id, amt_raw, src_curr or detect_currency_token(text))
-    op_type = 'Расходы'
+    op_type = _guess_operation_type_from_text(text, merch)
     top2, sugg_meta = get_top2_suggestions(actor_user_id, normalize_for_ml(text), op_type)
     if len(top2) < 2:
         top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
@@ -400,7 +407,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             pass
         return await record_operation(cat, amt_final, dt, typ, update, context, note)
 
-    op_type = 'Расходы'
+    op_type = _guess_operation_type_from_text(text, merch)
     normalized = normalize_for_ml(text)
     top2, sugg_meta = get_top2_suggestions(cid, normalized, op_type)
     if len(top2) < 2:
@@ -569,16 +576,16 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
         log.info('voice_transcribe: ok user=%s', update.effective_chat.id)
         await emsg.reply_text(f'Распознал: {text[:180]}')
-        normalized_text, changed = normalize_spoken_money_ru(text)
-        log.info('voice_normalized_text: changed=%s user=%s', changed, update.effective_chat.id)
+        normalized_text, changed, lang = normalize_spoken_money(text)
+        log.info('voice_normalized_text: changed=%s lang=%s user=%s', changed, lang, update.effective_chat.id)
         try:
             parse_user_input(normalized_text)
             parse_ok = True
         except ValueError:
             parse_ok = False
         if not parse_ok:
-            log.info('voice_to_text_flow: failed user=%s', update.effective_chat.id)
-            return await emsg.reply_text(f'Но не понял сумму. Попробуй так: {normalized_text[:120] or "такси 750"}')
+            log.info('voice_to_text_flow: amount_not_found lang=%s user=%s', lang, update.effective_chat.id)
+            return await emsg.reply_text(f'Распознал текст, но не нашёл сумму: {normalized_text[:120]}\nПример: coffee 2 dollars')
         context.user_data['operation_source'] = 'voice'
         await _process_free_text(update, context, normalized_text)
         log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
