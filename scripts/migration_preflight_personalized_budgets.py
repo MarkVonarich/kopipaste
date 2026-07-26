@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import psycopg2
+
 from db.database import pg_fetchall
 
 
@@ -24,7 +33,11 @@ def table_exists(name: str) -> bool:
 
 
 def main() -> int:
-    existing = {name: table_exists(name) for name in REQUIRED_TABLES}
+    try:
+        existing = {name: table_exists(name) for name in REQUIRED_TABLES}
+    except psycopg2.Error:
+        print("preflight: database connection unavailable; no schema changes were applied")
+        return 2
     for name, exists in existing.items():
         print(f"{name}: {'exists' if exists else 'missing'}")
     print("preflight: additive migration can be applied; existing tables will be preserved")
