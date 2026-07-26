@@ -24,10 +24,11 @@ from utils.text import norm_text
 from utils.spoken_numbers import normalize_spoken_money
 from db.database import pg_fetchall
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
-from db.queries import update_last_operation_fields, get_last_operation, reminder_insert, reminder_update
+from db.queries import update_last_operation_fields, update_operation_fields_by_id, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
+from services.budgeting import create_category_budget_group, upsert_general_limit
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
 
@@ -744,6 +745,58 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
 
+    if context.user_data.get('await_general_limit_amount'):
+        amount = _parse_amount_input(text)
+        if amount is None:
+            return await emsg.reply_text('⚠️ Введите сумму числом, например: 60000')
+        st = context.user_data.pop('await_general_limit_amount', {}) or {}
+        limit_id = upsert_general_limit(
+            user_id=cid,
+            workspace_id=None,
+            name='Общий лимит',
+            amount=amount,
+            period_type=st.get('period_type') or 'month',
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
+        return await emsg.reply_text(f'✅ Общий лимит создан: {amount} ₽\nID: {limit_id}', reply_markup=kb)
+
+    if context.user_data.get('cbg_draft'):
+        draft = context.user_data.get('cbg_draft') or {}
+        step = draft.get('step')
+        if step == 'name':
+            name = (text or '').strip()[:120]
+            if not name:
+                return await emsg.reply_text('Введите название бюджета.')
+            draft['name'] = name
+            draft['step'] = 'categories'
+            context.user_data['cbg_draft'] = draft
+            return await emsg.reply_text('Введите категории через запятую.\nНапример: Продукты, Заведения, Аптеки')
+        if step == 'categories':
+            cats = [c.strip() for c in (text or '').split(',') if c.strip()]
+            unique = list(dict.fromkeys(cats))
+            if not unique:
+                return await emsg.reply_text('Нужна хотя бы одна категория.')
+            draft['categories'] = unique
+            draft['step'] = 'amount'
+            context.user_data['cbg_draft'] = draft
+            return await emsg.reply_text('Введите сумму бюджета.\nНапример: 42000')
+        if step == 'amount':
+            amount = _parse_amount_input(text)
+            if amount is None:
+                return await emsg.reply_text('⚠️ Введите сумму числом, например: 42000')
+            group_id = create_category_budget_group(
+                user_id=cid,
+                workspace_id=None,
+                name=draft.get('name') or 'Бюджет из категорий',
+                amount=amount,
+                categories=draft.get('categories') or [],
+                period_type=draft.get('period_type') or 'month',
+            )
+            context.user_data.pop('cbg_draft', None)
+            cats = ', '.join(draft.get('categories') or [])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
+            return await emsg.reply_text(f'✅ Бюджет из категорий создан\n\n{draft.get("name")} — {amount} ₽\nКатегории: {cats}\nID: {group_id}', reply_markup=kb)
+
     if context.user_data.get('await_rem_title_amount'):
         log.info('reminder_wizard_text state=await_rem_title_amount user=%s', cid)
         parsed = _parse_reminder_title_amount(text)
@@ -860,28 +913,31 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('⚠️ Некорректное значение, попробуй ещё раз.')
         return await emsg.reply_text('✅ Напоминание обновлено. Открой карточку через /reminders')
 
-    if context.user_data.pop('await_op_edit_amount', False):
+    op_edit_amount_id = context.user_data.pop('await_op_edit_amount', False)
+    if op_edit_amount_id:
         amount = _parse_amount_input(text)
         if amount is None or amount <= 0 or amount >= 1_000_000_000:
-            context.user_data['await_op_edit_amount'] = True
+            context.user_data['await_op_edit_amount'] = op_edit_amount_id
             return await emsg.reply_text('⚠️ Неверная сумма. Введите число >0 и <1 000 000 000')
-        row = update_last_operation_fields(cid, amount=int(amount))
+        row = update_operation_fields_by_id(cid, int(op_edit_amount_id), amount=int(amount)) if str(op_edit_amount_id).isdigit() else update_last_operation_fields(cid, amount=int(amount))
         if not row:
             return await emsg.reply_text('Не нашёл операцию для изменения.')
         return await emsg.reply_text('✅ Сумма обновлена.')
 
-    if context.user_data.pop('await_op_edit_date', False):
+    op_edit_date_id = context.user_data.pop('await_op_edit_date', False)
+    if op_edit_date_id:
         d = _parse_flexible_date(text)
         if not d:
-            context.user_data['await_op_edit_date'] = True
+            context.user_data['await_op_edit_date'] = op_edit_date_id
             return await emsg.reply_text('⚠️ Не понял дату. Пример: 24.05.2026')
-        row = update_last_operation_fields(cid, op_date=d)
+        row = update_operation_fields_by_id(cid, int(op_edit_date_id), op_date=d) if str(op_edit_date_id).isdigit() else update_last_operation_fields(cid, op_date=d)
         if not row:
             return await emsg.reply_text('Не нашёл операцию для изменения.')
         return await emsg.reply_text('✅ Дата обновлена.')
 
-    if context.user_data.pop('await_op_edit_comment', False):
-        row = update_last_operation_fields(cid, comment=(text or '').strip()[:200])
+    op_edit_comment_id = context.user_data.pop('await_op_edit_comment', False)
+    if op_edit_comment_id:
+        row = update_operation_fields_by_id(cid, int(op_edit_comment_id), comment=(text or '').strip()[:200]) if str(op_edit_comment_id).isdigit() else update_last_operation_fields(cid, comment=(text or '').strip()[:200])
         if not row:
             return await emsg.reply_text('Не нашёл операцию для изменения.')
         return await emsg.reply_text('✅ Комментарий обновлён.')

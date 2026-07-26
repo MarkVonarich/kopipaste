@@ -129,7 +129,7 @@ def has_ops_today(cur, chat_id: int, local_date) -> bool:
     """, (chat_id, local_date, local_date))
     return cur.fetchone() is not None
 
-def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int, comment: str = 'From Telegram'):
+def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int, comment: str = ''):
     if not isinstance(op_date, date):
         op_date = op_date.date()
     iso = op_date.isocalendar()
@@ -359,7 +359,8 @@ def get_last_operation(user_id: int):
 
 def update_last_operation_category(user_id: int, new_category: str) -> bool:
     """Update category of the last operation for user. Returns True if updated."""
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id FROM operations WHERE user_id=%s ORDER BY id DESC LIMIT 1",
@@ -373,11 +374,19 @@ def update_last_operation_category(user_id: int, new_category: str) -> bool:
                 "UPDATE operations SET category=%s WHERE id=%s",
                 (new_category, op_id)
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+        conn.commit()
+        return ok
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def update_last_operation_fields(user_id: int, *, amount: int | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM operations WHERE user_id=%s ORDER BY id DESC LIMIT 1", (user_id,))
             row = cur.fetchone()
@@ -401,7 +410,49 @@ def update_last_operation_fields(user_id: int, *, amount: int | None = None, cat
                 cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
             cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (op_id,))
             r = cur.fetchone()
-            return {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
+            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
+        conn.commit()
+        return out
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: int | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM operations WHERE user_id=%s AND id=%s LIMIT 1", (user_id, operation_id))
+            if not cur.fetchone():
+                return None
+            sets = []
+            vals = []
+            if amount is not None:
+                sets.append("amount=%s"); vals.append(int(amount))
+            if category is not None:
+                sets.append("category=%s"); vals.append(category)
+            if op_date is not None:
+                sets.append("op_date=%s"); vals.append(op_date)
+            if op_type is not None:
+                sets.append("type=%s"); vals.append(op_type)
+            if comment is not None:
+                sets.append("comment=%s"); vals.append(comment)
+            if sets:
+                sets.append("updated_at=now()")
+                vals.append(operation_id)
+                cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
+            cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (operation_id,))
+            r = cur.fetchone()
+            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
+        conn.commit()
+        return out
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def reminders_list(user_id: int, active_only: bool = True):

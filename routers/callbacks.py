@@ -14,11 +14,11 @@ from db.queries import (
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
-    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields,
+    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields, update_operation_fields_by_id,
     reminders_list, reminder_insert, reminder_get, reminder_update, reminder_delete
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
-from ui.keyboards import help_menu_kb, main_menu_kb, ml_top2_kb, settings_menu_kb
+from ui.keyboards import help_menu_kb, limits_budgets_hub_kb, main_menu_kb, ml_top2_kb, settings_menu_kb
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
@@ -29,6 +29,9 @@ from services.workspaces import create_group_workspace, is_active_telegram_membe
 from ui.messages import render_operation_confirmation
 from services.export_xlsx import build_export_xlsx
 from services.export_flow import clear_export_wait_flags, export_state_has_period, parse_export_date, preset_period, validate_export_period
+from services.budgeting import build_budget_status, list_category_budget_groups, list_general_limits, period_bounds, render_limit_alert
+from services.i18n import t
+from services.notification_preferences import get_notification_preferences, toggle_notification_preference
 import tempfile
 import os
 
@@ -525,26 +528,39 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
     data = getattr(q, 'data', None)
     msg = getattr(q, 'message', None)
     cid = getattr(getattr(msg, 'chat', None), 'id', None)
+    parts = (data or '').split('|', 1)
+    requested_op_id = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None
 
-    def _fetch_last_op(chat_id):
-        rows = pg_fetchall(
-            """
-            SELECT id, category, amount, type, op_date
-              FROM public.operations
-             WHERE chat_id=%s
-             ORDER BY id DESC
-             LIMIT 1
-            """,
-            (chat_id,)
-        )
+    def _fetch_last_op(chat_id, operation_id=None):
+        if operation_id:
+            rows = pg_fetchall(
+                """
+                SELECT id, category, amount, type, op_date
+                  FROM public.operations
+                 WHERE chat_id=%s AND id=%s
+                 LIMIT 1
+                """,
+                (chat_id, operation_id)
+            )
+        else:
+            rows = pg_fetchall(
+                """
+                SELECT id, category, amount, type, op_date
+                  FROM public.operations
+                 WHERE chat_id=%s
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (chat_id,)
+            )
         if rows:
             rid, cat, amt, typ, dt = rows[0]
             return {'id': rid, 'category': cat, 'amount': amt, 'type': typ, 'op_date': dt}
         return None
 
-    last = _fetch_last_op(cid) if cid is not None else None
+    last = _fetch_last_op(cid, requested_op_id) if cid is not None else None
 
-    if data == 'op_edit':
+    if data == 'op_edit' or (data or '').startswith('op_edit|'):
         if not last:
             try:
                 await q.answer('Нет последней записи для изменения', show_alert=True)
@@ -567,22 +583,25 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'op_edit_cat':
-        if not last:
+        ctx = context.user_data.get('edit_ctx') or last
+        if not ctx:
             try:
                 await q.answer('Нет последней записи', show_alert=True)
             except Exception:
                 pass
             return
         p = context.user_data.setdefault('pending', {})
-        p['amt'] = last['amount']
+        p['amt'] = ctx['amount']
         try:
             from datetime import datetime as _dt
-            p['time'] = _dt.combine(last['op_date'], _dt.min.time())
+            p['time'] = _dt.combine(ctx['op_date'], _dt.min.time())
         except Exception:
             p['time'] = datetime.now()
         p['note'] = None
-        p['merch'] = last['category']
+        p['merch'] = ctx['category']
+        p['edit_operation_id'] = ctx.get('id')
         context.user_data['edit_mode'] = True
+        context.user_data['edit_operation_id'] = ctx.get('id')
         return await prompt_type_menu(update, context)
 
     if data == 'op_edit_back':
@@ -601,7 +620,7 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
             second,
-            InlineKeyboardButton('✏️ Изменить', callback_data='op_edit'),
+            InlineKeyboardButton('✏️ Изменить', callback_data=f"op_edit|{ctx.get('id')}" if ctx and ctx.get('id') else 'op_edit'),
         ]])
         try:
             await q.edit_message_reply_markup(reply_markup=kb)
@@ -611,7 +630,7 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'op_e_amt':
-        context.user_data['await_op_edit_amount'] = True
+        context.user_data['await_op_edit_amount'] = (context.user_data.get('edit_ctx') or last or {}).get('id') or True
         await q.answer()
         return await q.message.reply_text('Введите новую сумму:')
     if data == 'op_e_date':
@@ -623,21 +642,24 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await q.message.reply_text('Выбери дату:', reply_markup=kb)
     if data == 'op_e_date_t':
-        update_last_operation_fields(cid, op_date=date.today())
+        op_id = (context.user_data.get('edit_ctx') or last or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, op_date=date.today()) if op_id else update_last_operation_fields(cid, op_date=date.today()))
         await q.answer('Дата обновлена')
         return
     if data == 'op_e_date_y':
-        update_last_operation_fields(cid, op_date=date.today() - timedelta(days=1))
+        op_id = (context.user_data.get('edit_ctx') or last or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, op_date=date.today() - timedelta(days=1)) if op_id else update_last_operation_fields(cid, op_date=date.today() - timedelta(days=1)))
         await q.answer('Дата обновлена')
         return
     if data == 'op_e_date_i':
-        context.user_data['await_op_edit_date'] = True
+        context.user_data['await_op_edit_date'] = (context.user_data.get('edit_ctx') or last or {}).get('id') or True
         await q.answer()
         return await q.message.reply_text('Введи дату (24.05.2026 или 24.05 или сегодня/вчера):')
     if data == 'op_e_type':
-        cur = _fetch_last_op(cid)
-        new_type = 'Доходы' if cur and cur.get('type') != 'Доходы' else 'Расходы'
-        update_last_operation_fields(cid, op_type=new_type)
+        ctx = context.user_data.get('edit_ctx') or last
+        new_type = 'Доходы' if ctx and ctx.get('type') != 'Доходы' else 'Расходы'
+        op_id = (ctx or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, op_type=new_type) if op_id else update_last_operation_fields(cid, op_type=new_type))
         await q.answer('Тип обновлён')
         return
     if data == 'op_e_com':
@@ -645,11 +667,12 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('🧹 Очистить', callback_data='op_e_com_c')],
             [InlineKeyboardButton('⬅️ Назад', callback_data='op_edit')],
         ])
-        context.user_data['await_op_edit_comment'] = True
+        context.user_data['await_op_edit_comment'] = (context.user_data.get('edit_ctx') or last or {}).get('id') or True
         await q.answer()
         return await q.message.reply_text('Введи новый комментарий:', reply_markup=kb)
     if data == 'op_e_com_c':
-        update_last_operation_fields(cid, comment='')
+        op_id = (context.user_data.get('edit_ctx') or last or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, comment='') if op_id else update_last_operation_fields(cid, comment=''))
         await q.answer('Комментарий очищен')
         return
 
@@ -741,7 +764,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data in ('start_main', 'back_main'):
         context.user_data.pop('await_group_custom_category', None)
         clear_export_wait_flags(context.user_data)
-        return await q.edit_message_text('🔷 Главное меню:', reply_markup=main_menu_kb())
+        locale = get_user_locale(cid)
+        return await q.edit_message_text(t('menu.main.title', locale), reply_markup=main_menu_kb(locale))
 
     # ── Онбординг (как было) ──
     if data == 'onb_curr':
@@ -811,11 +835,70 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             "Через кнопки доступны бюджеты, лимиты, напоминания, экспорт и настройки. "
             "Команды меню: /start, /settings, /help."
         )
-        return await q.edit_message_text(txt, reply_markup=help_menu_kb(), disable_web_page_preview=True)
+        return await q.edit_message_text(txt, reply_markup=help_menu_kb(get_user_locale(cid)), disable_web_page_preview=True)
 
     # Настройки
     if data == 'menu_settings':
-        return await q.edit_message_text('⚙️ Настройки:', reply_markup=settings_menu_kb())
+        locale = get_user_locale(cid)
+        return await q.edit_message_text(t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
+
+    if data in {'lb_hub', 'settings_budgets'}:
+        locale = get_user_locale(cid)
+        return await _safe_edit_or_reply(q, t('limits_budgets.title', locale), reply_markup=limits_budgets_hub_kb(locale))
+
+    if data == 'gl_menu':
+        rows = list_general_limits(cid)
+        if not rows:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('➕ Создать общий лимит', callback_data='gl_create')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
+            ])
+            return await _safe_edit_or_reply(q, '📊 Общий лимит\n\nОбщих лимитов пока нет.', reply_markup=kb)
+        lines = ['📊 Общий лимит', '']
+        for r in rows[:10]:
+            lines.append(f"• {r['name']} — {_fmt_money(r['amount'])} ({r['period_type']})")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('➕ Создать общий лимит', callback_data='gl_create')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
+        ])
+        return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=kb)
+
+    if data == 'gl_create':
+        context.user_data['await_general_limit_amount'] = {'period_type': 'month'}
+        return await _safe_edit_or_reply(q, 'Введите общий месячный лимит расхода.\nНапример: 60000', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='gl_menu')]]))
+
+    if data == 'cbg_menu':
+        rows = list_category_budget_groups(cid)
+        if not rows:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('➕ Создать бюджет из категорий', callback_data='cbg_create')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
+            ])
+            return await _safe_edit_or_reply(q, '🧩 Бюджет из категорий\n\nТаких бюджетов пока нет.', reply_markup=kb)
+        lines = ['🧩 Бюджет из категорий', '']
+        for r in rows[:10]:
+            lines.append(f"• {r['name']} — {_fmt_money(r['amount'])}: {', '.join(r['categories'])}")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('➕ Создать бюджет из категорий', callback_data='cbg_create')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
+        ])
+        return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=kb)
+
+    if data == 'cbg_create':
+        context.user_data['cbg_draft'] = {'step': 'name', 'period_type': 'month', 'categories': []}
+        return await _safe_edit_or_reply(q, 'Введите название бюджета из категорий.\nНапример: Повседневные траты', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='cbg_menu')]]))
+
+    if data == 'lb_status':
+        today = date.today()
+        period = period_bounds('month', today)
+        rows = _export_rows(cid, period.start, period.end)
+        status = build_budget_status('Расходы месяца', 1, get_user_currency(cid), period, rows)
+        text = (
+            '📈 Статус расходов\n\n'
+            f'Потрачено за месяц: {_fmt_money(status.spent)}\n'
+            f'Операций: {len(rows)}'
+        )
+        return await _safe_edit_or_reply(q, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')]]))
 
     if data == 'workspace_menu':
         kb = InlineKeyboardMarkup([
@@ -1118,22 +1201,43 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await _safe_edit_or_reply(q, f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(amount)}", reply_markup=kb)
 
     if data == 'menu_notifications':
-        morning_enabled = get_smart_morning_limits_enabled(cid)
-        morning_row = '🌤 Утро: включено' if morning_enabled else '🌤 Утро: выключено'
-        toggle_btn = '⛔ Выключить утро' if morning_enabled else '🌤 Включить утро'
-        toggle_cb = 'notif_morning_off' if morning_enabled else 'notif_morning_on'
+        prefs = get_notification_preferences(cid)
+        morning_label = '✅ Утро: включено' if prefs['morning_enabled'] else '⛔ Утро: выключено'
+        evening_label = '✅ Вечер: включено' if prefs['evening_enabled'] else '⛔ Вечер: выключено'
+        limit_label = '💰 Лимиты: включены' if prefs['limit_alerts_enabled'] else '💰 Лимиты: выключены'
+        budget_label = '🧩 Бюджеты: включены' if prefs['budget_alerts_enabled'] else '🧩 Бюджеты: выключены'
+        sub_label = '🔔 Подписки' if prefs['subscription_alerts_enabled'] else '🔕 Подписки'
+        recurring_label = '🔁 Регулярные траты' if prefs['recurring_spend_alerts_enabled'] else '⛔ Регулярные траты'
         text = (
             '🔔 Оповещения\n\n'
-            '🌙 Вечер: включено\n'
-            f'{morning_row}\n'
-            '📊 Отчёты: включены\n\n'
-            'Утро — только когда по лимитам есть полезный сигнал.'
+            f"{morning_label} — {prefs['morning_time']}\n"
+            f"{evening_label} — {prefs['evening_time']}\n\n"
+            'Настройте, какие персональные события можно присылать.'
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(toggle_btn, callback_data=toggle_cb)],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+            [InlineKeyboardButton(morning_label, callback_data='notif_toggle|morning'), InlineKeyboardButton(prefs['morning_time'], callback_data='menu_reminder')],
+            [InlineKeyboardButton(evening_label, callback_data='notif_toggle|evening'), InlineKeyboardButton(prefs['evening_time'], callback_data='menu_reminder')],
+            [InlineKeyboardButton(limit_label, callback_data='notif_toggle|limits'), InlineKeyboardButton('⚙️ Пороги', callback_data='lb_hub')],
+            [InlineKeyboardButton(budget_label, callback_data='notif_toggle|budgets')],
+            [InlineKeyboardButton(recurring_label, callback_data='notif_toggle|recurring'), InlineKeyboardButton(sub_label, callback_data='notif_toggle|subscriptions')],
+            [InlineKeyboardButton('📅 Недельные отчёты', callback_data='notif_toggle|weekly'), InlineKeyboardButton('🗓 Месячные отчёты', callback_data='notif_toggle|monthly')],
+            [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
         ])
         return await q.edit_message_text(text, reply_markup=kb)
+
+    if data.startswith('notif_toggle|'):
+        key = data.split('|', 1)[1]
+        try:
+            enabled = toggle_notification_preference(cid, key)
+        except Exception:
+            return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
+        await q.answer('Включено' if enabled else 'Выключено')
+        q.data = 'menu_notifications'
+        return await callback_handler(update, context)
+
+    if data == 'notif_quiet_hours':
+        return await q.answer('Тихие часы готовы в backend-схеме и будут вынесены в отдельный экран.', show_alert=True)
 
     if data == 'quick_sugg_off':
         set_quick_suggestions_enabled(cid, False)
@@ -1867,12 +1971,21 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        from services.records import record_operation
         if context.user_data.pop('edit_mode', False):
-            try:
-                delete_last_operation(cid)
-            except Exception:
-                pass
+            edit_operation_id = p.get('edit_operation_id') or context.user_data.pop('edit_operation_id', None)
+            row = (
+                update_operation_fields_by_id(cid, int(edit_operation_id), category=cat, op_type=typ)
+                if str(edit_operation_id or '').isdigit()
+                else update_last_operation_fields(cid, category=cat, op_type=typ)
+            )
+            context.user_data.pop('edit_ctx', None)
+            context.user_data.pop('edit_operation_id', None)
+            if not row:
+                return await q.message.reply_text('Не нашёл операцию для изменения.')
+            await q.answer('Категория обновлена')
+            return await q.message.reply_text('✅ Категория обновлена.')
+
+        from services.records import record_operation
         return await record_operation(cat, amt, dt, typ, update, context, note)
 
     # Отчёты

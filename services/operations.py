@@ -406,7 +406,7 @@ def record_financial_operation(
     op_type: str,
     category: str,
     amount: int,
-    comment: str = "From Telegram",
+    comment: str = "",
     source: OperationSource = "text",
     chat_type: str = "private",
     workspace: WorkspaceContext | None = None,

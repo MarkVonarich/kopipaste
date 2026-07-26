@@ -24,6 +24,7 @@ from db.queries import reminders_list, reminder_update
 from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
 from services.activity import has_financial_activity_today
+from services.notification_preferences import get_notification_preferences
 
 log = logging.getLogger("finbot.daily")
 
@@ -370,6 +371,9 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         for uid in users:
+            prefs = get_notification_preferences(uid)
+            if not prefs.get("morning_enabled", True):
+                continue
             now_loc = _local_now(uid)
             if not (6 <= now_loc.hour < 12):
                 continue
@@ -408,6 +412,9 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         for uid in users:
+            prefs = get_notification_preferences(uid)
+            if not prefs.get("evening_enabled", True):
+                continue
             off_min, r_hour = _user_tz_and_hour(uid)
             now_loc = datetime.now(timezone.utc) + timedelta(minutes=off_min)
             if not (r_hour <= now_loc.hour <= r_hour + 2):
@@ -470,7 +477,7 @@ def _active_users(days: int) -> list[int]:
 
 def build_weekly_report_text(user_id: int, period_start: date, period_end: date) -> str:
     exp, inc = _sum_by_type(user_id, period_start, period_end)
-    title = f"📊 Итоги недели: {period_start:%d.%m}–{period_end:%d.%m}"
+    title = f"📊 Итоги недели: {period_start:%d.%m}–{period_end:%d.%m}\n#ИтогНедели"
     if exp == 0 and inc == 0:
         return f"{title}\n\nЗа прошлую неделю записей не было.\n\nМожно начать с малого: просто напиши боту:\nкофе 250"
     prev_start = period_start - timedelta(days=7)
@@ -496,7 +503,7 @@ def build_weekly_report_text(user_id: int, period_start: date, period_end: date)
 
 def build_monthly_report_text(user_id: int, period_start: date, period_end: date) -> str:
     exp, inc = _sum_by_type(user_id, period_start, period_end)
-    title = f"📊 Итоги месяца: {period_start:%m.%Y}"
+    title = f"📊 Итоги месяца: {period_start:%m.%Y}\n#ИтогМесяца"
     if exp == 0 and inc == 0:
         return f"{title}\n\nЗа месяц записей не было.\nКогда вернёшься к учёту, я снова соберу отчёт автоматически."
     prev_end = period_start - timedelta(days=1)
@@ -533,6 +540,8 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
         for uid in users:
             now_loc = _local_now(uid)
             today = now_loc.date()
+            if not get_notification_preferences(uid).get("weekly_reports_enabled", True):
+                continue
             if today.weekday() != 0 or now_loc.hour != 12:
                 skipped_hour += 1
                 continue
@@ -570,6 +579,8 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
         for uid in users:
             now_loc = _local_now(uid)
             today = now_loc.date()
+            if not get_notification_preferences(uid).get("monthly_reports_enabled", True):
+                continue
             if today.day != 1 or now_loc.hour != 10:
                 skipped_day_hour += 1
                 continue
@@ -677,6 +688,9 @@ async def smart_morning_limit_job(context: ContextTypes.DEFAULT_TYPE):
         skipped_no_signal = 0
         sent = 0
         for uid in users:
+            if not get_notification_preferences(uid).get("limit_alerts_enabled", True):
+                skipped_disabled += 1
+                continue
             if not get_smart_morning_limits_enabled(uid):
                 skipped_disabled += 1
                 continue

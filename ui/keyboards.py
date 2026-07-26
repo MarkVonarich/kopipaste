@@ -2,38 +2,50 @@
 __version__ = "2025.08.18-01"
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from services.i18n import t
 
-def main_menu_kb():
+
+def main_menu_kb(locale: str | None = None):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('➕ Добавить операцию', callback_data='menu_examples')],
-        [InlineKeyboardButton('📊 Бюджеты', callback_data='settings_budgets'),
-         InlineKeyboardButton('🔔 Напоминания', callback_data='rem_menu')],
-        [InlineKeyboardButton('📤 Экспорт', callback_data='exp_menu'),
-         InlineKeyboardButton('⚙️ Настройки', callback_data='menu_settings')],
-        [InlineKeyboardButton('❓ Помощь', callback_data='menu_help')],
-    ]) 
+        [InlineKeyboardButton(t('menu.add_operation', locale), callback_data='menu_examples')],
+        [InlineKeyboardButton(t('menu.limits_budgets', locale), callback_data='lb_hub'),
+         InlineKeyboardButton(t('menu.reminders', locale), callback_data='rem_menu')],
+        [InlineKeyboardButton(t('menu.export', locale), callback_data='exp_menu'),
+         InlineKeyboardButton(t('menu.settings', locale), callback_data='menu_settings')],
+        [InlineKeyboardButton(t('menu.help', locale), callback_data='menu_help')],
+    ])
 
 
-def settings_menu_kb():
+def limits_budgets_hub_kb(locale: str | None = None):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t('limits_budgets.category_limits', locale), callback_data='lim_list'),
+         InlineKeyboardButton(t('limits_budgets.general_limit', locale), callback_data='gl_menu')],
+        [InlineKeyboardButton(t('limits_budgets.category_budget', locale), callback_data='cbg_menu')],
+        [InlineKeyboardButton(t('limits_budgets.spending_status', locale), callback_data='lb_status'),
+         InlineKeyboardButton(t('limits_budgets.notifications', locale), callback_data='menu_notifications')],
+        [InlineKeyboardButton(t('menu.back', locale), callback_data='start_main')],
+    ])
+
+
+def settings_menu_kb(locale: str | None = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
          InlineKeyboardButton('⏰ Время напоминаний', callback_data='menu_reminder')],
         [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications'),
          InlineKeyboardButton('🧩 Пространства', callback_data='workspace_menu')],
-        [InlineKeyboardButton('💰 Бюджеты', callback_data='settings_budgets'),
-         InlineKeyboardButton('📂 Лимиты', callback_data='lim_list')],
+        [InlineKeyboardButton(t('menu.limits_budgets', locale), callback_data='lb_hub')],
         [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz'),
          InlineKeyboardButton('❓ Помощь', callback_data='menu_help')],
         [InlineKeyboardButton('◀️ В меню', callback_data='start_main')],
     ])
 
 
-def help_menu_kb():
+def help_menu_kb(locale: str | None = None):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('➕ Добавить операцию', callback_data='menu_examples')],
-        [InlineKeyboardButton('📊 Бюджеты', callback_data='settings_budgets'),
-         InlineKeyboardButton('🔔 Напоминания', callback_data='rem_menu')],
-        [InlineKeyboardButton('📤 Экспорт', callback_data='exp_menu'),
+        [InlineKeyboardButton(t('menu.add_operation', locale), callback_data='menu_examples')],
+        [InlineKeyboardButton(t('menu.limits_budgets', locale), callback_data='lb_hub'),
+         InlineKeyboardButton(t('menu.reminders', locale), callback_data='rem_menu')],
+        [InlineKeyboardButton(t('menu.export', locale), callback_data='exp_menu'),
          InlineKeyboardButton('🆘 Поддержка', callback_data='menu_support')],
         [InlineKeyboardButton('◀️ В меню', callback_data='start_main')],
     ])
