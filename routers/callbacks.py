@@ -14,7 +14,7 @@ from db.queries import (
     list_user_limits, get_limit_by_key, update_limit_amount, update_limit_period,
     resolve_limit_conflict_replace, delete_limit_by_key,
     get_smart_morning_limits_enabled, set_smart_morning_limits_enabled,
-    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields,
+    get_limit_spent, adjust_limit_amount, record_category_confirmation, update_last_operation_fields, update_operation_fields_by_id,
     reminders_list, reminder_insert, reminder_get, reminder_update, reminder_delete
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
@@ -583,22 +583,25 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'op_edit_cat':
-        if not last:
+        ctx = context.user_data.get('edit_ctx') or last
+        if not ctx:
             try:
                 await q.answer('Нет последней записи', show_alert=True)
             except Exception:
                 pass
             return
         p = context.user_data.setdefault('pending', {})
-        p['amt'] = last['amount']
+        p['amt'] = ctx['amount']
         try:
             from datetime import datetime as _dt
-            p['time'] = _dt.combine(last['op_date'], _dt.min.time())
+            p['time'] = _dt.combine(ctx['op_date'], _dt.min.time())
         except Exception:
             p['time'] = datetime.now()
         p['note'] = None
-        p['merch'] = last['category']
+        p['merch'] = ctx['category']
+        p['edit_operation_id'] = ctx.get('id')
         context.user_data['edit_mode'] = True
+        context.user_data['edit_operation_id'] = ctx.get('id')
         return await prompt_type_menu(update, context)
 
     if data == 'op_edit_back':
@@ -617,7 +620,7 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
             second,
-            InlineKeyboardButton('✏️ Изменить', callback_data='op_edit'),
+            InlineKeyboardButton('✏️ Изменить', callback_data=f"op_edit|{ctx.get('id')}" if ctx and ctx.get('id') else 'op_edit'),
         ]])
         try:
             await q.edit_message_reply_markup(reply_markup=kb)
@@ -627,7 +630,7 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'op_e_amt':
-        context.user_data['await_op_edit_amount'] = True
+        context.user_data['await_op_edit_amount'] = (context.user_data.get('edit_ctx') or last or {}).get('id') or True
         await q.answer()
         return await q.message.reply_text('Введите новую сумму:')
     if data == 'op_e_date':
@@ -639,21 +642,24 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await q.message.reply_text('Выбери дату:', reply_markup=kb)
     if data == 'op_e_date_t':
-        update_last_operation_fields(cid, op_date=date.today())
+        op_id = (context.user_data.get('edit_ctx') or last or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, op_date=date.today()) if op_id else update_last_operation_fields(cid, op_date=date.today()))
         await q.answer('Дата обновлена')
         return
     if data == 'op_e_date_y':
-        update_last_operation_fields(cid, op_date=date.today() - timedelta(days=1))
+        op_id = (context.user_data.get('edit_ctx') or last or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, op_date=date.today() - timedelta(days=1)) if op_id else update_last_operation_fields(cid, op_date=date.today() - timedelta(days=1)))
         await q.answer('Дата обновлена')
         return
     if data == 'op_e_date_i':
-        context.user_data['await_op_edit_date'] = True
+        context.user_data['await_op_edit_date'] = (context.user_data.get('edit_ctx') or last or {}).get('id') or True
         await q.answer()
         return await q.message.reply_text('Введи дату (24.05.2026 или 24.05 или сегодня/вчера):')
     if data == 'op_e_type':
-        cur = _fetch_last_op(cid)
-        new_type = 'Доходы' if cur and cur.get('type') != 'Доходы' else 'Расходы'
-        update_last_operation_fields(cid, op_type=new_type)
+        ctx = context.user_data.get('edit_ctx') or last
+        new_type = 'Доходы' if ctx and ctx.get('type') != 'Доходы' else 'Расходы'
+        op_id = (ctx or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, op_type=new_type) if op_id else update_last_operation_fields(cid, op_type=new_type))
         await q.answer('Тип обновлён')
         return
     if data == 'op_e_com':
@@ -661,11 +667,12 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('🧹 Очистить', callback_data='op_e_com_c')],
             [InlineKeyboardButton('⬅️ Назад', callback_data='op_edit')],
         ])
-        context.user_data['await_op_edit_comment'] = True
+        context.user_data['await_op_edit_comment'] = (context.user_data.get('edit_ctx') or last or {}).get('id') or True
         await q.answer()
         return await q.message.reply_text('Введи новый комментарий:', reply_markup=kb)
     if data == 'op_e_com_c':
-        update_last_operation_fields(cid, comment='')
+        op_id = (context.user_data.get('edit_ctx') or last or {}).get('id')
+        (update_operation_fields_by_id(cid, op_id, comment='') if op_id else update_last_operation_fields(cid, comment=''))
         await q.answer('Комментарий очищен')
         return
 
@@ -1964,12 +1971,21 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        from services.records import record_operation
         if context.user_data.pop('edit_mode', False):
-            try:
-                delete_last_operation(cid)
-            except Exception:
-                pass
+            edit_operation_id = p.get('edit_operation_id') or context.user_data.pop('edit_operation_id', None)
+            row = (
+                update_operation_fields_by_id(cid, int(edit_operation_id), category=cat, op_type=typ)
+                if str(edit_operation_id or '').isdigit()
+                else update_last_operation_fields(cid, category=cat, op_type=typ)
+            )
+            context.user_data.pop('edit_ctx', None)
+            context.user_data.pop('edit_operation_id', None)
+            if not row:
+                return await q.message.reply_text('Не нашёл операцию для изменения.')
+            await q.answer('Категория обновлена')
+            return await q.message.reply_text('✅ Категория обновлена.')
+
+        from services.records import record_operation
         return await record_operation(cat, amt, dt, typ, update, context, note)
 
     # Отчёты
