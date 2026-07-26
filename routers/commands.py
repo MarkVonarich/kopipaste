@@ -31,6 +31,10 @@ from services.notification_preview import build_preview, render_admin_preview
 from services.personal_data_deletion import dry_run_delete_user_data, format_dry_run
 from db.database import pg_fetchall
 from time import time as unix_time
+from services.acquisition import capture_acquisition
+from services.product_events import ProductEvent, track_product_event
+from services.security_events import SecurityEvent, track_security_event
+from scripts.analytics_status import analytics_status_counts, render_status
 
 
 async def on_startup(app):
@@ -64,6 +68,16 @@ async def on_startup(app):
 async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     is_new = ensure_user(uid)
+    payload = " ".join(context.args or []).strip()
+    if payload:
+        capture_acquisition(user_id=uid, payload=payload)
+    track_product_event(ProductEvent(
+        event_name="bot_started",
+        user_id=uid,
+        locale=getattr(update.effective_user, "language_code", None),
+        status="success",
+        properties={"is_new": bool(is_new), "has_start_payload": bool(payload)},
+    ))
     if context.args and any(a.lower() in ('onboarding', 'ob') for a in context.args):
         is_new = True
     if is_new:
@@ -150,6 +164,7 @@ async def cmd_about(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_mlstats(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_mlstats", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     cid = update.effective_chat.id
     stats = get_ml_stats(cid, days=30)
@@ -215,6 +230,7 @@ def _is_admin(update) -> bool:
 
 async def cmd_admin_weekly_report_preview(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_weekly_report_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
     today = datetime.utcnow().date()
@@ -225,6 +241,7 @@ async def cmd_admin_weekly_report_preview(update, context: ContextTypes.DEFAULT_
 
 async def cmd_admin_monthly_report_preview(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_monthly_report_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
     today = datetime.utcnow().date()
@@ -235,6 +252,7 @@ async def cmd_admin_monthly_report_preview(update, context: ContextTypes.DEFAULT
 
 async def cmd_admin_smart_morning_preview(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_smart_morning_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
     today = datetime.utcnow().date()
@@ -244,6 +262,7 @@ async def cmd_admin_smart_morning_preview(update, context: ContextTypes.DEFAULT_
 
 async def cmd_admin_category_learning_debug(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_category_learning_debug", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     raw = " ".join(context.args or []).strip()
     if not raw:
@@ -275,6 +294,7 @@ async def cmd_admin_category_learning_debug(update, context: ContextTypes.DEFAUL
 
 async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_voice_status", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     ocr_diag = ocr_credential_diagnostic()
     txt = (
@@ -291,6 +311,7 @@ async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_admin_activity_status(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_activity_status", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = int(context.args[0]) if context.args else update.effective_user.id
     try:
@@ -323,6 +344,7 @@ async def cmd_admin_activity_status(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_admin_reminders_preview(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_reminders_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
     active = pg_fetchall("SELECT COUNT(*) FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE", (uid,))[0][0]
@@ -347,6 +369,7 @@ def _admin_target_user(update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def _cmd_admin_notification_preview(update, context: ContextTypes.DEFAULT_TYPE, kind: str):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key=f"cmd_admin_{kind}_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     target_user_id = _admin_target_user(update, context)
     preview = build_preview(target_user_id, kind)
@@ -371,7 +394,18 @@ async def cmd_admin_limit_alert_preview(update, context: ContextTypes.DEFAULT_TY
 
 async def cmd_admin_delete_data_dry_run(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_delete_data_dry_run", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     target_user_id = _admin_target_user(update, context)
     result = dry_run_delete_user_data(target_user_id)
     await update.message.reply_text(format_dry_run(result))
+
+
+async def cmd_admin_analytics_status(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_analytics_status", action_taken="denied"))
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    try:
+        await update.message.reply_text(render_status(analytics_status_counts()))
+    except Exception as exc:
+        await update.message.reply_text(f"analytics_status unavailable: {type(exc).__name__}")

@@ -11,6 +11,8 @@ from psycopg2.extras import Json
 from db.database import get_conn
 from db.queries import get_user_currency, insert_operation
 from services.activity import record_financial_activity
+from services.product_events import ProductEvent, track_product_event
+from services.security_events import SecurityEvent, track_security_event
 from services.workspaces import WorkspaceContext, can_add_operation, resolve_workspace
 
 OperationSource = Literal["text", "voice", "ocr", "reminder", "import", "miniapp", "api"]
@@ -194,6 +196,15 @@ def commit_operation_draft(
 ) -> dict:
     ctx = resolve_workspace(chat_id, actor_user_id, chat_type)
     if not can_add_operation(ctx) or ctx.workspace_id != workspace_id:
+        track_security_event(SecurityEvent(
+            event_name="permission_denied",
+            user_id=actor_user_id,
+            workspace_id=workspace_id,
+            chat_type=chat_type,
+            rule_key="operation_draft_commit",
+            action_taken="denied",
+            metadata={"handler": "commit_operation_draft"},
+        ))
         return {"status": "permission_denied"}
 
     compatibility_user_id = actor_user_id if chat_type in {"group", "supergroup"} else chat_id
@@ -314,6 +325,19 @@ def commit_operation_draft(
         source=recorded.source if recorded else "text",
         metadata=metadata or {"chat_id": chat_id, "draft_id": draft_id},
     )
+    if recorded:
+        track_product_event(ProductEvent(
+            event_name="operation_created",
+            user_id=actor_user_id,
+            workspace_id=workspace_id,
+            workspace_kind=ctx.kind,
+            source=recorded.source,
+            currency=recorded.currency,
+            status="success",
+            entity_type="operation",
+            entity_id=recorded.operation_id,
+            properties={"operation_type": recorded.type, "category": recorded.category},
+        ))
     return {"status": "committed", "recorded": recorded, "operation_id": recorded.operation_id if recorded else None}
 
 
@@ -415,6 +439,15 @@ def record_financial_operation(
 ) -> RecordedOperation:
     ctx = workspace or resolve_workspace(chat_id, actor_user_id, chat_type)
     if not can_add_operation(ctx):
+        track_security_event(SecurityEvent(
+            event_name="permission_denied",
+            user_id=actor_user_id,
+            workspace_id=ctx.workspace_id,
+            chat_type=chat_type,
+            rule_key="operation_create",
+            action_taken="denied",
+            metadata={"handler": "record_financial_operation"},
+        ))
         raise PermissionError("workspace is not configured or actor cannot add operations")
 
     dt = op_date.date() if isinstance(op_date, datetime) else op_date
@@ -454,6 +487,18 @@ def record_financial_operation(
         source=source,
         metadata=metadata or {"chat_id": chat_id},
     )
+    track_product_event(ProductEvent(
+        event_name="operation_created",
+        user_id=actor_user_id,
+        workspace_id=ctx.workspace_id,
+        workspace_kind=ctx.kind,
+        source=source,
+        currency=currency,
+        status="success",
+        entity_type="operation",
+        entity_id=operation_id,
+        properties={"operation_type": op_type, "category": category},
+    ))
 
     return RecordedOperation(
         operation_id=operation_id,

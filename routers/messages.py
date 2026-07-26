@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time as monotonic_time
 from datetime import datetime, timedelta, date
 from decimal import Decimal, InvalidOperation
 from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
@@ -32,6 +33,7 @@ from services.budgeting import create_category_budget_group, list_active_expense
 from services.notification_preferences import set_quiet_hours_time
 from services.i18n import resolve_locale, t
 from services.personal_data_deletion import preview_delete_financial_history
+from services.api_usage import ApiUsageEvent, track_api_usage
 from ui.keyboards import category_budget_picker_kb
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
@@ -641,6 +643,7 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, timeout=30)
+        started = monotonic_time.monotonic()
         with tempfile.TemporaryDirectory(prefix='fin_voice_') as td:
             src = os.path.join(td, 'in.oga')
             dst = os.path.join(td, 'out.mp3')
@@ -658,6 +661,15 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             with open(audio_path, 'rb') as af:
                 tr = client.audio.transcriptions.create(model=VOICE_TRANSCRIBE_MODEL, file=af)
             text = (getattr(tr, 'text', None) or '').strip()
+        track_api_usage(ApiUsageEvent(
+            provider="openai",
+            model=VOICE_TRANSCRIBE_MODEL,
+            feature="voice_transcription",
+            status="success" if text else "empty",
+            user_id=update.effective_user.id if update.effective_user else update.effective_chat.id,
+            latency_ms=int((monotonic_time.monotonic() - started) * 1000),
+            metadata={"duration_seconds": int(media.duration or 0)},
+        ))
         if not text:
             return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
         log.info('voice_transcribe: ok user=%s', update.effective_chat.id)
@@ -685,6 +697,14 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
         return
     except Exception as e:
         log.warning('voice transcribe failed user=%s reason=%s', update.effective_chat.id, type(e).__name__)
+        track_api_usage(ApiUsageEvent(
+            provider="openai",
+            model=VOICE_TRANSCRIBE_MODEL,
+            feature="voice_transcription",
+            status="failed",
+            user_id=update.effective_user.id if update.effective_user else update.effective_chat.id,
+            error_code=type(e).__name__.lower(),
+        ))
         return await emsg.reply_text('Не смог распознать голос. Попробуй ещё раз или напиши текстом.')
 
 
