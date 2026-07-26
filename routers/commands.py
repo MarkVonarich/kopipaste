@@ -27,7 +27,10 @@ from services.reminder_totals import render_reminder_totals
 from services.receipt_parser import ocr_credential_diagnostic
 from services.activity import has_financial_activity_today
 from services.i18n import t
+from services.notification_preview import build_preview, render_admin_preview
+from services.personal_data_deletion import dry_run_delete_user_data, format_dry_run
 from db.database import pg_fetchall
+from time import time as unix_time
 
 
 async def on_startup(app):
@@ -73,6 +76,27 @@ async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     locale = get_user_locale(uid)
     await update.message.reply_text(t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
+
+
+def _delete_phrase(locale: str | None) -> str:
+    return "DELETE MY DATA" if (locale or "ru").startswith("en") else "УДАЛИТЬ МОИ ДАННЫЕ"
+
+
+async def cmd_delete_my_data(update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    locale = get_user_locale(uid)
+    phrase = _delete_phrase(locale)
+    context.user_data['delete_my_data'] = {'actor_user_id': uid, 'step': 'phrase', 'expires_at': unix_time() + 900, 'phrase': phrase}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📤 Export my data', callback_data='exp_menu')],
+        [InlineKeyboardButton('⬅️ Back', callback_data='privacy_menu')],
+    ])
+    text = (
+        '🗑 Delete my data\n\n'
+        'This is irreversible. Personal data will be deleted. Shared group ledger operations may be retained but anonymized/redacted to preserve other participants’ shared financial history.\n\n'
+        f'Type exactly:\n{phrase}'
+    )
+    await update.message.reply_text(text, reply_markup=kb)
 
 
 async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,3 +334,44 @@ async def cmd_admin_reminders_preview(update, context: ContextTypes.DEFAULT_TYPE
         lines.append(f'- {t[:20]}: {d}')
     lines.append('job_enabled: true')
     await update.message.reply_text('\n'.join(lines))
+
+
+def _admin_target_user(update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if getattr(context, "args", None):
+        try:
+            return int(context.args[0])
+        except Exception:
+            return update.effective_user.id
+    return update.effective_user.id
+
+
+async def _cmd_admin_notification_preview(update, context: ContextTypes.DEFAULT_TYPE, kind: str):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    target_user_id = _admin_target_user(update, context)
+    preview = build_preview(target_user_id, kind)
+    await update.message.reply_text(render_admin_preview(preview))
+
+
+async def cmd_admin_notification_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    return await _cmd_admin_notification_preview(update, context, "auto")
+
+
+async def cmd_admin_subscription_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    return await _cmd_admin_notification_preview(update, context, "subscription")
+
+
+async def cmd_admin_recurring_spend_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    return await _cmd_admin_notification_preview(update, context, "recurring-spend")
+
+
+async def cmd_admin_limit_alert_preview(update, context: ContextTypes.DEFAULT_TYPE):
+    return await _cmd_admin_notification_preview(update, context, "limit")
+
+
+async def cmd_admin_delete_data_dry_run(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    target_user_id = _admin_target_user(update, context)
+    result = dry_run_delete_user_data(target_user_id)
+    await update.message.reply_text(format_dry_run(result))

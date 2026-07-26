@@ -4,6 +4,8 @@ __version__ = "2025.08.18-01"
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from services.i18n import t
 
+CATEGORY_PICKER_PAGE_SIZE = 8
+
 
 def main_menu_kb(locale: str | None = None):
     return InlineKeyboardMarkup([
@@ -51,13 +53,44 @@ def reminders_menu_kb(has_any: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def category_budget_picker_kb(categories: list[dict], selected_tokens: set[str], *, page: int = 0, page_size: int = CATEGORY_PICKER_PAGE_SIZE) -> InlineKeyboardMarkup:
+    total = len(categories)
+    page_count = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(int(page or 0), page_count - 1))
+    start = page * page_size
+    visible = categories[start:start + page_size]
+    rows = []
+    for idx in range(0, len(visible), 2):
+        row = []
+        for item in visible[idx:idx + 2]:
+            marker = '✅' if item['token'] in selected_tokens else '▫️'
+            row.append(InlineKeyboardButton(f"{marker} {item['name'][:24]}", callback_data=f"cbgp|t|{item['token']}"))
+        rows.append(row)
+    if page_count > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton('◀️', callback_data=f'cbgp|p|{page - 1}'))
+        nav.append(InlineKeyboardButton(f'{page + 1}/{page_count}', callback_data='cbgp|noop'))
+        if page + 1 < page_count:
+            nav.append(InlineKeyboardButton('▶️', callback_data=f'cbgp|p|{page + 1}'))
+        rows.append(nav)
+    rows.extend([
+        [InlineKeyboardButton('✅ Выбрать все', callback_data='cbgp|all'), InlineKeyboardButton('🧹 Очистить', callback_data='cbgp|clear')],
+        [InlineKeyboardButton('➕ Новая категория', callback_data='cbgp|new')],
+        [InlineKeyboardButton('➡️ Продолжить', callback_data='cbgp|cont')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='cbgp|back'), InlineKeyboardButton('❌ Отмена', callback_data='cbgp|cancel')],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 def settings_menu_kb(locale: str | None = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),
          InlineKeyboardButton('⏰ Время напоминаний', callback_data='menu_reminder')],
         [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications'),
          InlineKeyboardButton('🧩 Пространства', callback_data='workspace_menu')],
-        [InlineKeyboardButton(t('menu.limits_budgets', locale), callback_data='lb_hub')],
+        [InlineKeyboardButton(t('menu.limits_budgets', locale), callback_data='lb_hub'),
+         InlineKeyboardButton('🔐 Privacy', callback_data='privacy_menu')],
         [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz'),
          InlineKeyboardButton('❓ Помощь', callback_data='menu_help')],
         [InlineKeyboardButton('◀️ В меню', callback_data='start_main')],
