@@ -63,3 +63,13 @@ VOICE_MAX_SECONDS = int(os.getenv("VOICE_MAX_SECONDS", "60") or "60")
 # Optional analytics foundation settings. Missing HMAC secret must not break the bot.
 ANALYTICS_HMAC_SECRET = os.getenv("ANALYTICS_HMAC_SECRET", "").strip()
 ANALYTICS_OUTBOX_MAX_ATTEMPTS = int(os.getenv("ANALYTICS_OUTBOX_MAX_ATTEMPTS", "8") or "8")
+
+# Optional PostHog outbox exporter settings. Export remains disabled by default.
+POSTHOG_PROJECT_TOKEN = os.getenv("POSTHOG_PROJECT_TOKEN", "").strip()
+POSTHOG_HOST = os.getenv("POSTHOG_HOST", "").strip()
+POSTHOG_EXPORT_ENABLED = _parse_bool("POSTHOG_EXPORT_ENABLED", False)
+POSTHOG_EXPORT_BATCH_SIZE = int(os.getenv("POSTHOG_EXPORT_BATCH_SIZE", "50") or "50")
+POSTHOG_EXPORT_INTERVAL_SECONDS = int(os.getenv("POSTHOG_EXPORT_INTERVAL_SECONDS", "60") or "60")
+POSTHOG_EXPORT_TIMEOUT_SECONDS = int(os.getenv("POSTHOG_EXPORT_TIMEOUT_SECONDS", "10") or "10")
+POSTHOG_EXPORT_MAX_ATTEMPTS = int(os.getenv("POSTHOG_EXPORT_MAX_ATTEMPTS", "8") or "8")
+POSTHOG_EXPORT_MAX_EVENT_AGE_DAYS = int(os.getenv("POSTHOG_EXPORT_MAX_EVENT_AGE_DAYS", "30") or "30")

@@ -94,9 +94,13 @@ def insert_product_event_cur(cur, ev: ProductEvent, *, create_outbox: bool = Tru
         cur.execute(
             """
             INSERT INTO analytics.event_outbox (product_event_id, destination, status, next_attempt_at)
-            VALUES (%s, %s, 'pending', now())
+            SELECT %s, %s, 'pending', now()
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM analytics.event_outbox
+                    WHERE product_event_id=%s AND destination=%s
+             )
             """,
-            (product_event_id, ev.destination),
+            (product_event_id, ev.destination, product_event_id, ev.destination),
         )
     return product_event_id
 

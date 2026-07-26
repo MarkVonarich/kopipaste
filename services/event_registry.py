@@ -38,6 +38,7 @@ PRODUCT_EVENT_GROUPS = {
     "form_abandoned": "miniapp",
     "error_shown": "miniapp",
     "acquisition_payload_rejected": "attribution",
+    "posthog_connection_test": "diagnostics",
 }
 
 SECURITY_EVENTS = {
