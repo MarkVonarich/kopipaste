@@ -235,7 +235,7 @@ async def record_operation(cat: str, amt: int, dt,
         op_type=typ,
         category=cat,
         amount=amt,
-        comment='From Telegram',
+        comment=(pending.get('merch') or note or ''),
         source=source,
         chat_type=chat_type,
         raw_text=orig_text if orig_text and not _is_bot_hint(orig_text) else None,
@@ -264,7 +264,8 @@ async def record_operation(cat: str, amt: int, dt,
         second = InlineKeyboardButton('📊 Инвестиции (месяц)', callback_data='inv_status')
     else:
         second = InlineKeyboardButton('🎯 Прогресс цели', callback_data=f'goal_status|{cat}')
-    third = InlineKeyboardButton('✏️ Изменить', callback_data='op_edit')
+    edit_payload = f'op_edit|{recorded.operation_id}' if recorded.operation_id else 'op_edit'
+    third = InlineKeyboardButton('✏️ Изменить', callback_data=edit_payload)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
         second,

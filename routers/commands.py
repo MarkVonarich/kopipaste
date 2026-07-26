@@ -14,7 +14,7 @@ from datetime import datetime, date, timedelta
 from db.database import get_conn
 from db.queries import ensure_user, get_user_budgets, get_user_currency, get_user_locale, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, reminders_list
 from services.ml_train import train_model
-from ui.keyboards import help_menu_kb, main_menu_kb, settings_menu_kb
+from ui.keyboards import help_menu_kb, limits_budgets_hub_kb, main_menu_kb, settings_menu_kb
 from services.onboarding import onboarding_welcome
 from settings import ADMIN_USER_IDS, VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL
 import os
@@ -26,6 +26,7 @@ from services.quick import get_quick_buttons
 from services.reminder_totals import render_reminder_totals
 from services.receipt_parser import ocr_credential_diagnostic
 from services.activity import has_financial_activity_today
+from services.i18n import t
 from db.database import pg_fetchall
 
 
@@ -64,15 +65,20 @@ async def cmd_start(update, context: ContextTypes.DEFAULT_TYPE):
         is_new = True
     if is_new:
         return await onboarding_welcome(update, context)
-    await update.message.reply_text('🔷 Главное меню:', reply_markup=main_menu_kb())
+    locale = get_user_locale(uid)
+    await update.message.reply_text(t('menu.main.title', locale), reply_markup=main_menu_kb(locale))
 
 
 async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('⚙️ Настройки:', reply_markup=settings_menu_kb())
+    uid = update.effective_user.id
+    locale = get_user_locale(uid)
+    await update.message.reply_text(t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
 
 
 async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
     from settings import SUPPORT_USERNAME
+    uid = update.effective_user.id
+    locale = get_user_locale(uid)
 
     txt = (
         "❓ Помощь\n\n"
@@ -82,14 +88,13 @@ async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
         "Команды меню: /start, /settings, /help.\n\n"
         "Поддержка: @" + SUPPORT_USERNAME.lstrip('@')
     )
-    await update.message.reply_text(txt, disable_web_page_preview=True, reply_markup=help_menu_kb())
+    await update.message.reply_text(txt, disable_web_page_preview=True, reply_markup=help_menu_kb(locale))
 
 
 async def cmd_budget(update, context: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('💰 Открыть бюджеты', callback_data='settings_budgets')],
-    ])
-    await update.message.reply_text('💰 Бюджеты теперь в настройках.', reply_markup=kb)
+    uid = update.effective_user.id
+    locale = get_user_locale(uid)
+    await update.message.reply_text(t('limits_budgets.title', locale), reply_markup=limits_budgets_hub_kb(locale))
 
 
 async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,10 +192,9 @@ async def cmd_mltrain(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_limits(update, context: ContextTypes.DEFAULT_TYPE):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('📌 Мои лимиты', callback_data='lim_list')],
-    ])
-    await update.message.reply_text('📌 Управление лимитами', reply_markup=kb)
+    uid = update.effective_user.id
+    locale = get_user_locale(uid)
+    await update.message.reply_text(t('limits_budgets.title', locale), reply_markup=limits_budgets_hub_kb(locale))
 
 
 def _is_admin(update) -> bool:

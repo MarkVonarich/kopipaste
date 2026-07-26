@@ -129,7 +129,7 @@ def has_ops_today(cur, chat_id: int, local_date) -> bool:
     """, (chat_id, local_date, local_date))
     return cur.fetchone() is not None
 
-def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int, comment: str = 'From Telegram'):
+def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int, comment: str = ''):
     if not isinstance(op_date, date):
         op_date = op_date.date()
     iso = op_date.isocalendar()

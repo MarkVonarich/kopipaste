@@ -4,6 +4,42 @@ from datetime import date, timedelta
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+SOURCE_LABELS = {
+    "ru": {
+        "text": "Текст",
+        "voice": "Голос",
+        "ocr": "Фото / OCR",
+        "reminder": "Напоминание",
+        "import": "Импорт",
+        "miniapp": "Telegram Mini App",
+        "api": "API",
+        "telegram": "Текст",
+    },
+    "en": {
+        "text": "Text",
+        "voice": "Voice",
+        "ocr": "Photo / OCR",
+        "reminder": "Reminder",
+        "import": "Import",
+        "miniapp": "Telegram Mini App",
+        "api": "API",
+        "telegram": "Text",
+    },
+}
+
+FALLBACK_COMMENTS = {"from telegram", "telegram", "from group", "from image"}
+
+
+def export_comment(value: str | None) -> str:
+    text = (value or "").strip()
+    return "" if text.casefold() in FALLBACK_COMMENTS else text
+
+
+def export_source_label(source: str | None, locale: str = "ru") -> str:
+    lang = "en" if (locale or "").startswith("en") else "ru"
+    raw = (source or "text").strip().lower()
+    return SOURCE_LABELS[lang].get(raw, raw or SOURCE_LABELS[lang]["text"])
+
 
 def _auto_width(ws):
     for col in ws.columns:
@@ -14,7 +50,7 @@ def _auto_width(ws):
         ws.column_dimensions[letter].width = min(max(10, m + 2), 40)
 
 
-def build_export_xlsx(path: str, rows: list[dict], dfrom: date, dto: date):
+def build_export_xlsx(path: str, rows: list[dict], dfrom: date, dto: date, locale: str = "ru"):
     wb = Workbook()
     ws = wb.active
     ws.title = "Итоги"
@@ -43,7 +79,7 @@ def build_export_xlsx(path: str, rows: list[dict], dfrom: date, dto: date):
     hdr = ["Дата", "Тип", "Категория", "Сумма", "Комментарий", "Источник", "ID"]
     ws2.append(hdr)
     for r in sorted(rows, key=lambda x: (x["op_date"], x["id"])):
-        ws2.append([r["op_date"], r["type"], r["category"], int(r["amount"]), r["comment"], r["source"], r["id"]])
+        ws2.append([r["op_date"], r["type"], r["category"], int(r["amount"]), export_comment(r.get("comment")), export_source_label(r.get("source"), locale), r["id"]])
     for c in ws2[1]:
         c.font = Font(bold=True); c.fill = PatternFill("solid", fgColor="D9E1F2")
     ws2.freeze_panes = "A2"

@@ -28,6 +28,7 @@ from db.queries import update_last_operation_fields, get_last_operation, reminde
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
+from services.budgeting import create_category_budget_group, upsert_general_limit
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
 
@@ -743,6 +744,58 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
         return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
+
+    if context.user_data.get('await_general_limit_amount'):
+        amount = _parse_amount_input(text)
+        if amount is None:
+            return await emsg.reply_text('⚠️ Введите сумму числом, например: 60000')
+        st = context.user_data.pop('await_general_limit_amount', {}) or {}
+        limit_id = upsert_general_limit(
+            user_id=cid,
+            workspace_id=None,
+            name='Общий лимит',
+            amount=amount,
+            period_type=st.get('period_type') or 'month',
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
+        return await emsg.reply_text(f'✅ Общий лимит создан: {amount} ₽\nID: {limit_id}', reply_markup=kb)
+
+    if context.user_data.get('cbg_draft'):
+        draft = context.user_data.get('cbg_draft') or {}
+        step = draft.get('step')
+        if step == 'name':
+            name = (text or '').strip()[:120]
+            if not name:
+                return await emsg.reply_text('Введите название бюджета.')
+            draft['name'] = name
+            draft['step'] = 'categories'
+            context.user_data['cbg_draft'] = draft
+            return await emsg.reply_text('Введите категории через запятую.\nНапример: Продукты, Заведения, Аптеки')
+        if step == 'categories':
+            cats = [c.strip() for c in (text or '').split(',') if c.strip()]
+            unique = list(dict.fromkeys(cats))
+            if not unique:
+                return await emsg.reply_text('Нужна хотя бы одна категория.')
+            draft['categories'] = unique
+            draft['step'] = 'amount'
+            context.user_data['cbg_draft'] = draft
+            return await emsg.reply_text('Введите сумму бюджета.\nНапример: 42000')
+        if step == 'amount':
+            amount = _parse_amount_input(text)
+            if amount is None:
+                return await emsg.reply_text('⚠️ Введите сумму числом, например: 42000')
+            group_id = create_category_budget_group(
+                user_id=cid,
+                workspace_id=None,
+                name=draft.get('name') or 'Бюджет из категорий',
+                amount=amount,
+                categories=draft.get('categories') or [],
+                period_type=draft.get('period_type') or 'month',
+            )
+            context.user_data.pop('cbg_draft', None)
+            cats = ', '.join(draft.get('categories') or [])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
+            return await emsg.reply_text(f'✅ Бюджет из категорий создан\n\n{draft.get("name")} — {amount} ₽\nКатегории: {cats}\nID: {group_id}', reply_markup=kb)
 
     if context.user_data.get('await_rem_title_amount'):
         log.info('reminder_wizard_text state=await_rem_title_amount user=%s', cid)
