@@ -63,6 +63,10 @@ Reserved for the Telegram Mini App. Allowed properties are safe screen/form/erro
 
 `acquisition_payload_rejected` records malformed `/start` or future `startapp` payload rejection with `reason=malformed_payload`. Valid attribution is stored in `analytics.acquisition_attribution`; first touch is immutable, last touch may update.
 
+## Diagnostics
+
+`posthog_connection_test` is queued only by the admin-only `/admin_posthog_test_event` command through the normal product-event and outbox path. Purpose: controlled PostHog connection verification. Trigger: admin command. Version: 1. Allowed properties: `test=true`; base properties include `source=admin_test` and `status=success`. Prohibited properties: all user text, IDs, names, tokens and secrets. Entity type: none. Funnel usage: none. Retention usage: operational diagnostics.
+
 ## Security Events
 
 Security events are stored in `security.security_events` with severity `info`, `warning`, `high` or `critical`.
