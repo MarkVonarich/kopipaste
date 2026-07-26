@@ -18,7 +18,15 @@ from db.queries import (
     reminders_list, reminder_insert, reminder_get, reminder_update, reminder_delete
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
-from ui.keyboards import help_menu_kb, limits_budgets_hub_kb, main_menu_kb, ml_top2_kb, settings_menu_kb
+from ui.keyboards import (
+    export_menu_kb,
+    help_menu_kb,
+    limits_budgets_hub_kb,
+    main_menu_kb as canonical_main_menu_kb,
+    ml_top2_kb,
+    reminders_menu_kb,
+    settings_menu_kb,
+)
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
@@ -66,12 +74,7 @@ def _repeat_label(r: str, d: dict) -> str:
 
 
 def _reminders_menu_kb(has_any: bool):
-    if has_any:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton('➕ Добавить', callback_data='rem_add'), InlineKeyboardButton('📋 Все', callback_data='rem_all')],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
-        ])
-    return InlineKeyboardMarkup([[InlineKeyboardButton('➕ Добавить', callback_data='rem_add')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]])
+    return reminders_menu_kb(has_any)
 
 
 async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str):
@@ -130,7 +133,7 @@ def _budgets_hub_kb(has_any: bool):
     rows = [[InlineKeyboardButton('➕ Добавить бюджет', callback_data='bud_add')]]
     if has_any:
         rows += [[InlineKeyboardButton('✏️ Изменить', callback_data='bud_edit')], [InlineKeyboardButton('🗑 Удалить', callback_data='bud_del')]]
-    rows += [[InlineKeyboardButton('📂 Лимиты категорий', callback_data='lim_list')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]]
+    rows += [[InlineKeyboardButton('📂 Лимиты категорий', callback_data='lim_list')], [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')]]
     return InlineKeyboardMarkup(rows)
 
 
@@ -178,14 +181,7 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
 
 
 def _export_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'), InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
-        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14')],
-        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m'), InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
-        [InlineKeyboardButton('📆 Текущий год', callback_data='exp_y'), InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py')],
-        [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
-        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
-    ])
+    return export_menu_kb()
 
 
 def _export_start_kb() -> InlineKeyboardMarkup:
@@ -358,9 +354,59 @@ async def _safe_edit_or_reply(q, text: str, reply_markup=None, parse_mode: str |
         msg = str(e).lower()
         if ('message is not modified' in msg) or ("message can't be edited" in msg) or ('query is too old' in msg):
             log.warning('limits_ui edit fallback: %s', e)
-            return await q.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+            if getattr(q, 'message', None):
+                return await q.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+            return None
         log.warning('limits_ui bad request: %s', e)
         raise
+    except AttributeError as e:
+        log.warning('callback_ui missing message fallback reason=%s', type(e).__name__)
+        if getattr(q, 'message', None):
+            return await q.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return None
+
+
+async def render_main_menu(q, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('await_group_custom_category', None)
+    clear_export_wait_flags(context.user_data)
+    locale = get_user_locale(chat_id)
+    return await _safe_edit_or_reply(q, t('menu.main.title', locale), reply_markup=canonical_main_menu_kb(locale))
+
+
+async def render_settings_menu(q, chat_id: int):
+    locale = get_user_locale(chat_id)
+    return await _safe_edit_or_reply(q, t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
+
+
+async def render_limits_budgets_menu(q, chat_id: int):
+    locale = get_user_locale(chat_id)
+    return await _safe_edit_or_reply(q, t('limits_budgets.title', locale), reply_markup=limits_budgets_hub_kb(locale))
+
+
+async def render_export_menu(q):
+    return await _safe_edit_or_reply(q, '📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=_export_menu_kb())
+
+
+async def render_reminders_menu(q, chat_id: int, context: ContextTypes.DEFAULT_TYPE | None = None):
+    if context is not None:
+        context.user_data['notification_back'] = 'rem_menu'
+    rows = reminders_list(chat_id, active_only=True)
+    if not rows:
+        return await _safe_edit_or_reply(
+            q,
+            '🔔 Напоминания\n\nПока ничего нет.\n\nМожно добавить подписку, платёж, будущую трату или доход — я напомню заранее.',
+            reply_markup=_reminders_menu_kb(False),
+        )
+    lines = ['🔔 Напоминания', '', 'Активные:']
+    btns = []
+    for i, r in enumerate(rows[:5], start=1):
+        lines.append(f"{i}. {r['title']} — {_fmt_money(int(r['amount']))}, {r['event_date'].day} число")
+        btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
+    lines.extend(['', render_reminder_totals(rows, get_user_locale(chat_id))])
+    btns += _reminders_menu_kb(True).inline_keyboard
+    return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
+
+
 def _cl_period_label(p: str) -> str:
     return "неделя" if p == "week" else "месяц"
 
@@ -371,7 +417,7 @@ async def _cl_show_menu(q):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('➕ Установить лимит', callback_data='cl_set')],
         [InlineKeyboardButton('📋 Мои лимиты', callback_data='cl_list')],
-        [InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')],
+        [InlineKeyboardButton('◀️ Назад', callback_data='lb_hub')],
     ])
     await q.edit_message_text('📉 Лимиты по категориям:', reply_markup=kb)
 
@@ -449,7 +495,7 @@ async def _lim_show_list(q, user_id: int):
     if not rows:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('➕ Добавить лимит', callback_data='cl_set')],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
         ])
         log.info('list_limits: rendering via edit_message_text len=%s buttons=%s', len('Лимитов пока нет.'), 2)
         return await _safe_edit_or_reply(q, 'Лимитов пока нет.', reply_markup=kb)
@@ -465,7 +511,7 @@ async def _lim_show_list(q, user_id: int):
             )
         ])
     btns.append([InlineKeyboardButton('➕ Добавить лимит', callback_data='cl_set')])
-    btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
+    btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')])
     text = '\n'.join(lines)
     cb_lens = [len(row[0].callback_data or '') for row in btns if row and row[0].callback_data]
     if cb_lens:
@@ -681,7 +727,7 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
 # ──────────────────────────────────────────────────────────────────────────────
 async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    data = q.data
+    data = q.data or ''
 
     if data == 'group_setup':
         chat = update.effective_chat
@@ -753,7 +799,15 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text('Ок! Можешь отметить отсутствие операций позже.', reply_markup=kb)
         return
 
-    cid = q.message.chat.id
+    msg = getattr(q, 'message', None)
+    chat = getattr(msg, 'chat', None) or update.effective_chat
+    cid = getattr(chat, 'id', None)
+    if cid is None:
+        log.warning('callback_missing_chat callback_data=%s chat_type=%s', data, getattr(update.effective_chat, 'type', None))
+        try:
+            return await q.answer('Кнопка устарела. Откройте меню командой /start.', show_alert=True)
+        except Exception:
+            return
     await q.answer()
 
     # inline-edit подменю
@@ -762,10 +816,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     # Главное меню
     if data in ('start_main', 'back_main'):
-        context.user_data.pop('await_group_custom_category', None)
-        clear_export_wait_flags(context.user_data)
-        locale = get_user_locale(cid)
-        return await q.edit_message_text(t('menu.main.title', locale), reply_markup=main_menu_kb(locale))
+        return await render_main_menu(q, cid, context)
 
     # ── Онбординг (как было) ──
     if data == 'onb_curr':
@@ -806,7 +857,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             "• молоко 150\n• пицца 450 вчера\n• зарплата 50000\n\n"
             "Если что — /settings."
         )
-        return await q.edit_message_text(txt, reply_markup=main_menu_kb())
+        return await _safe_edit_or_reply(q, txt, reply_markup=canonical_main_menu_kb(get_user_locale(cid)))
 
     # Примеры / Поддержка
     if data == 'menu_examples':
@@ -839,12 +890,12 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     # Настройки
     if data == 'menu_settings':
-        locale = get_user_locale(cid)
-        return await q.edit_message_text(t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
+        context.user_data['notification_back'] = 'menu_settings'
+        return await render_settings_menu(q, cid)
 
     if data in {'lb_hub', 'settings_budgets'}:
-        locale = get_user_locale(cid)
-        return await _safe_edit_or_reply(q, t('limits_budgets.title', locale), reply_markup=limits_budgets_hub_kb(locale))
+        context.user_data['notification_back'] = 'lb_hub'
+        return await render_limits_budgets_menu(q, cid)
 
     if data == 'gl_menu':
         rows = list_general_limits(cid)
@@ -915,17 +966,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer('Личное пространство выбрано')
 
     if data == 'rem_menu':
-        rows = reminders_list(cid, active_only=True)
-        if not rows:
-            return await _safe_edit_or_reply(q, '🔔 Напоминания\n\nПока ничего нет.\n\nМожно добавить подписку, платёж, будущую трату или доход — я напомню заранее.', reply_markup=_reminders_menu_kb(False))
-        lines = ['🔔 Напоминания', '', 'Активные:']
-        btns = []
-        for i, r in enumerate(rows[:5], start=1):
-            lines.append(f"{i}. {r['title']} — {_fmt_money(int(r['amount']))}, {r['event_date'].day} число")
-            btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
-        lines.extend(['', render_reminder_totals(rows, get_user_locale(cid))])
-        btns += _reminders_menu_kb(True).inline_keyboard
-        return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
+        return await render_reminders_menu(q, cid, context)
 
     if data == 'rem_all':
         rows = reminders_list(cid, active_only=False)
@@ -1036,6 +1077,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('За 1 день', callback_data='rem_n_1'), InlineKeyboardButton('За 2 дня', callback_data='rem_n_2')],
             [InlineKeyboardButton('За 3 дня', callback_data='rem_n_3'), InlineKeyboardButton('За неделю', callback_data='rem_n_7')],
             [InlineKeyboardButton('✏️ Свой вариант', callback_data='rem_n_in')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
         ])
         await q.answer()
         msg = await q.message.reply_text('Когда напомнить?', reply_markup=kb)
@@ -1072,7 +1114,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         rid = reminder_insert(cid, {'title': d['title'], 'rem_type': d['rem_type'], 'category': d['category'], 'amount': d['amount'], 'event_date': d['event_date'], 'repeat_rule': d.get('repeat_rule', 'none'), 'repeat_interval_days': d.get('repeat_interval_days'), 'notify_days_before': d.get('notify_days_before', 1)})
         log.info('reminder_saved user_id=%s reminder_id=%s', cid, rid)
         context.user_data.pop('rem_draft', None)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('📋 К напоминаниям', callback_data='rem_menu')], [InlineKeyboardButton('➕ Добавить ещё', callback_data='rem_add')], [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('📋 К напоминаниям', callback_data='rem_menu')], [InlineKeyboardButton('➕ Добавить ещё', callback_data='rem_add')], [InlineKeyboardButton('⬅️ Главное меню', callback_data='start_main')]])
         await q.answer('Сохранено')
         return await _safe_edit_or_reply(q, '🔔 Напоминание сохранено.', reply_markup=kb)
 
@@ -1201,6 +1243,9 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await _safe_edit_or_reply(q, f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(amount)}", reply_markup=kb)
 
     if data == 'menu_notifications':
+        back_dest = context.user_data.get('notification_back') or 'menu_settings'
+        if back_dest not in {'menu_settings', 'lb_hub', 'rem_menu', 'start_main'}:
+            back_dest = 'menu_settings'
         prefs = get_notification_preferences(cid)
         morning_label = '✅ Утро: включено' if prefs['morning_enabled'] else '⛔ Утро: выключено'
         evening_label = '✅ Вечер: включено' if prefs['evening_enabled'] else '⛔ Вечер: выключено'
@@ -1222,9 +1267,9 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(recurring_label, callback_data='notif_toggle|recurring'), InlineKeyboardButton(sub_label, callback_data='notif_toggle|subscriptions')],
             [InlineKeyboardButton('📅 Недельные отчёты', callback_data='notif_toggle|weekly'), InlineKeyboardButton('🗓 Месячные отчёты', callback_data='notif_toggle|monthly')],
             [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
         ])
-        return await q.edit_message_text(text, reply_markup=kb)
+        return await _safe_edit_or_reply(q, text, reply_markup=kb)
 
     if data.startswith('notif_toggle|'):
         key = data.split('|', 1)[1]
@@ -1480,7 +1525,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('BYN 🇧🇾', callback_data='set_curr|BYN')],
             [InlineKeyboardButton('KZT 🇰🇿', callback_data='set_curr|KZT')],
             [InlineKeyboardButton('UZS 🇺🇿', callback_data='set_curr|UZS')],
-            [InlineKeyboardButton('TMT 🇹🇲', callback_data='TMT')],
+            [InlineKeyboardButton('TMT 🇹🇲', callback_data='set_curr|TMT')],
             [InlineKeyboardButton('◀️ Назад', callback_data='menu_currency')],
         ])
         return await q.edit_message_text('Другие валюты:', reply_markup=kb)
@@ -2112,7 +2157,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'exp_menu':
         clear_export_wait_flags(context.user_data)
-        return await _safe_edit_or_reply(q, '📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=_export_menu_kb())
+        return await render_export_menu(q)
 
     if data.startswith('rem_tog|'):
         rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
@@ -2277,7 +2322,19 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                f"Осталось: {remain} {get_user_currency(cid)}")
         return await q.message.reply_text(txt)
 
-def main_menu_kb():
+    log.warning(
+        'unknown_callback_data callback_data=%s chat_type=%s',
+        data,
+        getattr(update.effective_chat, 'type', None),
+    )
+    try:
+        await q.answer('Кнопка устарела. Открываю главное меню.', show_alert=False)
+    except Exception:
+        pass
+    return await render_main_menu(q, cid, context)
+
+
+def legacy_main_menu_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('🧾 Примеры', callback_data='menu_examples'),
          InlineKeyboardButton('🆘 Поддержка', callback_data='menu_support')],
