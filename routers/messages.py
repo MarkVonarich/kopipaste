@@ -208,6 +208,7 @@ def _reminder_notify_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton('За 1 день', callback_data='rem_n_1'), InlineKeyboardButton('За 2 дня', callback_data='rem_n_2')],
         [InlineKeyboardButton('За 3 дня', callback_data='rem_n_3'), InlineKeyboardButton('За неделю', callback_data='rem_n_7')],
         [InlineKeyboardButton('✏️ Свой вариант', callback_data='rem_n_in')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='rem_add')],
     ])
 
 

@@ -27,6 +27,30 @@ def limits_budgets_hub_kb(locale: str | None = None):
     ])
 
 
+def export_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'),
+         InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
+        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14'),
+         InlineKeyboardButton('📅 Этот месяц', callback_data='exp_m')],
+        [InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm'),
+         InlineKeyboardButton('📆 Этот год', callback_data='exp_y')],
+        [InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py'),
+         InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')],
+    ])
+
+
+def reminders_menu_kb(has_any: bool) -> InlineKeyboardMarkup:
+    rows = [[
+        InlineKeyboardButton('➕ Добавить', callback_data='rem_add'),
+        InlineKeyboardButton('📋 Все', callback_data='rem_all'),
+    ]]
+    rows.append([InlineKeyboardButton('⚙️ Настройки уведомлений', callback_data='menu_notifications')])
+    rows.append([InlineKeyboardButton('⬅️ Назад', callback_data='start_main')])
+    return InlineKeyboardMarkup(rows)
+
+
 def settings_menu_kb(locale: str | None = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💱 Валюта', callback_data='menu_currency'),

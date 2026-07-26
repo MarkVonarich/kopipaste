@@ -14,7 +14,7 @@ from datetime import datetime, date, timedelta
 from db.database import get_conn
 from db.queries import ensure_user, get_user_budgets, get_user_currency, get_user_locale, get_ml_stats, get_personal_category_suggestion, get_global_category_suggestion, get_global_alias_exact, reminders_list
 from services.ml_train import train_model
-from ui.keyboards import help_menu_kb, limits_budgets_hub_kb, main_menu_kb, settings_menu_kb
+from ui.keyboards import export_menu_kb, help_menu_kb, limits_budgets_hub_kb, main_menu_kb, reminders_menu_kb, settings_menu_kb
 from services.onboarding import onboarding_welcome
 from settings import ADMIN_USER_IDS, VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL
 import os
@@ -100,36 +100,23 @@ async def cmd_budget(update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_export(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     context.user_data.pop('export_state', None)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('📅 Сегодня', callback_data='exp_today'), InlineKeyboardButton('🗓 7 дней', callback_data='exp_7')],
-        [InlineKeyboardButton('🗓 14 дней', callback_data='exp_14')],
-        [InlineKeyboardButton('📅 Текущий месяц', callback_data='exp_m'), InlineKeyboardButton('↩️ Прошлый месяц', callback_data='exp_pm')],
-        [InlineKeyboardButton('📆 Текущий год', callback_data='exp_y'), InlineKeyboardButton('↩️ Прошлый год', callback_data='exp_py')],
-        [InlineKeyboardButton('⚙️ Свой период', callback_data='exp_custom')],
-        [InlineKeyboardButton('⬅️ Назад', callback_data='start_main')],
-    ])
     import logging
     logging.getLogger(__name__).info('export_menu_opened user_id=%s', cid)
-    await update.message.reply_text('📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=kb)
+    await update.message.reply_text('📤 Экспорт записей\n\nВыбери период, за который выгрузить операции.', reply_markup=export_menu_kb())
 
 
 async def cmd_reminders(update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     rows = reminders_list(cid, active_only=True)
     if not rows:
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('➕ Добавить', callback_data='rem_add')],
-            [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
-        ])
-        return await update.message.reply_text('🔔 Напоминания\n\nПока ничего нет.\n\nМожно добавить подписку, платёж, будущую трату или доход — я напомню заранее.', reply_markup=kb)
+        return await update.message.reply_text('🔔 Напоминания\n\nПока ничего нет.\n\nМожно добавить подписку, платёж, будущую трату или доход — я напомню заранее.', reply_markup=reminders_menu_kb(False))
     lines = ['🔔 Напоминания', '', 'Активные:']
     btns = []
     for i, r in enumerate(rows[:5], start=1):
         lines.append(f"{i}. {r['title']} — {int(r['amount']):,} ₽, {r['event_date'].day} число".replace(',', ' '))
         btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
     lines.extend(['', render_reminder_totals(rows, get_user_locale(cid))])
-    btns.append([InlineKeyboardButton('➕ Добавить', callback_data='rem_add'), InlineKeyboardButton('📋 Все', callback_data='rem_all')])
-    btns.append([InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')])
+    btns.extend(reminders_menu_kb(True).inline_keyboard)
     await update.message.reply_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
 
 
