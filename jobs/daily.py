@@ -25,6 +25,7 @@ from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
 from services.activity import has_financial_activity_today
 from services.notification_preferences import get_notification_preferences
+from services.notification_engine import preferences_from_dict, should_send_now
 
 log = logging.getLogger("finbot.daily")
 
@@ -375,6 +376,8 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
             if not prefs.get("morning_enabled", True):
                 continue
             now_loc = _local_now(uid)
+            if not should_send_now(now_loc, preferences_from_dict(prefs)):
+                continue
             if not (6 <= now_loc.hour < 12):
                 continue
             if _already_sent_today(uid, "morning"):
@@ -417,6 +420,8 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             off_min, r_hour = _user_tz_and_hour(uid)
             now_loc = datetime.now(timezone.utc) + timedelta(minutes=off_min)
+            if not should_send_now(now_loc, preferences_from_dict(prefs)):
+                continue
             if not (r_hour <= now_loc.hour <= r_hour + 2):
                 continue
             if _already_sent_today(uid, "evening"):
@@ -695,6 +700,9 @@ async def smart_morning_limit_job(context: ContextTypes.DEFAULT_TYPE):
                 skipped_disabled += 1
                 continue
             now_loc = _local_now(uid)
+            if not should_send_now(now_loc, preferences_from_dict(get_notification_preferences(uid))):
+                skipped_time += 1
+                continue
             if not (9 <= now_loc.hour <= 11):
                 skipped_time += 1
                 continue

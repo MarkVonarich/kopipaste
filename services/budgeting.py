@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+import hashlib
 from typing import Iterable
 
 from psycopg2 import errors
@@ -10,9 +11,26 @@ from psycopg2.extras import Json
 from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency
 from services.i18n import format_money, normalize_locale
+from utils.text import norm_text
 
 EXPENSE_TYPE = "Расходы"
 DEFAULT_THRESHOLDS = (70, 90, 100, 125, 150, 175, 200)
+
+
+@dataclass(frozen=True)
+class BudgetCategoryOption:
+    token: str
+    name: str
+    normalized_name: str
+    category_id: int | None = None
+    source: str = "operation"
+
+
+def _category_token(*, category_id: int | None, normalized_name: str) -> str:
+    if category_id is not None:
+        return f"c{int(category_id)}"
+    digest = hashlib.blake2s(normalized_name.encode("utf-8"), digest_size=6).hexdigest()
+    return f"o{digest}"
 
 
 @dataclass(frozen=True)
@@ -331,3 +349,85 @@ def create_category_budget_group(*, user_id: int, workspace_id: int | None, name
         raise
     finally:
         conn.close()
+
+
+def list_active_expense_categories(*, user_id: int, workspace_id: int | None = None, limit: int = 100) -> list[BudgetCategoryOption]:
+    """Return current-workspace expense category choices without embedding names in callback_data."""
+    found: dict[str, BudgetCategoryOption] = {}
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT id, name
+              FROM public.custom_categories
+             WHERE workspace_id IS NOT DISTINCT FROM %s
+               AND type=%s
+               AND archived_at IS NULL
+             ORDER BY name
+             LIMIT %s
+            """,
+            (workspace_id, EXPENSE_TYPE, int(limit)),
+        )
+    except errors.UndefinedTable:
+        rows = []
+    for category_id, name in rows:
+        if not name:
+            continue
+        normalized = norm_text(name).casefold()
+        found[normalized] = BudgetCategoryOption(
+            token=_category_token(category_id=int(category_id), normalized_name=normalized),
+            name=name,
+            normalized_name=normalized,
+            category_id=int(category_id),
+            source="custom",
+        )
+
+    remaining = max(0, int(limit) - len(found))
+    if remaining:
+        try:
+            rows = pg_fetchall(
+                """
+                WITH ranked AS (
+                    SELECT category, MAX(id) AS last_id, COUNT(*) AS op_count
+                      FROM public.operations
+                     WHERE type=%s
+                       AND COALESCE(category,'') NOT IN ('', 'Без операций')
+                       AND (%s::bigint IS NULL OR workspace_id=%s)
+                       AND (%s::bigint IS NOT NULL OR user_id=%s OR chat_id=%s)
+                     GROUP BY category
+                )
+                SELECT category
+                  FROM ranked
+                 ORDER BY op_count DESC, last_id DESC, category ASC
+                 LIMIT %s
+                """,
+                (EXPENSE_TYPE, workspace_id, workspace_id, workspace_id, user_id, user_id, remaining),
+            )
+        except errors.UndefinedColumn:
+            rows = pg_fetchall(
+                """
+                SELECT category
+                  FROM public.operations
+                 WHERE user_id=%s
+                   AND type=%s
+                   AND COALESCE(category,'') NOT IN ('', 'Без операций')
+                 GROUP BY category
+                 ORDER BY MAX(id) DESC, category ASC
+                 LIMIT %s
+                """,
+                (user_id, EXPENSE_TYPE, remaining),
+            )
+        except errors.UndefinedTable:
+            rows = []
+        for (name,) in rows:
+            normalized = norm_text(name).casefold()
+            if not normalized or normalized in found:
+                continue
+            found[normalized] = BudgetCategoryOption(
+                token=_category_token(category_id=None, normalized_name=normalized),
+                name=name,
+                normalized_name=normalized,
+                category_id=None,
+                source="operation",
+            )
+
+    return sorted(found.values(), key=lambda item: (item.name.casefold(), item.token))

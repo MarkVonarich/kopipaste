@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import time
+
 from psycopg2 import errors
 
 from db.database import get_conn, pg_fetchall
@@ -25,7 +27,9 @@ def get_notification_preferences(user_id: int) -> dict:
                    COALESCE(subscription_alerts_enabled, true), COALESCE(recurring_spend_alerts_enabled, true),
                    COALESCE(weekly_reports_enabled, true), COALESCE(monthly_reports_enabled, true),
                    COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
-                   COALESCE(to_char(evening_time, 'HH24:MI'), '20:30')
+                   COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
+                   to_char(quiet_hours_start, 'HH24:MI'),
+                   to_char(quiet_hours_end, 'HH24:MI')
               FROM public.notification_preferences
              WHERE user_id=%s
              LIMIT 1
@@ -46,6 +50,9 @@ def get_notification_preferences(user_id: int) -> dict:
             "monthly_reports_enabled": True,
             "morning_time": "08:30",
             "evening_time": "20:30",
+            "quiet_hours_enabled": False,
+            "quiet_hours_start": None,
+            "quiet_hours_end": None,
         }
     r = rows[0]
     return {
@@ -59,6 +66,9 @@ def get_notification_preferences(user_id: int) -> dict:
         "monthly_reports_enabled": bool(r[7]),
         "morning_time": r[8],
         "evening_time": r[9],
+        "quiet_hours_enabled": bool(r[10] and r[11]),
+        "quiet_hours_start": r[10],
+        "quiet_hours_end": r[11],
     }
 
 
@@ -80,6 +90,81 @@ def toggle_notification_preference(user_id: int, key: str) -> bool:
             value = bool(cur.fetchone()[0])
         conn.commit()
         return value
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def parse_hhmm(value: str) -> time:
+    parts = (value or "").strip().split(":")
+    if len(parts) != 2:
+        raise ValueError("invalid_time")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("invalid_time")
+    return time(hour, minute)
+
+
+def toggle_quiet_hours(user_id: int) -> bool:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.notification_preferences (user_id, quiet_hours_start, quiet_hours_end)
+                VALUES (%s, '22:30'::time, '08:00'::time)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET quiet_hours_start = CASE
+                           WHEN public.notification_preferences.quiet_hours_start IS NULL
+                             OR public.notification_preferences.quiet_hours_end IS NULL
+                           THEN COALESCE(public.notification_preferences.quiet_hours_start, '22:30'::time)
+                           ELSE NULL
+                       END,
+                       quiet_hours_end = CASE
+                           WHEN public.notification_preferences.quiet_hours_start IS NULL
+                             OR public.notification_preferences.quiet_hours_end IS NULL
+                           THEN COALESCE(public.notification_preferences.quiet_hours_end, '08:00'::time)
+                           ELSE NULL
+                       END
+                RETURNING quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL
+                """,
+                (user_id,),
+            )
+            enabled = bool(cur.fetchone()[0])
+        conn.commit()
+        return enabled
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def set_quiet_hours_time(user_id: int, field: str, value: str) -> dict:
+    if field not in {"start", "end"}:
+        raise ValueError("invalid_field")
+    parsed = parse_hhmm(value)
+    column = "quiet_hours_start" if field == "start" else "quiet_hours_end"
+    other = "quiet_hours_end" if field == "start" else "quiet_hours_start"
+    default_other = "08:00" if field == "start" else "22:30"
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO public.notification_preferences (user_id, {column}, {other})
+                VALUES (%s, %s, %s::time)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET {column}=EXCLUDED.{column},
+                       {other}=COALESCE(public.notification_preferences.{other}, EXCLUDED.{other})
+                """,
+                (user_id, parsed, default_other),
+            )
+        conn.commit()
+        return get_notification_preferences(user_id)
     except Exception:
         conn.rollback()
         raise

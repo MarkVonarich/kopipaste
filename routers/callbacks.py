@@ -19,6 +19,7 @@ from db.queries import (
 )
 from routers.helpers import prompt_type_menu, prompt_category_menu
 from ui.keyboards import (
+    category_budget_picker_kb,
     export_menu_kb,
     help_menu_kb,
     limits_budgets_hub_kb,
@@ -38,10 +39,13 @@ from ui.messages import render_operation_confirmation
 from services.export_xlsx import build_export_xlsx
 from services.export_flow import clear_export_wait_flags, export_state_has_period, parse_export_date, preset_period, validate_export_period
 from services.budgeting import build_budget_status, list_category_budget_groups, list_general_limits, period_bounds, render_limit_alert
+from services.budgeting import create_category_budget_group, list_active_expense_categories
 from services.i18n import t
-from services.notification_preferences import get_notification_preferences, toggle_notification_preference
+from services.notification_preferences import get_notification_preferences, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
+from services.personal_data_deletion import delete_user_data
 import tempfile
 import os
+from time import time as unix_time
 
 log = logging.getLogger(__name__)
 
@@ -405,6 +409,199 @@ async def render_reminders_menu(q, chat_id: int, context: ContextTypes.DEFAULT_T
     lines.extend(['', render_reminder_totals(rows, get_user_locale(chat_id))])
     btns += _reminders_menu_kb(True).inline_keyboard
     return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=InlineKeyboardMarkup(btns))
+
+
+def _cbg_workspace_id(chat_id: int, actor_user_id: int, chat_type: str) -> int | None:
+    return resolve_workspace(chat_id, actor_user_id, chat_type).workspace_id
+
+
+def _cbg_options(user_id: int, workspace_id: int | None) -> list[dict]:
+    return [item.__dict__ for item in list_active_expense_categories(user_id=user_id, workspace_id=workspace_id)]
+
+
+def _cbg_selected_names(draft: dict, options: list[dict]) -> list[str]:
+    by_token = {item["token"]: item["name"] for item in options}
+    names = []
+    for token in draft.get("selected_tokens") or []:
+        name = by_token.get(token) or (draft.get("selected_categories") or {}).get(token)
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+async def _cbg_render_picker(q, context: ContextTypes.DEFAULT_TYPE, cid: int, *, page: int | None = None, note: str | None = None):
+    draft = context.user_data.setdefault("cbg_draft", {})
+    workspace_id = draft.get("workspace_id")
+    options = _cbg_options(cid, workspace_id)
+    draft["category_options"] = {item["token"]: item["name"] for item in options}
+    if page is not None:
+        draft["page"] = max(0, int(page))
+    selected = set(draft.get("selected_tokens") or [])
+    count = len(selected)
+    title = draft.get("name") or "Бюджет из категорий"
+    lines = [
+        "🧩 Бюджет из категорий",
+        "",
+        f"Название: {title}",
+        f"Выбрано категорий: {count}",
+    ]
+    if note:
+        lines.extend(["", note])
+    if not options:
+        lines.extend(["", "Пока нет категорий расходов. Добавьте новую категорию или запишите расход."])
+    context.user_data["cbg_draft"] = draft
+    return await _safe_edit_or_reply(
+        q,
+        "\n".join(lines),
+        reply_markup=category_budget_picker_kb(options, selected, page=int(draft.get("page") or 0)),
+    )
+
+
+def _cbg_period_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Неделя", callback_data="cbgp|period|week"), InlineKeyboardButton("Месяц", callback_data="cbgp|period|month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="cbgp|back_amount"), InlineKeyboardButton("❌ Отмена", callback_data="cbgp|cancel")],
+    ])
+
+
+def _cbg_alerts_kb(enabled: bool) -> InlineKeyboardMarkup:
+    label = "✅ Оповещения включены" if enabled else "⛔ Оповещения выключены"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data="cbgp|alerts|toggle")],
+        [InlineKeyboardButton("➡️ Продолжить", callback_data="cbgp|confirm")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="cbgp|back_period"), InlineKeyboardButton("❌ Отмена", callback_data="cbgp|cancel")],
+    ])
+
+
+def _cbg_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Создать бюджет", callback_data="cbgp|save")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="cbgp|back_alerts"), InlineKeyboardButton("❌ Отмена", callback_data="cbgp|cancel")],
+    ])
+
+
+NOTIFICATION_TOGGLE_LABELS = {
+    'morning': ('Утренние уведомления', 'morning_enabled', '✅ Утро: включено', '⛔ Утро: выключено'),
+    'evening': ('Вечерние уведомления', 'evening_enabled', '✅ Вечер: включено', '⛔ Вечер: выключено'),
+    'limits': ('Оповещения лимитов', 'limit_alerts_enabled', '💰 Лимиты: включены', '💰 Лимиты: выключены'),
+    'budgets': ('Оповещения бюджетов', 'budget_alerts_enabled', '🧩 Бюджеты: включены', '🧩 Бюджеты: выключены'),
+    'subscriptions': ('Оповещения подписок', 'subscription_alerts_enabled', '🔔 Подписки: включены', '🔕 Подписки: выключены'),
+    'recurring': ('Регулярные траты', 'recurring_spend_alerts_enabled', '🔁 Регулярные траты: включены', '⛔ Регулярные траты: выключены'),
+    'weekly': ('Недельные отчёты', 'weekly_reports_enabled', '📅 Недельные отчёты: включены', '📅 Недельные отчёты: выключены'),
+    'monthly': ('Месячные отчёты', 'monthly_reports_enabled', '🗓 Месячные отчёты: включены', '🗓 Месячные отчёты: выключены'),
+}
+
+
+def _notif_label(prefs: dict, key: str) -> str:
+    _, field, on_label, off_label = NOTIFICATION_TOGGLE_LABELS[key]
+    return on_label if prefs.get(field, True) else off_label
+
+
+def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_notif_label(prefs, 'morning'), callback_data='notif_toggle|morning'),
+         InlineKeyboardButton(_notif_label(prefs, 'evening'), callback_data='notif_toggle|evening')],
+        [InlineKeyboardButton(_notif_label(prefs, 'limits'), callback_data='notif_toggle|limits'),
+         InlineKeyboardButton(_notif_label(prefs, 'budgets'), callback_data='notif_toggle|budgets')],
+        [InlineKeyboardButton(_notif_label(prefs, 'subscriptions'), callback_data='notif_toggle|subscriptions'),
+         InlineKeyboardButton(_notif_label(prefs, 'recurring'), callback_data='notif_toggle|recurring')],
+        [InlineKeyboardButton(_notif_label(prefs, 'weekly'), callback_data='notif_toggle|weekly'),
+         InlineKeyboardButton(_notif_label(prefs, 'monthly'), callback_data='notif_toggle|monthly')],
+        [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
+    ])
+
+
+async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAULT_TYPE):
+    back_dest = context.user_data.get('notification_back') or 'menu_settings'
+    if back_dest not in {'menu_settings', 'lb_hub', 'rem_menu', 'start_main'}:
+        back_dest = 'menu_settings'
+    prefs = get_notification_preferences(cid)
+    text = (
+        '🔔 Оповещения\n\n'
+        f"Утро: {prefs['morning_time']}\n"
+        f"Вечер: {prefs['evening_time']}\n"
+        f"Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}"
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=_notification_settings_markup(prefs, back_dest))
+
+
+def _quiet_hours_markup(prefs: dict) -> InlineKeyboardMarkup:
+    enabled = bool(prefs.get('quiet_hours_enabled'))
+    label = '✅ Тихие часы' if enabled else '⛔ Тихие часы'
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data='quiet|toggle')],
+        [InlineKeyboardButton('22:30', callback_data='quiet|start|22:30'), InlineKeyboardButton('23:00', callback_data='quiet|start|23:00')],
+        [InlineKeyboardButton('07:00', callback_data='quiet|end|07:00'), InlineKeyboardButton('08:00', callback_data='quiet|end|08:00')],
+        [InlineKeyboardButton('🌙 Начало', callback_data='quiet|manual|start'), InlineKeyboardButton('☀️ Конец', callback_data='quiet|manual|end')],
+        [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_notifications')],
+    ])
+
+
+def _notification_timezone_label(user_id: int) -> str:
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT COALESCE(np.timezone, uws.timezone, 'Europe/Moscow')
+              FROM public.users u
+              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
+              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
+             WHERE u.user_id=%s
+             LIMIT 1
+            """,
+            (user_id,),
+        )
+        if rows and rows[0][0]:
+            return rows[0][0]
+    except Exception:
+        pass
+    try:
+        off = get_user_tz(user_id)
+        return f"UTC{off // 60:+d}"
+    except Exception:
+        return "Europe/Moscow"
+
+
+async def _render_quiet_hours(q, cid: int):
+    prefs = get_notification_preferences(cid)
+    start = prefs.get('quiet_hours_start') or '22:30'
+    end = prefs.get('quiet_hours_end') or '08:00'
+    text = (
+        '🌙 Тихие часы\n\n'
+        f"Статус: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}\n"
+        f"Период: {start}–{end}\n"
+        f"Часовой пояс: {_notification_timezone_label(cid)}"
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=_quiet_hours_markup(prefs))
+
+
+def _delete_phrase(locale: str | None) -> str:
+    return "DELETE MY DATA" if (locale or "ru").startswith("en") else "УДАЛИТЬ МОИ ДАННЫЕ"
+
+
+async def _render_privacy_menu(q):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('🗑 Delete my data', callback_data='privacy_delete_start')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+    ])
+    return await _safe_edit_or_reply(q, '🔐 Privacy\n\nЭкспорт и удаление персональных данных.', reply_markup=kb)
+
+
+async def _render_delete_start(q, cid: int, locale: str | None):
+    phrase = _delete_phrase(locale)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('📤 Export my data', callback_data='exp_menu')],
+        [InlineKeyboardButton('🗑 Continue deletion', callback_data='privacy_delete_phrase')],
+        [InlineKeyboardButton('⬅️ Back', callback_data='privacy_menu')],
+    ])
+    text = (
+        '🗑 Delete my data\n\n'
+        'This is irreversible. Personal workspace data, reminders, limits, notification preferences, aliases, ML observations, drafts, tokens, and profile data will be deleted.\n\n'
+        'Shared group workspace policy: your membership and personal settings are removed. Shared ledger operations are retained when deleting them would alter another participant’s financial history; your actor identity is anonymized and personal raw text/comment fields are redacted where possible.\n\n'
+        f'To continue you will need to type exactly:\n{phrase}'
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=kb)
 
 
 def _cl_period_label(p: str) -> str:
@@ -936,8 +1133,125 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await _safe_edit_or_reply(q, '\n'.join(lines), reply_markup=kb)
 
     if data == 'cbg_create':
-        context.user_data['cbg_draft'] = {'step': 'name', 'period_type': 'month', 'categories': []}
+        workspace_id = _cbg_workspace_id(cid, update.effective_user.id, getattr(update.effective_chat, 'type', 'private') or 'private')
+        context.user_data['cbg_draft'] = {'step': 'name', 'period_type': 'month', 'alerts_enabled': True, 'selected_tokens': [], 'selected_categories': {}, 'workspace_id': workspace_id}
         return await _safe_edit_or_reply(q, 'Введите название бюджета из категорий.\nНапример: Повседневные траты', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='cbg_menu')]]))
+
+    if data.startswith('cbgp|'):
+        parts = data.split('|')
+        action = parts[1] if len(parts) > 1 else ''
+        draft = context.user_data.get('cbg_draft') or {}
+        if not draft:
+            return await _safe_edit_or_reply(q, 'Черновик бюджета устарел. Создайте бюджет заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🧩 К бюджетам', callback_data='cbg_menu')]]))
+        options = _cbg_options(cid, draft.get('workspace_id'))
+        option_names = {item['token']: item['name'] for item in options}
+        selected = list(dict.fromkeys(draft.get('selected_tokens') or []))
+        selected_map = dict(draft.get('selected_categories') or {})
+
+        if action == 'noop':
+            return await q.answer('Это номер страницы')
+        if action == 'p':
+            return await _cbg_render_picker(q, context, cid, page=int(parts[2] if len(parts) > 2 else 0))
+        if action == 't':
+            token = parts[2] if len(parts) > 2 else ''
+            if token not in option_names:
+                return await q.answer('Категория больше недоступна', show_alert=True)
+            if token in selected:
+                selected = [t for t in selected if t != token]
+                selected_map.pop(token, None)
+            else:
+                selected.append(token)
+                selected_map[token] = option_names[token]
+            draft['selected_tokens'] = selected
+            draft['selected_categories'] = selected_map
+            context.user_data['cbg_draft'] = draft
+            return await _cbg_render_picker(q, context, cid)
+        if action == 'all':
+            draft['selected_tokens'] = [item['token'] for item in options]
+            draft['selected_categories'] = {item['token']: item['name'] for item in options}
+            context.user_data['cbg_draft'] = draft
+            return await _cbg_render_picker(q, context, cid)
+        if action == 'clear':
+            draft['selected_tokens'] = []
+            draft['selected_categories'] = {}
+            context.user_data['cbg_draft'] = draft
+            return await _cbg_render_picker(q, context, cid)
+        if action == 'new':
+            context.user_data['await_cbg_new_category'] = True
+            return await q.message.reply_text('Введите название новой категории для этого бюджета:')
+        if action == 'cont':
+            categories = _cbg_selected_names(draft, options)
+            if not categories:
+                return await q.answer('Выберите хотя бы одну категорию', show_alert=True)
+            draft['categories'] = categories
+            draft['step'] = 'amount'
+            context.user_data['cbg_draft'] = draft
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='cbgp|back_categories'), InlineKeyboardButton('❌ Отмена', callback_data='cbgp|cancel')]])
+            return await _safe_edit_or_reply(q, 'Введите сумму бюджета.\nНапример: 42000', reply_markup=kb)
+        if action == 'back':
+            draft['step'] = 'name'
+            context.user_data['cbg_draft'] = draft
+            return await _safe_edit_or_reply(q, f"Название сохранено: {draft.get('name') or '—'}\n\nВведите другое название или нажмите Отмена.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отмена', callback_data='cbgp|cancel')]]))
+        if action == 'back_categories':
+            draft['step'] = 'categories'
+            context.user_data['cbg_draft'] = draft
+            return await _cbg_render_picker(q, context, cid)
+        if action == 'back_amount':
+            draft['step'] = 'amount'
+            context.user_data['cbg_draft'] = draft
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='cbgp|back_categories'), InlineKeyboardButton('❌ Отмена', callback_data='cbgp|cancel')]])
+            return await _safe_edit_or_reply(q, f"Сумма сохранена: {draft.get('amount') or '—'} ₽\n\nВведите сумму бюджета.", reply_markup=kb)
+        if action == 'period':
+            period = parts[2] if len(parts) > 2 else 'month'
+            if period not in {'week', 'month'}:
+                return await q.answer('Неверный период', show_alert=True)
+            draft['period_type'] = period
+            draft['step'] = 'alerts'
+            context.user_data['cbg_draft'] = draft
+            enabled = bool(draft.get('alerts_enabled', True))
+            return await _safe_edit_or_reply(q, 'Настройте оповещения по порогам бюджета.', reply_markup=_cbg_alerts_kb(enabled))
+        if action == 'back_period':
+            draft['step'] = 'period'
+            context.user_data['cbg_draft'] = draft
+            return await _safe_edit_or_reply(q, 'Выберите период бюджета.', reply_markup=_cbg_period_kb())
+        if action == 'alerts':
+            draft['alerts_enabled'] = not bool(draft.get('alerts_enabled', True))
+            context.user_data['cbg_draft'] = draft
+            return await _safe_edit_or_reply(q, 'Настройте оповещения по порогам бюджета.', reply_markup=_cbg_alerts_kb(bool(draft.get('alerts_enabled', True))))
+        if action == 'confirm':
+            categories = draft.get('categories') or _cbg_selected_names(draft, options)
+            text = (
+                'Проверьте бюджет из категорий:\n\n'
+                f"Название: {draft.get('name')}\n"
+                f"Категории: {', '.join(categories)}\n"
+                f"Сумма: {draft.get('amount')} ₽\n"
+                f"Период: {'неделя' if draft.get('period_type') == 'week' else 'месяц'}\n"
+                f"Оповещения: {'включены' if draft.get('alerts_enabled', True) else 'выключены'}"
+            )
+            return await _safe_edit_or_reply(q, text, reply_markup=_cbg_confirm_kb())
+        if action == 'back_alerts':
+            draft['step'] = 'alerts'
+            context.user_data['cbg_draft'] = draft
+            return await _safe_edit_or_reply(q, 'Настройте оповещения по порогам бюджета.', reply_markup=_cbg_alerts_kb(bool(draft.get('alerts_enabled', True))))
+        if action == 'save':
+            categories = draft.get('categories') or _cbg_selected_names(draft, options)
+            if not categories or not draft.get('amount'):
+                return await q.answer('Черновик неполный', show_alert=True)
+            group_id = create_category_budget_group(
+                user_id=cid,
+                workspace_id=draft.get('workspace_id'),
+                name=draft.get('name') or 'Бюджет из категорий',
+                amount=int(draft.get('amount')),
+                categories=categories,
+                period_type=draft.get('period_type') or 'month',
+                alerts_enabled=bool(draft.get('alerts_enabled', True)),
+            )
+            context.user_data.pop('cbg_draft', None)
+            return await _safe_edit_or_reply(q, f'✅ Бюджет из категорий создан\n\nID: {group_id}', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🧩 К бюджетам', callback_data='cbg_menu')], [InlineKeyboardButton('⬅️ Главное меню', callback_data='start_main')]]))
+        if action == 'cancel':
+            context.user_data.pop('cbg_draft', None)
+            context.user_data.pop('await_cbg_new_category', None)
+            return await _safe_edit_or_reply(q, 'Создание бюджета отменено.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🧩 К бюджетам', callback_data='cbg_menu')]]))
 
     if data == 'lb_status':
         today = date.today()
@@ -964,6 +1278,35 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'workspace_personal':
         return await q.answer('Личное пространство выбрано')
+
+    if data == 'privacy_menu':
+        return await _render_privacy_menu(q)
+
+    if data == 'privacy_delete_start':
+        locale = get_user_locale(cid)
+        context.user_data['delete_my_data'] = {'actor_user_id': update.effective_user.id, 'step': 'start', 'expires_at': unix_time() + 900}
+        return await _render_delete_start(q, cid, locale)
+
+    if data == 'privacy_delete_phrase':
+        locale = get_user_locale(cid)
+        context.user_data['delete_my_data'] = {'actor_user_id': update.effective_user.id, 'step': 'phrase', 'expires_at': unix_time() + 900, 'phrase': _delete_phrase(locale)}
+        return await q.message.reply_text(f"Введите фразу подтверждения:\n{_delete_phrase(locale)}")
+
+    if data == 'privacy_delete_cancel':
+        context.user_data.pop('delete_my_data', None)
+        return await _safe_edit_or_reply(q, 'Удаление отменено.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Privacy', callback_data='privacy_menu')]]))
+
+    if data == 'privacy_delete_confirm':
+        st = context.user_data.get('delete_my_data') or {}
+        if st.get('actor_user_id') != update.effective_user.id or st.get('step') != 'confirmed' or st.get('expires_at', 0) < unix_time():
+            context.user_data.pop('delete_my_data', None)
+            return await q.answer('Подтверждение удаления устарело. Начните заново.', show_alert=True)
+        try:
+            result = delete_user_data(update.effective_user.id)
+        except Exception:
+            return await _safe_edit_or_reply(q, 'Не удалось удалить данные безопасно. Попробуйте ещё раз позже.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Privacy', callback_data='privacy_menu')]]))
+        context.user_data.clear()
+        return await _safe_edit_or_reply(q, f'✅ Данные удалены.\n\nУдалено таблиц: {sum(1 for c in result.counts.values() if c)}\nАнонимизировано общих операций: {result.anonymized_shared_operations}\n\nСледующий /start создаст новый профиль.')
 
     if data == 'rem_menu':
         return await render_reminders_menu(q, cid, context)
@@ -1243,33 +1586,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await _safe_edit_or_reply(q, f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(amount)}", reply_markup=kb)
 
     if data == 'menu_notifications':
-        back_dest = context.user_data.get('notification_back') or 'menu_settings'
-        if back_dest not in {'menu_settings', 'lb_hub', 'rem_menu', 'start_main'}:
-            back_dest = 'menu_settings'
-        prefs = get_notification_preferences(cid)
-        morning_label = '✅ Утро: включено' if prefs['morning_enabled'] else '⛔ Утро: выключено'
-        evening_label = '✅ Вечер: включено' if prefs['evening_enabled'] else '⛔ Вечер: выключено'
-        limit_label = '💰 Лимиты: включены' if prefs['limit_alerts_enabled'] else '💰 Лимиты: выключены'
-        budget_label = '🧩 Бюджеты: включены' if prefs['budget_alerts_enabled'] else '🧩 Бюджеты: выключены'
-        sub_label = '🔔 Подписки' if prefs['subscription_alerts_enabled'] else '🔕 Подписки'
-        recurring_label = '🔁 Регулярные траты' if prefs['recurring_spend_alerts_enabled'] else '⛔ Регулярные траты'
-        text = (
-            '🔔 Оповещения\n\n'
-            f"{morning_label} — {prefs['morning_time']}\n"
-            f"{evening_label} — {prefs['evening_time']}\n\n"
-            'Настройте, какие персональные события можно присылать.'
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(morning_label, callback_data='notif_toggle|morning'), InlineKeyboardButton(prefs['morning_time'], callback_data='menu_reminder')],
-            [InlineKeyboardButton(evening_label, callback_data='notif_toggle|evening'), InlineKeyboardButton(prefs['evening_time'], callback_data='menu_reminder')],
-            [InlineKeyboardButton(limit_label, callback_data='notif_toggle|limits'), InlineKeyboardButton('⚙️ Пороги', callback_data='lb_hub')],
-            [InlineKeyboardButton(budget_label, callback_data='notif_toggle|budgets')],
-            [InlineKeyboardButton(recurring_label, callback_data='notif_toggle|recurring'), InlineKeyboardButton(sub_label, callback_data='notif_toggle|subscriptions')],
-            [InlineKeyboardButton('📅 Недельные отчёты', callback_data='notif_toggle|weekly'), InlineKeyboardButton('🗓 Месячные отчёты', callback_data='notif_toggle|monthly')],
-            [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
-            [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
-        ])
-        return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        return await _render_notification_settings(q, cid, context)
 
     if data.startswith('notif_toggle|'):
         key = data.split('|', 1)[1]
@@ -1277,12 +1594,35 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             enabled = toggle_notification_preference(cid, key)
         except Exception:
             return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
-        await q.answer('Включено' if enabled else 'Выключено')
-        q.data = 'menu_notifications'
-        return await callback_handler(update, context)
+        label = NOTIFICATION_TOGGLE_LABELS.get(key, ('Оповещения', '', '', ''))[0]
+        await q.answer(f'{label} {"включены" if enabled else "выключены"}')
+        return await _render_notification_settings(q, cid, context)
 
     if data == 'notif_quiet_hours':
-        return await q.answer('Тихие часы готовы в backend-схеме и будут вынесены в отдельный экран.', show_alert=True)
+        return await _render_quiet_hours(q, cid)
+
+    if data.startswith('quiet|'):
+        parts = data.split('|')
+        action = parts[1] if len(parts) > 1 else ''
+        try:
+            if action == 'toggle':
+                enabled = toggle_quiet_hours(cid)
+                await q.answer('Тихие часы включены' if enabled else 'Тихие часы выключены')
+                return await _render_quiet_hours(q, cid)
+            if action in {'start', 'end'} and len(parts) > 2:
+                set_quiet_hours_time(cid, action, parts[2])
+                await q.answer('Время сохранено')
+                return await _render_quiet_hours(q, cid)
+            if action == 'manual' and len(parts) > 2:
+                field = parts[2]
+                if field not in {'start', 'end'}:
+                    return await q.answer('Неверное поле', show_alert=True)
+                context.user_data['await_quiet_hours_time'] = {'field': field}
+                return await q.message.reply_text('Введите время в формате HH:MM')
+        except ValueError:
+            return await q.answer('Введите время в формате HH:MM', show_alert=True)
+        except Exception:
+            return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
 
     if data == 'quick_sugg_off':
         set_quick_suggestions_enabled(cid, False)

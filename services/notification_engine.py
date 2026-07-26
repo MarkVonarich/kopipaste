@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any
 
 
@@ -46,6 +46,28 @@ class NotificationPreferences:
     quiet_hours_end: time | None = None
 
 
+def _parse_time(value: str | time | None) -> time | None:
+    if value is None or isinstance(value, time):
+        return value
+    hour, minute = value.split(":", 1)
+    return time(int(hour), int(minute))
+
+
+def preferences_from_dict(values: dict) -> NotificationPreferences:
+    return NotificationPreferences(
+        morning_enabled=bool(values.get("morning_enabled", True)),
+        evening_enabled=bool(values.get("evening_enabled", True)),
+        limit_alerts_enabled=bool(values.get("limit_alerts_enabled", True)),
+        budget_alerts_enabled=bool(values.get("budget_alerts_enabled", True)),
+        subscription_alerts_enabled=bool(values.get("subscription_alerts_enabled", True)),
+        recurring_spend_alerts_enabled=bool(values.get("recurring_spend_alerts_enabled", True)),
+        weekly_reports_enabled=bool(values.get("weekly_reports_enabled", True)),
+        monthly_reports_enabled=bool(values.get("monthly_reports_enabled", True)),
+        quiet_hours_start=_parse_time(values.get("quiet_hours_start")),
+        quiet_hours_end=_parse_time(values.get("quiet_hours_end")),
+    )
+
+
 def is_quiet_time(local_dt: datetime, prefs: NotificationPreferences) -> bool:
     start = prefs.quiet_hours_start
     end = prefs.quiet_hours_end
@@ -55,6 +77,22 @@ def is_quiet_time(local_dt: datetime, prefs: NotificationPreferences) -> bool:
     if start <= end:
         return start <= current < end
     return current >= start or current < end
+
+
+def quiet_hours_end_datetime(local_dt: datetime, prefs: NotificationPreferences) -> datetime | None:
+    if not is_quiet_time(local_dt, prefs) or not prefs.quiet_hours_end:
+        return None
+    end = prefs.quiet_hours_end
+    candidate = local_dt.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+    if candidate <= local_dt:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def should_send_now(local_dt: datetime, prefs: NotificationPreferences, *, manual_preview: bool = False) -> bool:
+    if manual_preview:
+        return True
+    return not is_quiet_time(local_dt, prefs)
 
 
 def preference_allows(fact: NotificationFact, prefs: NotificationPreferences) -> bool:

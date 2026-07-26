@@ -101,7 +101,7 @@ def test_main_menu_settings_button_opens_settings(monkeypatch):
     query, context = _run_callback(monkeypatch, "menu_settings")
     assert query.answers
     assert "Настройки" in _last_text(query)
-    assert {"menu_currency", "menu_reminder", "menu_notifications", "menu_tz", "workspace_menu", "start_main"} <= set(_last_callbacks(query))
+    assert {"menu_currency", "menu_reminder", "menu_notifications", "menu_tz", "workspace_menu", "privacy_menu", "start_main"} <= set(_last_callbacks(query))
     assert context.user_data["notification_back"] == "menu_settings"
 
 
@@ -163,7 +163,7 @@ def test_public_keyboards_emit_handled_callbacks_and_no_legacy_main_menu():
     direct_handlers = {
         "menu_examples", "lb_hub", "rem_menu", "exp_menu", "menu_settings", "menu_help",
         "lim_list", "gl_menu", "cbg_menu", "lb_status", "menu_notifications", "start_main",
-        "menu_currency", "menu_reminder", "workspace_menu", "menu_tz", "menu_support",
+        "menu_currency", "menu_reminder", "workspace_menu", "privacy_menu", "menu_tz", "menu_support",
         "exp_today", "exp_7", "exp_14", "exp_m", "exp_pm", "exp_y", "exp_py", "exp_custom",
         "rem_add", "rem_all",
     }

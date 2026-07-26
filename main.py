@@ -19,6 +19,7 @@ from settings import TELEGRAM_TOKEN
 
 from routers.commands import (
     cmd_start, cmd_settings, cmd_help, cmd_budget, cmd_export, cmd_about, cmd_limits,
+    cmd_delete_my_data,
     cmd_mlstats, cmd_mltrain, on_startup,
     cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
     cmd_admin_category_learning_debug,
@@ -26,6 +27,11 @@ from routers.commands import (
     cmd_admin_activity_status,
     cmd_reminders,
     cmd_admin_reminders_preview,
+    cmd_admin_limit_alert_preview,
+    cmd_admin_delete_data_dry_run,
+    cmd_admin_notification_preview,
+    cmd_admin_recurring_spend_preview,
+    cmd_admin_subscription_preview,
 )
 from routers.callbacks import callback_handler
 from routers.messages import handle_text, handle_location, handle_photo, handle_voice
@@ -65,6 +71,8 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("delete_my_data", cmd_delete_my_data))
+    app.add_handler(CommandHandler("delete", cmd_delete_my_data))
     app.add_handler(CommandHandler("budget", cmd_budget))
     app.add_handler(CommandHandler("limits", cmd_limits))
     app.add_handler(CommandHandler("export", cmd_export))
@@ -79,6 +87,11 @@ def main():
     app.add_handler(CommandHandler("admin_category_learning_debug", cmd_admin_category_learning_debug))
     app.add_handler(CommandHandler("admin_voice_status", cmd_admin_voice_status))
     app.add_handler(CommandHandler("admin_activity_status", cmd_admin_activity_status))
+    app.add_handler(CommandHandler("admin_notification_preview", cmd_admin_notification_preview))
+    app.add_handler(CommandHandler("admin_subscription_preview", cmd_admin_subscription_preview))
+    app.add_handler(CommandHandler("admin_recurring_spend_preview", cmd_admin_recurring_spend_preview))
+    app.add_handler(CommandHandler("admin_limit_alert_preview", cmd_admin_limit_alert_preview))
+    app.add_handler(CommandHandler("admin_delete_data_dry_run", cmd_admin_delete_data_dry_run))
 
     # ✅ patterns ^sugg_… раньше общего callback_handler
     register_suggestions(app)

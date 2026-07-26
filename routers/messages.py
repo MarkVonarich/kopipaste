@@ -28,9 +28,12 @@ from db.queries import update_last_operation_fields, update_operation_fields_by_
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
-from services.budgeting import create_category_budget_group, upsert_general_limit
+from services.budgeting import create_category_budget_group, list_active_expense_categories, upsert_general_limit
+from services.notification_preferences import set_quiet_hours_time
+from ui.keyboards import category_budget_picker_kb
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
+from time import time as unix_time
 
 log = logging.getLogger(__name__)
 try:
@@ -76,6 +79,11 @@ def _parse_budget_amount(text: str) -> int | None:
     if not t.isdigit():
         return None
     return int(t)
+
+
+def _cbg_picker_markup(user_id: int, workspace_id: int | None, selected_tokens: set[str], page: int = 0):
+    options = [item.__dict__ for item in list_active_expense_categories(user_id=user_id, workspace_id=workspace_id)]
+    return options, category_budget_picker_kb(options, selected_tokens, page=page)
 
 
 def _parse_reminder_title_amount(text: str) -> tuple[str, int] | None:
@@ -668,6 +676,23 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     cid  = update.effective_chat.id
     emsg = update.effective_message
 
+    delete_state = context.user_data.get('delete_my_data')
+    if isinstance(delete_state, dict) and delete_state.get('step') == 'phrase':
+        if delete_state.get('actor_user_id') != update.effective_user.id or delete_state.get('expires_at', 0) < unix_time():
+            context.user_data.pop('delete_my_data', None)
+            return await emsg.reply_text('Подтверждение удаления устарело. Начните заново через /delete_my_data.')
+        phrase = delete_state.get('phrase') or 'УДАЛИТЬ МОИ ДАННЫЕ'
+        if text.strip() != phrase:
+            return await emsg.reply_text(f'Фраза не совпала. Введите точно:\n{phrase}')
+        delete_state['step'] = 'confirmed'
+        delete_state['expires_at'] = unix_time() + 300
+        context.user_data['delete_my_data'] = delete_state
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('🗑 Permanently delete', callback_data='privacy_delete_confirm')],
+            [InlineKeyboardButton('❌ Cancel', callback_data='privacy_delete_cancel')],
+        ])
+        return await emsg.reply_text('Фраза подтверждена. Последний шаг:', reply_markup=kb)
+
     if context.user_data.get('await_group_custom_category'):
         st = context.user_data.get('await_group_custom_category') or {}
         if not isinstance(st, dict):
@@ -761,6 +786,28 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
         return await emsg.reply_text(f'✅ Общий лимит создан: {amount} ₽\nID: {limit_id}', reply_markup=kb)
 
+    if context.user_data.pop('await_cbg_new_category', False):
+        draft = context.user_data.get('cbg_draft') or {}
+        workspace_id = draft.get('workspace_id')
+        try:
+            result = get_or_create_custom_category(workspace_id=workspace_id, user_id=cid, op_type='Расходы', name=text)
+        except ValueError:
+            context.user_data['await_cbg_new_category'] = True
+            return await emsg.reply_text('Введите непустое название категории.')
+        token = f"c{result.category_id}" if result.category_id is not None else None
+        if token:
+            selected = list(dict.fromkeys((draft.get('selected_tokens') or []) + [token]))
+            selected_map = dict(draft.get('selected_categories') or {})
+            selected_map[token] = result.name
+            draft['selected_tokens'] = selected
+            draft['selected_categories'] = selected_map
+        draft['step'] = 'categories'
+        context.user_data['cbg_draft'] = draft
+        options, kb = _cbg_picker_markup(cid, workspace_id, set(draft.get('selected_tokens') or []), int(draft.get('page') or 0))
+        draft['category_options'] = {item['token']: item['name'] for item in options}
+        context.user_data['cbg_draft'] = draft
+        return await emsg.reply_text(f'Категория добавлена: {result.name}\n\nВыбрано категорий: {len(draft.get("selected_tokens") or [])}', reply_markup=kb)
+
     if context.user_data.get('cbg_draft'):
         draft = context.user_data.get('cbg_draft') or {}
         step = draft.get('step')
@@ -768,35 +815,29 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             name = (text or '').strip()[:120]
             if not name:
                 return await emsg.reply_text('Введите название бюджета.')
+            if 'workspace_id' not in draft:
+                draft['workspace_id'] = resolve_workspace(cid, update.effective_user.id, getattr(update.effective_chat, 'type', 'private') or 'private').workspace_id
             draft['name'] = name
             draft['step'] = 'categories'
+            draft.setdefault('selected_tokens', [])
+            draft.setdefault('selected_categories', {})
             context.user_data['cbg_draft'] = draft
-            return await emsg.reply_text('Введите категории через запятую.\nНапример: Продукты, Заведения, Аптеки')
-        if step == 'categories':
-            cats = [c.strip() for c in (text or '').split(',') if c.strip()]
-            unique = list(dict.fromkeys(cats))
-            if not unique:
-                return await emsg.reply_text('Нужна хотя бы одна категория.')
-            draft['categories'] = unique
-            draft['step'] = 'amount'
+            options, kb = _cbg_picker_markup(cid, draft.get('workspace_id'), set(draft.get('selected_tokens') or []), int(draft.get('page') or 0))
+            draft['category_options'] = {item['token']: item['name'] for item in options}
             context.user_data['cbg_draft'] = draft
-            return await emsg.reply_text('Введите сумму бюджета.\nНапример: 42000')
+            return await emsg.reply_text(f'Выберите категории для бюджета.\n\nВыбрано категорий: {len(draft.get("selected_tokens") or [])}', reply_markup=kb)
         if step == 'amount':
             amount = _parse_amount_input(text)
             if amount is None:
                 return await emsg.reply_text('⚠️ Введите сумму числом, например: 42000')
-            group_id = create_category_budget_group(
-                user_id=cid,
-                workspace_id=None,
-                name=draft.get('name') or 'Бюджет из категорий',
-                amount=amount,
-                categories=draft.get('categories') or [],
-                period_type=draft.get('period_type') or 'month',
-            )
-            context.user_data.pop('cbg_draft', None)
-            cats = ', '.join(draft.get('categories') or [])
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
-            return await emsg.reply_text(f'✅ Бюджет из категорий создан\n\n{draft.get("name")} — {amount} ₽\nКатегории: {cats}\nID: {group_id}', reply_markup=kb)
+            draft['amount'] = amount
+            draft['step'] = 'period'
+            context.user_data['cbg_draft'] = draft
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Неделя', callback_data='cbgp|period|week'), InlineKeyboardButton('Месяц', callback_data='cbgp|period|month')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='cbgp|back_categories'), InlineKeyboardButton('❌ Отмена', callback_data='cbgp|cancel')],
+            ])
+            return await emsg.reply_text('Выберите период бюджета.', reply_markup=kb)
 
     if context.user_data.get('await_rem_title_amount'):
         log.info('reminder_wizard_text state=await_rem_title_amount user=%s', cid)
@@ -1025,6 +1066,19 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         update_user_field(cid, 'reminder_hour', hour)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
         return await emsg.reply_text(f"✅ Напоминание каждый день в {hour:02d}:00", reply_markup=kb)
+
+    quiet_time_state = context.user_data.pop('await_quiet_hours_time', None)
+    if quiet_time_state:
+        field = quiet_time_state.get('field')
+        try:
+            prefs = set_quiet_hours_time(cid, field, text.strip())
+        except Exception:
+            context.user_data['await_quiet_hours_time'] = quiet_time_state
+            return await emsg.reply_text('⚠️ Введите время в формате HH:MM, например 22:30')
+        start = prefs.get('quiet_hours_start') or '22:30'
+        end = prefs.get('quiet_hours_end') or '08:00'
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')]])
+        return await emsg.reply_text(f'✅ Тихие часы обновлены: {start}–{end}', reply_markup=kb)
 
     if context.user_data.pop('setting_week', False):
         if not re.fullmatch(r'\d+', text.strip()):
