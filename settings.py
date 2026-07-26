@@ -59,3 +59,7 @@ VOICE_INPUT_ENABLED = _parse_bool("VOICE_INPUT_ENABLED", True)
 VOICE_TRANSCRIBE_PROVIDER = os.getenv("VOICE_TRANSCRIBE_PROVIDER", "openai").strip().lower() or "openai"
 VOICE_TRANSCRIBE_MODEL = os.getenv("VOICE_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
 VOICE_MAX_SECONDS = int(os.getenv("VOICE_MAX_SECONDS", "60") or "60")
+
+# Optional analytics foundation settings. Missing HMAC secret must not break the bot.
+ANALYTICS_HMAC_SECRET = os.getenv("ANALYTICS_HMAC_SECRET", "").strip()
+ANALYTICS_OUTBOX_MAX_ATTEMPTS = int(os.getenv("ANALYTICS_OUTBOX_MAX_ATTEMPTS", "8") or "8")
