@@ -43,6 +43,9 @@ from services.budgeting import create_category_budget_group, list_active_expense
 from services.i18n import t
 from services.notification_preferences import get_notification_preferences, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
 from services.personal_data_deletion import delete_financial_history, delete_user_data, history_period_bounds, preview_delete_financial_history
+from services.analytics_privacy import apply_account_deletion
+from services.product_events import ProductEvent, track_product_event
+from services.security_events import SecurityEvent, track_security_event
 import tempfile
 import os
 from time import time as unix_time
@@ -283,6 +286,15 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
     if not draft:
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
     if draft.get('status') == 'wrong_actor':
+        track_security_event(SecurityEvent(
+            event_name="foreign_draft_access",
+            user_id=actor_user_id,
+            workspace_id=draft.get("workspace_id"),
+            chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
+            rule_key="group_draft_actor",
+            action_taken="denied",
+            metadata={"handler": "group_draft_callback"},
+        ))
         return await q.answer('Only the person who started this operation can finish it.', show_alert=True)
     if draft.get('status') not in {'draft', 'committed'}:
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
@@ -321,6 +333,15 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
         return await q.answer('This operation draft has expired. Send the operation again.', show_alert=True)
     workspace = resolve_workspace(draft['chat_id'], actor_user_id, getattr(update.effective_chat, 'type', 'group'))
     if not workspace.is_configured or workspace.role not in {'owner', 'admin', 'member'}:
+        track_security_event(SecurityEvent(
+            event_name="foreign_workspace_access",
+            user_id=actor_user_id,
+            workspace_id=workspace.workspace_id,
+            chat_type=getattr(update.effective_chat, 'type', 'group') or 'group',
+            rule_key="group_draft_workspace",
+            action_taken="denied",
+            metadata={"handler": "group_draft_callback"},
+        ))
         return await q.answer('You do not have permission to add operations in this workspace.', show_alert=True)
     result = commit_operation_draft(
         draft_id=draft_id,
@@ -1002,8 +1023,22 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not chat or getattr(chat, 'type', 'private') not in {'group', 'supergroup'}:
             return await q.answer('Эта настройка доступна только в группе.', show_alert=True)
         if not await _is_group_admin(context, chat.id, user.id):
+            track_security_event(SecurityEvent(
+                event_name="admin_command_denied",
+                user_id=user.id,
+                chat_type=getattr(chat, 'type', None),
+                rule_key="group_setup",
+                action_taken="denied",
+            ))
             return await q.answer('Создать пространство может только администратор группы.', show_alert=True)
         workspace_id = create_group_workspace(chat.id, user.id, getattr(chat, 'title', None))
+        track_product_event(ProductEvent(
+            event_name="workspace_created",
+            user_id=user.id,
+            workspace_id=workspace_id,
+            workspace_kind="group",
+            status="success",
+        ))
         await q.answer('Пространство создано')
         return await _safe_edit_or_reply(
             q,
@@ -1016,8 +1051,23 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not chat or getattr(chat, 'type', 'private') not in {'group', 'supergroup'}:
             return await q.answer('Присоединиться можно только из группы.', show_alert=True)
         if not await _is_group_active_member(context, chat.id, user.id):
+            track_security_event(SecurityEvent(
+                event_name="group_join_rejected",
+                user_id=user.id,
+                chat_type=getattr(chat, 'type', None),
+                rule_key="telegram_membership",
+                action_taken="denied",
+            ))
+            track_product_event(ProductEvent(event_name="workspace_join_rejected", user_id=user.id, workspace_kind="group", status="rejected"))
             return await q.answer('Не вижу вас активным участником этой группы.', show_alert=True)
         workspace = join_group_workspace(chat.id, user.id)
+        track_product_event(ProductEvent(
+            event_name="workspace_joined",
+            user_id=user.id,
+            workspace_id=workspace.workspace_id,
+            workspace_kind=workspace.kind,
+            status="success",
+        ))
         await q.answer('Готово')
         return await _safe_edit_or_reply(
             q,
@@ -1119,6 +1169,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'onb_finish':
         context.user_data.pop('onb', None)
+        track_product_event(ProductEvent(event_name="onboarding_completed", user_id=cid, status="success"))
         txt = (
             "Готово! Можете сразу писать мне операции, например:\n"
             "• молоко 150\n• пицца 450 вчера\n• зарплата 50000\n\n"
@@ -1353,6 +1404,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
         context.user_data.pop('history_delete_confirm', None)
         context.user_data.pop('history_delete_wizard', None)
+        track_product_event(ProductEvent(event_name="privacy_opened", user_id=update.effective_user.id, status="success"))
         return await _render_privacy_menu(q, locale)
 
     if data == 'hist|menu':
@@ -1412,6 +1464,12 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
                 )
             result = delete_financial_history(update.effective_user.id, start_date, end_date)
+            track_product_event(ProductEvent(
+                event_name="financial_history_deleted",
+                user_id=update.effective_user.id,
+                status="success",
+                properties={"operation_count": result.operation_count},
+            ))
         except Exception as e:
             context.user_data.pop('history_delete_confirm', None)
             log.warning(
@@ -1462,6 +1520,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('delete_my_data', None)
             return await q.answer(t('privacy.stale', locale), show_alert=True)
         try:
+            apply_account_deletion(update.effective_user.id)
             delete_user_data(update.effective_user.id)
         except Exception as e:
             log.warning('personal_data_delete_failed user_id=%s reason=%s', update.effective_user.id, type(e).__name__)
@@ -2623,6 +2682,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             if not export_state_has_period(context.user_data):
                 clear_export_wait_flags(context.user_data)
                 return await _safe_edit_or_reply(q, '📤 Сессия экспорта устарела. Выбери период заново.', reply_markup=_export_menu_kb())
+            track_product_event(ProductEvent(event_name="export_started", user_id=update.effective_user.id, status="started", entity_type="export"))
             return await _export_preview(q, context, cid)
 
         if not export_state_has_period(context.user_data):
@@ -2638,6 +2698,13 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             with open(p, 'rb') as f:
                 await context.bot.send_document(chat_id=cid, document=f, filename=fname, caption=f'📤 Экспорт готов\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {st.get("count", 0)}')
             log.info('export_xlsx_generated rows=%s user_id=%s', st.get('count', 0), cid)
+            track_product_event(ProductEvent(
+                event_name="export_completed",
+                user_id=update.effective_user.id,
+                status="success",
+                entity_type="export",
+                properties={"row_count": int(st.get("count", 0)), "period_days": (dto - dfrom).days + 1},
+            ))
             await q.answer('Готово')
             workspace = 'Личное пространство'
             context.user_data.pop('export_state', None)
@@ -2650,6 +2717,13 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             log.warning('export_send_failed reason=%s user_id=%s', type(e).__name__, cid)
+            track_product_event(ProductEvent(
+                event_name="export_failed",
+                user_id=update.effective_user.id,
+                status="failed",
+                entity_type="export",
+                properties={"error_code": type(e).__name__.lower()},
+            ))
             await q.answer('Ошибка', show_alert=True)
         finally:
             if os.path.exists(p):
@@ -2747,6 +2821,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     # Удаление последней записи
     if data == 'del_last':
         delete_last_operation(cid)
+        track_product_event(ProductEvent(event_name="operation_deleted", user_id=update.effective_user.id, status="success", entity_type="operation"))
         return await q.edit_message_text('🟦 Последняя запись этого чата удалена.')
 
     # Короткие статусы
@@ -2828,6 +2903,14 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         data,
         getattr(update.effective_chat, 'type', None),
     )
+    track_security_event(SecurityEvent(
+        event_name="unknown_callback",
+        user_id=update.effective_user.id if update.effective_user else None,
+        chat_type=getattr(update.effective_chat, 'type', None),
+        rule_key="callback_handler",
+        action_taken="main_menu_fallback",
+        metadata={"callback_prefix": (data or "").split("|", 1)[0][:32]},
+    ))
     try:
         await q.answer('Кнопка устарела. Открываю главное меню.', show_alert=False)
     except Exception:

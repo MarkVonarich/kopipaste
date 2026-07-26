@@ -32,6 +32,7 @@ from routers.commands import (
     cmd_admin_notification_preview,
     cmd_admin_recurring_spend_preview,
     cmd_admin_subscription_preview,
+    cmd_admin_analytics_status,
 )
 from routers.callbacks import callback_handler
 from routers.messages import handle_text, handle_location, handle_photo, handle_voice
@@ -92,6 +93,7 @@ def main():
     app.add_handler(CommandHandler("admin_recurring_spend_preview", cmd_admin_recurring_spend_preview))
     app.add_handler(CommandHandler("admin_limit_alert_preview", cmd_admin_limit_alert_preview))
     app.add_handler(CommandHandler("admin_delete_data_dry_run", cmd_admin_delete_data_dry_run))
+    app.add_handler(CommandHandler("admin_analytics_status", cmd_admin_analytics_status))
 
     # ✅ patterns ^sugg_… раньше общего callback_handler
     register_suggestions(app)

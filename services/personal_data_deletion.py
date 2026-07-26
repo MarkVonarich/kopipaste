@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from psycopg2 import errors
 
 from db.database import get_conn
+from services.analytics_privacy import apply_history_deletion
 
 
 PERSONAL_TABLES = {
@@ -177,6 +178,10 @@ def delete_financial_history(user_id: int, start_date: date | None, end_date: da
             if not operation_ids:
                 conn.rollback()
                 return HistoryDeletionResult(user_id, start_date, end_date, 0, counts, deleted=True)
+            try:
+                counts["analytics_product_event_links"] = apply_history_deletion(operation_ids)
+            except Exception:
+                counts["analytics_product_event_links"] = 0
 
             related_tables = [
                 ("financial_activity_events", "operation_id"),

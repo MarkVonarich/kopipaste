@@ -7,6 +7,7 @@ from psycopg2.extras import Json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
 from services.ml_prep import normalize_alias_text
+from services.product_events import ProductEvent, track_product_event
 import math
 
 
@@ -412,6 +413,14 @@ def update_last_operation_fields(user_id: int, *, amount: int | None = None, cat
             r = cur.fetchone()
             out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
         conn.commit()
+        track_product_event(ProductEvent(
+            event_name="operation_edited",
+            user_id=user_id,
+            status="success",
+            entity_type="operation",
+            entity_id=op_id,
+            properties={"changed_fields": [name for name, val in {"amount": amount, "category": category, "op_date": op_date, "op_type": op_type, "comment": comment}.items() if val is not None]},
+        ))
         return out
     except Exception:
         conn.rollback()
@@ -447,6 +456,14 @@ def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: in
             r = cur.fetchone()
             out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
         conn.commit()
+        track_product_event(ProductEvent(
+            event_name="operation_edited",
+            user_id=user_id,
+            status="success",
+            entity_type="operation",
+            entity_id=operation_id,
+            properties={"changed_fields": [name for name, val in {"amount": amount, "category": category, "op_date": op_date, "op_type": op_type, "comment": comment}.items() if val is not None]},
+        ))
         return out
     except Exception:
         conn.rollback()

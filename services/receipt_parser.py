@@ -5,9 +5,12 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import List
+
+from services.api_usage import ApiUsageEvent, track_api_usage
 
 log = logging.getLogger("finbot.receipt")
 
@@ -232,6 +235,7 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
 
     client = OpenAI(api_key=api_key, timeout=30)
     b64 = base64.b64encode(image_bytes).decode('utf-8')
+    started = time.monotonic()
 
     try:
         log.info('receipt_ocr: provider=openai started user=%s bytes=%s model=%s', user_id, len(image_bytes), model)
@@ -253,13 +257,45 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
     except Exception as e:
         request_id = getattr(e, 'request_id', None)
         log.warning('receipt_ocr: failed reason=%s warning=%s status=%s code=%s request_id=%s', type(e).__name__, _classify_provider_error(e), getattr(e, 'status_code', None), getattr(e, 'code', None), request_id)
+        track_api_usage(ApiUsageEvent(
+            provider="openai",
+            model=model,
+            feature="receipt_ocr",
+            status="failed",
+            user_id=user_id,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            error_code=_classify_provider_error(e),
+            metadata={"request_id_present": bool(request_id), "image_bytes": len(image_bytes)},
+        ))
         return ParseResult(configured=True, candidates=[], warning=_classify_provider_error(e))
 
     if data is None:
         log.warning('receipt_ocr: malformed_json user=%s bytes=%s model=%s', user_id, len(image_bytes), model)
+        track_api_usage(ApiUsageEvent(
+            provider="openai",
+            model=model,
+            feature="receipt_ocr",
+            status="failed",
+            user_id=user_id,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            error_code="malformed_response",
+            metadata={"image_bytes": len(image_bytes)},
+        ))
         return ParseResult(configured=True, candidates=[], warning='malformed_response')
 
     out, warning = candidates_from_provider_payload(data)
     ignored = data.get('ignored_rows') or []
     log.info('receipt_ocr: parsed candidates=%s ignored=%s warning=%s user=%s', len(out), len(ignored), warning, user_id)
+    usage = getattr(resp, "usage", None)
+    track_api_usage(ApiUsageEvent(
+        provider="openai",
+        model=model,
+        feature="receipt_ocr",
+        status="success" if out else "empty",
+        user_id=user_id,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        input_tokens=getattr(usage, "input_tokens", None) if usage else None,
+        output_tokens=getattr(usage, "output_tokens", None) if usage else None,
+        metadata={"candidate_count": len(out), "ignored_count": len(ignored), "warning": warning or "none", "image_bytes": len(image_bytes)},
+    ))
     return ParseResult(configured=True, candidates=out, warning=warning)
