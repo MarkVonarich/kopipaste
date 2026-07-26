@@ -7,7 +7,8 @@ from telegram.ext import ContextTypes
 
 from .daily import evening_reminder_job, weekly_report_job, monthly_report_job, smart_morning_limit_job, user_reminders_job
 from services.currency import update_fx_rates
-from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER, ENABLE_SMART_MORNING_LIMITS
+from services.posthog_exporter import export_job_run, load_posthog_config
+from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER, ENABLE_SMART_MORNING_LIMITS, POSTHOG_EXPORT_INTERVAL_SECONDS
 
 log = logging.getLogger("finbot.scheduler")
 
@@ -25,6 +26,13 @@ async def fx_update_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         # считаем это не критикой для работы бота в целом
         log.exception("fx_update: failed: %s", e)
+
+
+async def posthog_outbox_export_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await asyncio.to_thread(export_job_run)
+    except Exception as e:
+        log.warning("posthog_export: failed reason=%s", type(e).__name__)
 
 
 def register_jobs(app):
@@ -68,3 +76,15 @@ def register_jobs(app):
         log.info('Skipped job "smart_morning_limit" by feature flag')
     app.job_queue.run_repeating(user_reminders_job, interval=300, first=260, name="user_reminders_job")
     log.info('Added job "user_reminders_job"')
+
+    posthog_config = load_posthog_config()
+    if posthog_config.can_send:
+        app.job_queue.run_repeating(
+            posthog_outbox_export_job,
+            interval=max(10, int(POSTHOG_EXPORT_INTERVAL_SECONDS)),
+            first=300,
+            name="posthog_outbox_export",
+        )
+        log.info('Added job "posthog_outbox_export"')
+    else:
+        log.info('Skipped job "posthog_outbox_export" reason=%s', posthog_config.error_code)

@@ -35,6 +35,7 @@ from services.acquisition import capture_acquisition
 from services.product_events import ProductEvent, track_product_event
 from services.security_events import SecurityEvent, track_security_event
 from scripts.analytics_status import analytics_status_counts, render_status
+from services.posthog_exporter import export_status_counts
 
 
 async def on_startup(app):
@@ -409,3 +410,40 @@ async def cmd_admin_analytics_status(update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(render_status(analytics_status_counts()))
     except Exception as exc:
         await update.message.reply_text(f"analytics_status unavailable: {type(exc).__name__}")
+
+
+async def cmd_admin_posthog_status(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_posthog_status", action_taken="denied"))
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    try:
+        counts = export_status_counts()
+        lines = [
+            f"export_enabled: {counts['enabled']}",
+            f"pending: {counts['pending']}",
+            f"retrying: {counts['retrying']}",
+            f"sent: {counts['sent']}",
+            f"dead_letter: {counts['dead_letter']}",
+            f"last_successful_export: {counts['last_sent_timestamp']}",
+            f"last_safe_error_code: {counts['last_safe_error_code']}",
+        ]
+        await update.message.reply_text("\n".join(lines))
+    except Exception as exc:
+        await update.message.reply_text(f"posthog_status unavailable: {type(exc).__name__}")
+
+
+async def cmd_admin_posthog_test_event(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_posthog_test_event", action_taken="denied"))
+        return await update.message.reply_text('⛔ Команда только для администратора.')
+    event_id = track_product_event(ProductEvent(
+        event_name="posthog_connection_test",
+        user_id=update.effective_user.id,
+        source="admin_test",
+        status="success",
+        properties={"test": True},
+    ))
+    if event_id:
+        await update.message.reply_text("PostHog test event queued through the normal outbox. It has not necessarily been sent yet.")
+    else:
+        await update.message.reply_text("PostHog test event could not be queued locally; check analytics schema/status.")
