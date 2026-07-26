@@ -42,10 +42,11 @@ from services.budgeting import build_budget_status, list_category_budget_groups,
 from services.budgeting import create_category_budget_group, list_active_expense_categories
 from services.i18n import t
 from services.notification_preferences import get_notification_preferences, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
-from services.personal_data_deletion import delete_user_data
+from services.personal_data_deletion import delete_financial_history, delete_user_data, history_period_bounds, preview_delete_financial_history
 import tempfile
 import os
 from time import time as unix_time
+from secrets import token_urlsafe
 
 log = logging.getLogger(__name__)
 
@@ -576,32 +577,101 @@ async def _render_quiet_hours(q, cid: int):
     return await _safe_edit_or_reply(q, text, reply_markup=_quiet_hours_markup(prefs))
 
 
-def _delete_phrase(locale: str | None) -> str:
-    return "DELETE MY DATA" if (locale or "ru").startswith("en") else "УДАЛИТЬ МОИ ДАННЫЕ"
+def _privacy_locale(user_id: int, telegram_language_code: str | None = None) -> str:
+    from services.i18n import resolve_locale
+    try:
+        rows = pg_fetchall("SELECT locale FROM public.users WHERE user_id=%s LIMIT 1", (user_id,))
+        saved = rows[0][0] if rows else None
+    except Exception:
+        saved = None
+    return resolve_locale(saved, telegram_language_code)
 
 
-async def _render_privacy_menu(q):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('🗑 Delete my data', callback_data='privacy_delete_start')],
-        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
+def _period_label(start_date: date | None, end_date: date | None, locale: str) -> str:
+    if start_date is None and end_date is None:
+        return t('privacy.period.all', locale)
+    fmt = "%d.%m.%Y"
+    if start_date == end_date:
+        return start_date.strftime(fmt)
+    return f"{start_date.strftime(fmt)} — {end_date.strftime(fmt)}"
+
+
+def _history_period_kb(locale: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t('privacy.period.today', locale), callback_data='hist|period|today'),
+         InlineKeyboardButton(t('privacy.period.last7', locale), callback_data='hist|period|last7')],
+        [InlineKeyboardButton(t('privacy.period.this_month', locale), callback_data='hist|period|this_month'),
+         InlineKeyboardButton(t('privacy.period.prev_month', locale), callback_data='hist|period|prev_month')],
+        [InlineKeyboardButton(t('privacy.period.this_year', locale), callback_data='hist|period|this_year'),
+         InlineKeyboardButton(t('privacy.period.all', locale), callback_data='hist|period|all')],
+        [InlineKeyboardButton(t('privacy.period.custom', locale), callback_data='hist|custom|start')],
+        [InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')],
     ])
-    return await _safe_edit_or_reply(q, '🔐 Privacy\n\nЭкспорт и удаление персональных данных.', reply_markup=kb)
+
+
+async def _render_privacy_menu(q, locale: str):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(t('privacy.export_data', locale), callback_data='exp_menu')],
+        [InlineKeyboardButton(t('privacy.clear_history', locale), callback_data='hist|menu')],
+        [InlineKeyboardButton(t('privacy.delete_account', locale), callback_data='privacy_delete_start')],
+        [InlineKeyboardButton(t('privacy.back', locale), callback_data='menu_settings')],
+    ])
+    return await _safe_edit_or_reply(q, f"{t('privacy.title', locale)}\n\n{t('privacy.body', locale)}", reply_markup=kb)
 
 
 async def _render_delete_start(q, cid: int, locale: str | None):
-    phrase = _delete_phrase(locale)
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('📤 Export my data', callback_data='exp_menu')],
-        [InlineKeyboardButton('🗑 Continue deletion', callback_data='privacy_delete_phrase')],
-        [InlineKeyboardButton('⬅️ Back', callback_data='privacy_menu')],
+        [InlineKeyboardButton(t('privacy.export_data', locale), callback_data='exp_menu')],
+        [InlineKeyboardButton(t('privacy.delete.continue', locale), callback_data='privacy_delete_stage2')],
+        [InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')],
     ])
-    text = (
-        '🗑 Delete my data\n\n'
-        'This is irreversible. Personal workspace data, reminders, limits, notification preferences, aliases, ML observations, drafts, tokens, and profile data will be deleted.\n\n'
-        'Shared group workspace policy: your membership and personal settings are removed. Shared ledger operations are retained when deleting them would alter another participant’s financial history; your actor identity is anonymized and personal raw text/comment fields are redacted where possible.\n\n'
-        f'To continue you will need to type exactly:\n{phrase}'
-    )
-    return await _safe_edit_or_reply(q, text, reply_markup=kb)
+    return await _safe_edit_or_reply(q, t('privacy.delete.explain', locale), reply_markup=kb)
+
+
+async def _render_delete_confirm(q, locale: str):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(t('privacy.delete.yes', locale), callback_data='privacy_delete_confirm'),
+         InlineKeyboardButton(t('privacy.delete.no', locale), callback_data='privacy_delete_cancel')],
+        [InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_delete_start')],
+    ])
+    return await _safe_edit_or_reply(q, t('privacy.delete.confirm', locale), reply_markup=kb)
+
+
+async def _render_history_menu(q, locale: str):
+    return await _safe_edit_or_reply(q, f"{t('privacy.history.title', locale)}\n\n{t('privacy.history.body', locale)}", reply_markup=_history_period_kb(locale))
+
+
+async def _render_history_preview(q, context: ContextTypes.DEFAULT_TYPE, user_id: int, locale: str, start_date: date | None, end_date: date | None):
+    preview = preview_delete_financial_history(user_id, start_date, end_date)
+    period = _period_label(start_date, end_date, locale)
+    if preview.operation_count == 0:
+        return await _safe_edit_or_reply(q, t('privacy.history.zero', locale, period=period), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]))
+    token = token_urlsafe(8)
+    context.user_data['history_delete_confirm'] = {
+        'token': token,
+        'actor_user_id': user_id,
+        'start': start_date.isoformat() if start_date else None,
+        'end': end_date.isoformat() if end_date else None,
+        'expires_at': unix_time() + 600,
+        'used': False,
+    }
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(t('privacy.history.yes', locale), callback_data=f'hist|confirm|{token}'),
+         InlineKeyboardButton(t('privacy.history.no', locale), callback_data='privacy_menu')],
+        [InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')],
+    ])
+    return await _safe_edit_or_reply(q, t('privacy.history.preview', locale, period=period, count=preview.operation_count), reply_markup=kb)
+
+
+def _history_done_kb(locale: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t('privacy.history.main', locale), callback_data='start_main')],
+        [InlineKeyboardButton(t('privacy.history.another', locale), callback_data='hist|menu')],
+    ])
+
+
+def _date_from_state(value: str | None) -> date | None:
+    return date.fromisoformat(value) if value else None
 
 
 def _cl_period_label(p: str) -> str:
@@ -1280,33 +1350,124 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await q.answer('Личное пространство выбрано')
 
     if data == 'privacy_menu':
-        return await _render_privacy_menu(q)
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        context.user_data.pop('history_delete_confirm', None)
+        context.user_data.pop('history_delete_wizard', None)
+        return await _render_privacy_menu(q, locale)
+
+    if data == 'hist|menu':
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        context.user_data.pop('history_delete_confirm', None)
+        context.user_data.pop('history_delete_wizard', None)
+        return await _render_history_menu(q, locale)
+
+    if data.startswith('hist|period|'):
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        period = data.split('|', 2)[2]
+        try:
+            today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+            start_date, end_date = history_period_bounds(period, today)
+        except Exception:
+            return await q.answer(t('privacy.stale', locale), show_alert=True)
+        context.user_data.pop('history_delete_wizard', None)
+        return await _render_history_preview(q, context, update.effective_user.id, locale, start_date, end_date)
+
+    if data == 'hist|custom|start':
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        context.user_data.pop('history_delete_confirm', None)
+        context.user_data['history_delete_wizard'] = {
+            'actor_user_id': update.effective_user.id,
+            'step': 'start',
+            'expires_at': unix_time() + 600,
+        }
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]])
+        await q.answer()
+        return await _safe_edit_or_reply(q, t('privacy.custom.start', locale), reply_markup=kb)
+
+    if data.startswith('hist|confirm|'):
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        token = data.split('|', 2)[2]
+        st = context.user_data.get('history_delete_confirm') or {}
+        if (
+            not isinstance(st, dict)
+            or st.get('token') != token
+            or st.get('actor_user_id') != update.effective_user.id
+            or st.get('used')
+            or st.get('expires_at', 0) < unix_time()
+        ):
+            context.user_data.pop('history_delete_confirm', None)
+            return await q.answer(t('privacy.stale', locale), show_alert=True)
+        st['used'] = True
+        context.user_data['history_delete_confirm'] = st
+        start_date = _date_from_state(st.get('start'))
+        end_date = _date_from_state(st.get('end'))
+        period = _period_label(start_date, end_date, locale)
+        try:
+            preview = preview_delete_financial_history(update.effective_user.id, start_date, end_date)
+            if preview.operation_count == 0:
+                context.user_data.pop('history_delete_confirm', None)
+                return await _safe_edit_or_reply(
+                    q,
+                    t('privacy.history.zero', locale, period=period),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
+                )
+            result = delete_financial_history(update.effective_user.id, start_date, end_date)
+        except Exception as e:
+            context.user_data.pop('history_delete_confirm', None)
+            log.warning(
+                'financial_history_delete_failed user_id=%s start=%s end=%s reason=%s',
+                update.effective_user.id,
+                start_date,
+                end_date,
+                type(e).__name__,
+            )
+            return await _safe_edit_or_reply(
+                q,
+                t('privacy.history.failed', locale),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
+            )
+        context.user_data.pop('history_delete_confirm', None)
+        await q.answer()
+        return await _safe_edit_or_reply(
+            q,
+            t('privacy.history.success', locale, count=result.operation_count, period=period),
+            reply_markup=_history_done_kb(locale),
+        )
 
     if data == 'privacy_delete_start':
-        locale = get_user_locale(cid)
-        context.user_data['delete_my_data'] = {'actor_user_id': update.effective_user.id, 'step': 'start', 'expires_at': unix_time() + 900}
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        context.user_data['delete_my_data'] = {'actor_user_id': update.effective_user.id, 'step': 'explain', 'expires_at': unix_time() + 900}
         return await _render_delete_start(q, cid, locale)
 
-    if data == 'privacy_delete_phrase':
-        locale = get_user_locale(cid)
-        context.user_data['delete_my_data'] = {'actor_user_id': update.effective_user.id, 'step': 'phrase', 'expires_at': unix_time() + 900, 'phrase': _delete_phrase(locale)}
-        return await q.message.reply_text(f"Введите фразу подтверждения:\n{_delete_phrase(locale)}")
+    if data == 'privacy_delete_stage2':
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        st = context.user_data.get('delete_my_data') or {}
+        if st.get('actor_user_id') != update.effective_user.id or st.get('expires_at', 0) < unix_time():
+            context.user_data.pop('delete_my_data', None)
+            return await q.answer(t('privacy.stale', locale), show_alert=True)
+        st['step'] = 'confirm'
+        st['expires_at'] = unix_time() + 600
+        context.user_data['delete_my_data'] = st
+        return await _render_delete_confirm(q, locale)
 
     if data == 'privacy_delete_cancel':
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
         context.user_data.pop('delete_my_data', None)
-        return await _safe_edit_or_reply(q, 'Удаление отменено.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Privacy', callback_data='privacy_menu')]]))
+        return await _safe_edit_or_reply(q, t('privacy.cancelled', locale), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')]]))
 
     if data == 'privacy_delete_confirm':
+        locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
         st = context.user_data.get('delete_my_data') or {}
-        if st.get('actor_user_id') != update.effective_user.id or st.get('step') != 'confirmed' or st.get('expires_at', 0) < unix_time():
+        if st.get('actor_user_id') != update.effective_user.id or st.get('step') != 'confirm' or st.get('expires_at', 0) < unix_time():
             context.user_data.pop('delete_my_data', None)
-            return await q.answer('Подтверждение удаления устарело. Начните заново.', show_alert=True)
+            return await q.answer(t('privacy.stale', locale), show_alert=True)
         try:
-            result = delete_user_data(update.effective_user.id)
-        except Exception:
-            return await _safe_edit_or_reply(q, 'Не удалось удалить данные безопасно. Попробуйте ещё раз позже.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Privacy', callback_data='privacy_menu')]]))
+            delete_user_data(update.effective_user.id)
+        except Exception as e:
+            log.warning('personal_data_delete_failed user_id=%s reason=%s', update.effective_user.id, type(e).__name__)
+            return await _safe_edit_or_reply(q, t('privacy.delete.failed', locale), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')]]))
         context.user_data.clear()
-        return await _safe_edit_or_reply(q, f'✅ Данные удалены.\n\nУдалено таблиц: {sum(1 for c in result.counts.values() if c)}\nАнонимизировано общих операций: {result.anonymized_shared_operations}\n\nСледующий /start создаст новый профиль.')
+        return await _safe_edit_or_reply(q, t('privacy.delete.success', locale))
 
     if data == 'rem_menu':
         return await render_reminders_menu(q, cid, context)
@@ -1384,13 +1545,13 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data in {'rem_dt_today', 'rem_dt_tom', 'rem_dt_1', 'rem_dt_15', 'rem_dt_in'}:
         d = context.user_data.setdefault('rem_draft', {})
-        t = date.today()
-        if data == 'rem_dt_today': d['event_date'] = t
-        elif data == 'rem_dt_tom': d['event_date'] = t + timedelta(days=1)
+        today_value = date.today()
+        if data == 'rem_dt_today': d['event_date'] = today_value
+        elif data == 'rem_dt_tom': d['event_date'] = today_value + timedelta(days=1)
         elif data == 'rem_dt_1':
-            d['event_date'] = t.replace(day=1) if t.day <= 1 else _next_monthly_date(t.replace(day=1))
+            d['event_date'] = today_value.replace(day=1) if today_value.day <= 1 else _next_monthly_date(today_value.replace(day=1))
         elif data == 'rem_dt_15':
-            d['event_date'] = t.replace(day=15) if t.day <= 15 else _next_monthly_date(t.replace(day=15))
+            d['event_date'] = today_value.replace(day=15) if today_value.day <= 15 else _next_monthly_date(today_value.replace(day=15))
         elif data == 'rem_dt_in':
             context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'date_draft'}
             await q.answer()

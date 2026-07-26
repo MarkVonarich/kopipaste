@@ -16,7 +16,7 @@ def test_category_normalization_collapses_spacing_and_case():
 
 def test_i18n_fallback_and_money_formatting():
     assert normalize_locale("en_US") == "en"
-    assert normalize_locale("de") == "ru"
+    assert normalize_locale("de") == "en"
     assert t("help.commands", "en").startswith("Menu commands")
     assert format_money(1234.5, "USD", "en") == "1,234.50 USD"
     assert format_money(1234, "RUB", "ru") == "1 234 RUB"

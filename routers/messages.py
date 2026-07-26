@@ -23,17 +23,20 @@ from utils.parsing import FRACTIONAL_AMOUNT_ERROR, parse_user_input, split_wo_da
 from utils.text import norm_text
 from utils.spoken_numbers import normalize_spoken_money
 from db.database import pg_fetchall
-from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation
+from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation, get_user_tz
 from db.queries import update_last_operation_fields, update_operation_fields_by_id, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
 from services.budgeting import create_category_budget_group, list_active_expense_categories, upsert_general_limit
 from services.notification_preferences import set_quiet_hours_time
+from services.i18n import resolve_locale, t
+from services.personal_data_deletion import preview_delete_financial_history
 from ui.keyboards import category_budget_picker_kb
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
 from time import time as unix_time
+from secrets import token_urlsafe
 
 log = logging.getLogger(__name__)
 try:
@@ -46,6 +49,24 @@ BATCH_MAX = 25  # ограничение длины списка на один �
 
 def _md_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("`", "\\`")
+
+
+def _message_privacy_locale(user_id: int, telegram_language_code: str | None = None) -> str:
+    try:
+        rows = pg_fetchall("SELECT locale FROM public.users WHERE user_id=%s LIMIT 1", (user_id,))
+        saved = rows[0][0] if rows else None
+    except Exception:
+        saved = None
+    return resolve_locale(saved, telegram_language_code)
+
+
+def _history_period_label(start_date: date | None, end_date: date | None, locale: str) -> str:
+    if start_date is None and end_date is None:
+        return t('privacy.period.all', locale)
+    fmt = "%d.%m.%Y"
+    if start_date == end_date:
+        return start_date.strftime(fmt)
+    return f"{start_date.strftime(fmt)} — {end_date.strftime(fmt)}"
 
 
 def _integer_major_amount(value) -> int | None:
@@ -678,20 +699,68 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
 
     delete_state = context.user_data.get('delete_my_data')
     if isinstance(delete_state, dict) and delete_state.get('step') == 'phrase':
-        if delete_state.get('actor_user_id') != update.effective_user.id or delete_state.get('expires_at', 0) < unix_time():
-            context.user_data.pop('delete_my_data', None)
-            return await emsg.reply_text('Подтверждение удаления устарело. Начните заново через /delete_my_data.')
-        phrase = delete_state.get('phrase') or 'УДАЛИТЬ МОИ ДАННЫЕ'
-        if text.strip() != phrase:
-            return await emsg.reply_text(f'Фраза не совпала. Введите точно:\n{phrase}')
-        delete_state['step'] = 'confirmed'
-        delete_state['expires_at'] = unix_time() + 300
-        context.user_data['delete_my_data'] = delete_state
+        locale = _message_privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        context.user_data.pop('delete_my_data', None)
+        return await emsg.reply_text(
+            t('privacy.stale', locale),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')]]),
+        )
+
+    history_state = context.user_data.get('history_delete_wizard')
+    if isinstance(history_state, dict):
+        locale = _message_privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
+        if history_state.get('actor_user_id') != update.effective_user.id or history_state.get('expires_at', 0) < unix_time():
+            context.user_data.pop('history_delete_wizard', None)
+            return await emsg.reply_text(
+                t('privacy.stale', locale),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
+            )
+        today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+        parsed = parse_export_date(text, today)
+        if parsed is None:
+            return await emsg.reply_text(
+                t('privacy.custom.invalid', locale),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
+            )
+        if history_state.get('step') == 'start':
+            history_state['start'] = parsed.isoformat()
+            history_state['step'] = 'end'
+            history_state['expires_at'] = unix_time() + 600
+            context.user_data['history_delete_wizard'] = history_state
+            return await emsg.reply_text(
+                t('privacy.custom.end', locale),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|custom|start')]]),
+            )
+        start_date = date.fromisoformat(history_state['start'])
+        end_date = parsed
+        if end_date < start_date:
+            return await emsg.reply_text(
+                t('privacy.custom.end_before_start', locale),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|custom|start')]]),
+            )
+        preview = preview_delete_financial_history(update.effective_user.id, start_date, end_date)
+        period = _history_period_label(start_date, end_date, locale)
+        context.user_data.pop('history_delete_wizard', None)
+        if preview.operation_count == 0:
+            return await emsg.reply_text(
+                t('privacy.history.zero', locale, period=period),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
+            )
+        token = token_urlsafe(8)
+        context.user_data['history_delete_confirm'] = {
+            'token': token,
+            'actor_user_id': update.effective_user.id,
+            'start': start_date.isoformat(),
+            'end': end_date.isoformat(),
+            'expires_at': unix_time() + 600,
+            'used': False,
+        }
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('🗑 Permanently delete', callback_data='privacy_delete_confirm')],
-            [InlineKeyboardButton('❌ Cancel', callback_data='privacy_delete_cancel')],
+            [InlineKeyboardButton(t('privacy.history.yes', locale), callback_data=f'hist|confirm|{token}'),
+             InlineKeyboardButton(t('privacy.history.no', locale), callback_data='privacy_menu')],
+            [InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')],
         ])
-        return await emsg.reply_text('Фраза подтверждена. Последний шаг:', reply_markup=kb)
+        return await emsg.reply_text(t('privacy.history.preview', locale, period=period, count=preview.operation_count), reply_markup=kb)
 
     if context.user_data.get('await_group_custom_category'):
         st = context.user_data.get('await_group_custom_category') or {}
@@ -937,11 +1006,11 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 reminder_update(cid, rid, event_date=d)
                 log.info('reminder_date_selected source=manual event_date=%s user=%s', d.isoformat(), cid)
             elif field == 'repeat':
-                t = (text or '').strip().lower()
-                if t.startswith('custom_days:'):
-                    n = int(t.split(':', 1)[1]); reminder_update(cid, rid, repeat_rule='custom_days', repeat_interval_days=n)
+                repeat_value = (text or '').strip().lower()
+                if repeat_value.startswith('custom_days:'):
+                    n = int(repeat_value.split(':', 1)[1]); reminder_update(cid, rid, repeat_rule='custom_days', repeat_interval_days=n)
                 else:
-                    reminder_update(cid, rid, repeat_rule=t, repeat_interval_days=None)
+                    reminder_update(cid, rid, repeat_rule=repeat_value, repeat_interval_days=None)
             elif field == 'notify':
                 n = int((text or '').strip())
                 if n < 0 or n > 30:

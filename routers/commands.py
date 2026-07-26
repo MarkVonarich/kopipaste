@@ -26,7 +26,7 @@ from services.quick import get_quick_buttons
 from services.reminder_totals import render_reminder_totals
 from services.receipt_parser import ocr_credential_diagnostic
 from services.activity import has_financial_activity_today
-from services.i18n import t
+from services.i18n import resolve_locale, t
 from services.notification_preview import build_preview, render_admin_preview
 from services.personal_data_deletion import dry_run_delete_user_data, format_dry_run
 from db.database import pg_fetchall
@@ -78,25 +78,25 @@ async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
 
 
-def _delete_phrase(locale: str | None) -> str:
-    return "DELETE MY DATA" if (locale or "ru").startswith("en") else "УДАЛИТЬ МОИ ДАННЫЕ"
+def _command_privacy_locale(update, user_id: int) -> str:
+    try:
+        rows = pg_fetchall("SELECT locale FROM public.users WHERE user_id=%s LIMIT 1", (user_id,))
+        saved = rows[0][0] if rows else None
+    except Exception:
+        saved = None
+    return resolve_locale(saved, getattr(update.effective_user, "language_code", None))
 
 
 async def cmd_delete_my_data(update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    locale = get_user_locale(uid)
-    phrase = _delete_phrase(locale)
-    context.user_data['delete_my_data'] = {'actor_user_id': uid, 'step': 'phrase', 'expires_at': unix_time() + 900, 'phrase': phrase}
+    locale = _command_privacy_locale(update, uid)
+    context.user_data['delete_my_data'] = {'actor_user_id': uid, 'step': 'explain', 'expires_at': unix_time() + 900}
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('📤 Export my data', callback_data='exp_menu')],
-        [InlineKeyboardButton('⬅️ Back', callback_data='privacy_menu')],
+        [InlineKeyboardButton(t('privacy.export_data', locale), callback_data='exp_menu')],
+        [InlineKeyboardButton(t('privacy.delete.continue', locale), callback_data='privacy_delete_stage2')],
+        [InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')],
     ])
-    text = (
-        '🗑 Delete my data\n\n'
-        'This is irreversible. Personal data will be deleted. Shared group ledger operations may be retained but anonymized/redacted to preserve other participants’ shared financial history.\n\n'
-        f'Type exactly:\n{phrase}'
-    )
-    await update.message.reply_text(text, reply_markup=kb)
+    await update.message.reply_text(t('privacy.delete.explain', locale), reply_markup=kb)
 
 
 async def cmd_help(update, context: ContextTypes.DEFAULT_TYPE):
