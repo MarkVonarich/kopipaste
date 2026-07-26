@@ -30,7 +30,9 @@ MAX_PROPERTY_KEYS = 50
 PROHIBITED_KEY_PARTS = {
     "api_key",
     "authorization",
+    "amount",
     "callback_data",
+    "chat_id",
     "comment",
     "database_url",
     "image",
@@ -46,6 +48,7 @@ PROHIBITED_KEY_PARTS = {
     "text",
     "token",
     "transcript",
+    "user_id",
     "username",
     "voice",
 }
