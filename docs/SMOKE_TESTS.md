@@ -40,6 +40,25 @@ Run after deployment and restart.
 - Export previous year.
 - Export a custom start/end period.
 - Confirm every branch reaches XLSX generation, empty-period message, Back, or Cancel.
+- From a weekly report, tap `Экспорт за неделю` and confirm the XLSX period matches the report.
+- From a monthly report, tap `Экспорт за месяц` and confirm the XLSX period matches the report.
+
+## Category and Budget Management
+
+- Create a temporary category from `Настройки -> Категории`.
+- Create an operation in that temporary category.
+- Add a weekly or monthly budget.
+- Open the budget card and edit the budget amount.
+- Confirm the edit preview before saving.
+- Delete the budget and confirm operations/categories are still present.
+- Open `Настройки -> Категории` and choose `Перенести записи`.
+- Transfer the temporary category records to another category.
+- Confirm history and reports show the destination category.
+- Delete/archive the source category after transfer.
+- Confirm the source category no longer appears in operation selectors.
+- Trigger or preview an evening reminder and confirm exactly one feature tip appears.
+- Tap the feature-tip CTA and confirm it opens the matching bot flow.
+- Check Back and Cancel buttons for each budget/category step.
 
 ## Reminders
 
