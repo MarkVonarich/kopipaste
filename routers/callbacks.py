@@ -31,7 +31,17 @@ from ui.keyboards import (
 from services.analytics import build_report
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
-from services.categories import get_or_create_custom_category
+from services.categories import (
+    archive_empty_category,
+    category_reference_counts,
+    delete_category_without_operations,
+    get_or_create_custom_category,
+    is_protected_category,
+    list_managed_categories,
+    normalize_category_name,
+    normalized_category_key,
+    transfer_category,
+)
 from services.operations import cancel_operation_draft, commit_operation_draft, load_operation_draft, record_financial_operation
 from services.reminder_totals import render_reminder_totals
 from services.workspaces import create_group_workspace, is_active_telegram_member, join_group_workspace, resolve_workspace
@@ -116,15 +126,21 @@ def _budget_spent(user_id: int, period: str) -> int:
 
 
 def _budgets_hub_text(user_id: int) -> str:
-    wl, ml = get_user_budgets(user_id)
-    active_limits = len(list_user_limits(user_id))
+    try:
+        wl, ml = get_user_budgets(user_id)
+    except Exception:
+        wl, ml = 0, 0
+    try:
+        active_limits = len(list_user_limits(user_id))
+    except Exception:
+        active_limits = 0
     if not wl and not ml:
         return (
-            '💰 Бюджеты\n\n'
+            '💰 Бюджеты и Лимиты\n\n'
             'Общий бюджет пока не задан.\n\n'
             'Бюджет помогает понять, сколько можно безопасно тратить за неделю или месяц.'
         )
-    lines = ['💰 Бюджеты', '', 'Общий бюджет:']
+    lines = ['💰 Бюджеты и Лимиты', '', 'Общий бюджет:']
     if ml:
         spent = _budget_spent(user_id, 'month')
         rem = ml - spent
@@ -140,8 +156,23 @@ def _budgets_hub_text(user_id: int) -> str:
 def _budgets_hub_kb(has_any: bool):
     rows = [[InlineKeyboardButton('➕ Добавить бюджет', callback_data='bud_add')]]
     if has_any:
-        rows += [[InlineKeyboardButton('✏️ Изменить', callback_data='bud_edit')], [InlineKeyboardButton('🗑 Удалить', callback_data='bud_del')]]
+        rows += [[InlineKeyboardButton('✏️ Управлять бюджетами', callback_data='bud_edit')]]
     rows += [[InlineKeyboardButton('📂 Лимиты категорий', callback_data='lim_list')], [InlineKeyboardButton('⬅️ Назад', callback_data='lb_hub')]]
+    return InlineKeyboardMarkup(rows)
+
+
+def _limits_budgets_hub_kb(user_id: int, locale: str | None = None) -> InlineKeyboardMarkup:
+    try:
+        wl, ml = get_user_budgets(user_id)
+    except Exception:
+        wl, ml = 0, 0
+    rows = []
+    if ml and ml > 0:
+        rows.append([InlineKeyboardButton(f'Месячный бюджет — {_fmt_money(ml)}', callback_data='bud_card|month')])
+    if wl and wl > 0:
+        rows.append([InlineKeyboardButton(f'Недельный бюджет — {_fmt_money(wl)}', callback_data='bud_card|week')])
+    rows.extend(limits_budgets_hub_kb(locale).inline_keyboard)
+    rows.append([InlineKeyboardButton('➕ Добавить бюджет', callback_data='bud_add')])
     return InlineKeyboardMarkup(rows)
 
 
@@ -406,7 +437,7 @@ async def render_settings_menu(q, chat_id: int):
 
 async def render_limits_budgets_menu(q, chat_id: int):
     locale = get_user_locale(chat_id)
-    return await _safe_edit_or_reply(q, t('limits_budgets.title', locale), reply_markup=limits_budgets_hub_kb(locale))
+    return await _safe_edit_or_reply(q, _budgets_hub_text(chat_id), reply_markup=_limits_budgets_hub_kb(chat_id, locale))
 
 
 async def render_export_menu(q):
@@ -693,6 +724,115 @@ def _history_done_kb(locale: str) -> InlineKeyboardMarkup:
 
 def _date_from_state(value: str | None) -> date | None:
     return date.fromisoformat(value) if value else None
+
+
+def _category_workspace(update) -> int | None:
+    return resolve_workspace(
+        update.effective_chat.id,
+        update.effective_user.id,
+        getattr(update.effective_chat, 'type', 'private') or 'private',
+    ).workspace_id
+
+
+def _category_token(index: int) -> str:
+    return f"k{index}"
+
+
+def _category_store(context: ContextTypes.DEFAULT_TYPE, user_id: int, workspace_id: int | None, op_type: str = "Расходы") -> list[dict]:
+    categories = list_managed_categories(user_id=user_id, workspace_id=workspace_id, op_type=op_type)
+    stored = []
+    for idx, item in enumerate(categories[:80]):
+        token = _category_token(idx)
+        stored.append({
+            "token": token,
+            "name": item.name,
+            "normalized_name": item.normalized_name,
+            "op_type": item.op_type,
+            "category_id": item.category_id,
+            "source": item.source,
+            "operation_count": item.operation_count,
+            "has_budget": item.has_budget,
+        })
+    context.user_data["category_manage_options"] = {
+        "actor_user_id": user_id,
+        "workspace_id": workspace_id,
+        "op_type": op_type,
+        "items": {item["token"]: item for item in stored},
+        "expires_at": unix_time() + 900,
+    }
+    return stored
+
+
+def _category_from_token(context: ContextTypes.DEFAULT_TYPE, user_id: int, workspace_id: int | None, token: str) -> dict | None:
+    st = context.user_data.get("category_manage_options") or {}
+    if (
+        not isinstance(st, dict)
+        or st.get("actor_user_id") != user_id
+        or st.get("workspace_id") != workspace_id
+        or st.get("expires_at", 0) < unix_time()
+    ):
+        context.user_data.pop("category_manage_options", None)
+        return None
+    return (st.get("items") or {}).get(token)
+
+
+def _category_list_kb(items: list[dict], *, action: str = "open") -> InlineKeyboardMarkup:
+    rows = []
+    for item in items[:30]:
+        count = f" · {item['operation_count']}" if item.get("operation_count") else ""
+        rows.append([InlineKeyboardButton(f"{item['name'][:36]}{count}", callback_data=f"cat|{action}|{item['token']}")])
+    rows.extend([
+        [InlineKeyboardButton('➕ Добавить категорию', callback_data='cat|add_type')],
+        [InlineKeyboardButton('🔁 Перенести записи', callback_data='cat|move_start')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings'), InlineKeyboardButton('🏠 Главное меню', callback_data='start_main')],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _render_category_menu(q, context: ContextTypes.DEFAULT_TYPE, update):
+    workspace_id = _category_workspace(update)
+    items = _category_store(context, update.effective_user.id, workspace_id)
+    if not items:
+        text = '🏷 Категории\n\nПока нет пользовательских категорий. Можно добавить новую или записать операцию — категория появится здесь.'
+    else:
+        lines = ['🏷 Категории', '', 'Активные категории расходов:']
+        for item in items[:12]:
+            marker = ' · бюджет' if item.get('has_budget') else ''
+            lines.append(f"• {item['name']} — {item['operation_count']} записей{marker}")
+        text = '\n'.join(lines)
+    return await _safe_edit_or_reply(q, text, reply_markup=_category_list_kb(items))
+
+
+async def _render_category_card(q, context: ContextTypes.DEFAULT_TYPE, update, token: str):
+    workspace_id = _category_workspace(update)
+    item = _category_from_token(context, update.effective_user.id, workspace_id, token)
+    if not item:
+        return await _safe_edit_or_reply(q, 'Кнопка устарела. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+    counts = category_reference_counts(user_id=update.effective_user.id, workspace_id=workspace_id, op_type=item['op_type'], category=item['name'])
+    budget = 'есть' if item.get('has_budget') or counts.category_limits else 'нет'
+    text = (
+        f"🏷 {item['name']}\n\n"
+        f"Тип: расходы\n"
+        f"Записей: {counts.operations}\n"
+        f"Бюджет категории: {budget}\n\n"
+        "Можно перенести все записи в другую категорию или удалить категорию безопасно."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('🔁 Перенести записи', callback_data=f'cat|move_from|{token}')],
+        [InlineKeyboardButton('🗑 Удалить категорию', callback_data=f'cat|delete|{token}')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='cat_menu'), InlineKeyboardButton('❌ Отмена', callback_data='menu_settings')],
+    ])
+    return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+
+def _category_destination_kb(items: list[dict], source_token: str, prefix: str) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items[:30]:
+        if item["token"] == source_token:
+            continue
+        rows.append([InlineKeyboardButton(item["name"][:40], callback_data=f"{prefix}|{source_token}|{item['token']}")])
+    rows.append([InlineKeyboardButton('⬅️ Назад', callback_data=f'cat|open|{source_token}'), InlineKeyboardButton('❌ Отмена', callback_data='cat_menu')])
+    return InlineKeyboardMarkup(rows)
 
 
 def _cl_period_label(p: str) -> str:
@@ -1400,6 +1540,186 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'workspace_personal':
         return await q.answer('Личное пространство выбрано')
 
+    if data == 'cat_menu':
+        context.user_data.pop('await_category_create', None)
+        context.user_data.pop('category_action', None)
+        return await _render_category_menu(q, context, update)
+
+    if data.startswith('cat|'):
+        parts = data.split('|')
+        action = parts[1] if len(parts) > 1 else ''
+        workspace_id = _category_workspace(update)
+        user_id = update.effective_user.id
+        if action == 'add_type':
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('Расход', callback_data='cat|add|expense'), InlineKeyboardButton('Доход', callback_data='cat|add|income')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data='cat_menu'), InlineKeyboardButton('❌ Отмена', callback_data='menu_settings')],
+            ])
+            return await _safe_edit_or_reply(q, 'Какой тип категории добавить?', reply_markup=kb)
+        if action == 'add':
+            op_type = 'Доходы' if len(parts) > 2 and parts[2] == 'income' else 'Расходы'
+            context.user_data['await_category_create'] = {
+                'actor_user_id': user_id,
+                'workspace_id': workspace_id,
+                'op_type': op_type,
+                'expires_at': unix_time() + 600,
+            }
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='cat|add_type'), InlineKeyboardButton('❌ Отмена', callback_data='cat_menu')]])
+            return await _safe_edit_or_reply(q, 'Введите название новой категории:', reply_markup=kb)
+        if action == 'open' and len(parts) > 2:
+            return await _render_category_card(q, context, update, parts[2])
+        if action == 'move_start':
+            items = _category_store(context, user_id, workspace_id)
+            return await _safe_edit_or_reply(q, 'Выберите категорию, из которой перенести записи:', reply_markup=_category_list_kb(items, action='move_from'))
+        if action == 'move_from' and len(parts) > 2:
+            source_token = parts[2]
+            items = _category_store(context, user_id, workspace_id)
+            source = _category_from_token(context, user_id, workspace_id, source_token)
+            if not source:
+                return await _safe_edit_or_reply(q, 'Кнопка устарела. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+            return await _safe_edit_or_reply(q, f"Куда перенести записи из категории «{source['name']}»?", reply_markup=_category_destination_kb(items, source_token, 'cat|move_to'))
+        if action == 'move_to' and len(parts) > 3:
+            source = _category_from_token(context, user_id, workspace_id, parts[2])
+            dest = _category_from_token(context, user_id, workspace_id, parts[3])
+            if not source or not dest:
+                return await _safe_edit_or_reply(q, 'Кнопка устарела. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+            if source['normalized_name'] == dest['normalized_name']:
+                return await q.answer('Выберите другую категорию', show_alert=True)
+            counts = category_reference_counts(user_id=user_id, workspace_id=workspace_id, op_type=source['op_type'], category=source['name'])
+            token = token_urlsafe(8)
+            context.user_data['category_action'] = {
+                'token': token,
+                'actor_user_id': user_id,
+                'workspace_id': workspace_id,
+                'op_type': source['op_type'],
+                'source': source['name'],
+                'destination': dest['name'],
+                'mode': 'move',
+                'expires_at': unix_time() + 600,
+                'used': False,
+            }
+            text = (
+                f"🔁 Перенести записи?\n\n"
+                f"Откуда: {source['name']}\n"
+                f"Куда: {dest['name']}\n"
+                f"Будет изменено операций: {counts.operations}\n\n"
+                "После переноса отчёты, аналитика и бюджеты будут использовать новую категорию."
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('✅ Перенести', callback_data=f'cat|confirm|{token}')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data=f"cat|move_from|{parts[2]}"), InlineKeyboardButton('❌ Отмена', callback_data='cat_menu')],
+            ])
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if action == 'delete' and len(parts) > 2:
+            source = _category_from_token(context, user_id, workspace_id, parts[2])
+            if not source:
+                return await _safe_edit_or_reply(q, 'Кнопка устарела. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+            if is_protected_category(source['name']):
+                return await q.answer('Эту системную категорию нельзя удалить.', show_alert=True)
+            counts = category_reference_counts(user_id=user_id, workspace_id=workspace_id, op_type=source['op_type'], category=source['name'])
+            if counts.operations:
+                items = _category_store(context, user_id, workspace_id)
+                text = f"В этой категории есть {counts.operations} записей.\nВыберите категорию, в которую их нужно перенести:"
+                return await _safe_edit_or_reply(q, text, reply_markup=_category_destination_kb(items, parts[2], 'cat|delete_to'))
+            token = token_urlsafe(8)
+            context.user_data['category_action'] = {
+                'token': token,
+                'actor_user_id': user_id,
+                'workspace_id': workspace_id,
+                'op_type': source['op_type'],
+                'source': source['name'],
+                'destination': None,
+                'mode': 'delete_empty',
+                'expires_at': unix_time() + 600,
+                'used': False,
+            }
+            budget_note = '\nБюджет этой категории будет удалён.' if counts.category_limits else ''
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('🗑 Да, удалить', callback_data=f'cat|confirm|{token}')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data=f"cat|open|{parts[2]}"), InlineKeyboardButton('❌ Отмена', callback_data='cat_menu')],
+            ])
+            return await _safe_edit_or_reply(q, f"Удалить категорию «{source['name']}»?{budget_note}\n\nОпераций в ней нет.", reply_markup=kb)
+        if action == 'delete_to' and len(parts) > 3:
+            source = _category_from_token(context, user_id, workspace_id, parts[2])
+            dest = _category_from_token(context, user_id, workspace_id, parts[3])
+            if not source or not dest:
+                return await _safe_edit_or_reply(q, 'Кнопка устарела. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+            if source['normalized_name'] == dest['normalized_name']:
+                return await q.answer('Выберите другую категорию', show_alert=True)
+            counts = category_reference_counts(user_id=user_id, workspace_id=workspace_id, op_type=source['op_type'], category=source['name'])
+            token = token_urlsafe(8)
+            context.user_data['category_action'] = {
+                'token': token,
+                'actor_user_id': user_id,
+                'workspace_id': workspace_id,
+                'op_type': source['op_type'],
+                'source': source['name'],
+                'destination': dest['name'],
+                'mode': 'delete_merge',
+                'expires_at': unix_time() + 600,
+                'used': False,
+            }
+            budget_note = '\nБюджет исходной категории будет удалён; бюджет назначения сохранится.' if counts.category_limits else ''
+            text = (
+                f"🗑 Удалить категорию после переноса?\n\n"
+                f"Категория: {source['name']}\n"
+                f"Перенести в: {dest['name']}\n"
+                f"Записей: {counts.operations}{budget_note}\n\n"
+                "Это действие изменит историю отчётов и аналитики."
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('✅ Перенести и удалить', callback_data=f'cat|confirm|{token}')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data=f"cat|delete|{parts[2]}"), InlineKeyboardButton('❌ Отмена', callback_data='cat_menu')],
+            ])
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        if action == 'confirm' and len(parts) > 2:
+            st = context.user_data.get('category_action') or {}
+            token = parts[2]
+            if (
+                not isinstance(st, dict)
+                or st.get('token') != token
+                or st.get('actor_user_id') != user_id
+                or st.get('workspace_id') != workspace_id
+                or st.get('used')
+                or st.get('expires_at', 0) < unix_time()
+            ):
+                context.user_data.pop('category_action', None)
+                return await q.answer('Подтверждение устарело. Начните заново.', show_alert=True)
+            st['used'] = True
+            context.user_data['category_action'] = st
+            try:
+                if st['mode'] == 'delete_empty':
+                    result = delete_category_without_operations(user_id=user_id, workspace_id=workspace_id, op_type=st['op_type'], category=st['source'])
+                    message = f"✅ Категория удалена\n\n{result.source}"
+                else:
+                    result = transfer_category(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        op_type=st['op_type'],
+                        source=st['source'],
+                        destination=st['destination'],
+                        archive_source=(st['mode'] == 'delete_merge'),
+                        budget_resolution='delete_source',
+                    )
+                    message = (
+                        f"✅ Готово\n\n"
+                        f"{result.source} → {result.destination}\n"
+                        f"Обновлено операций: {result.counts.operations}"
+                    )
+                    if st['mode'] == 'delete_merge':
+                        message += "\nИсходная категория скрыта из выбора."
+            except ValueError as e:
+                context.user_data.pop('category_action', None)
+                return await q.answer(str(e), show_alert=True)
+            except Exception as e:
+                context.user_data.pop('category_action', None)
+                log.warning('category_action_failed reason=%s', type(e).__name__)
+                return await _safe_edit_or_reply(q, 'Не удалось безопасно выполнить действие. Попробуйте позже.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+            context.user_data.pop('category_action', None)
+            context.user_data.pop('category_manage_options', None)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('🏷 К категориям', callback_data='cat_menu')], [InlineKeyboardButton('🏠 Главное меню', callback_data='start_main')]])
+            return await _safe_edit_or_reply(q, message, reply_markup=kb)
+
     if data == 'privacy_menu':
         locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
         context.user_data.pop('history_delete_confirm', None)
@@ -1742,19 +2062,43 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await q.answer('Бюджет не может быть меньше 1 ₽', show_alert=True)
         if new >= 1_000_000_000:
             return await q.answer('Слишком большой бюджет', show_alert=True)
-        if period == 'month':
-            set_budget(cid, month=new)
-        else:
-            set_budget(cid, week=new)
-        await q.answer(f'Готово: {_fmt_money(new)}')
-        q.data = f'bud_card|{period}'
-        return await callback_handler(update, context)
+        token = token_urlsafe(8)
+        context.user_data['budget_pending_edit'] = {'token': token, 'actor_user_id': update.effective_user.id, 'period': period, 'amount': new, 'expires_at': unix_time() + 600, 'used': False}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('✅ Сохранить', callback_data=f'bud_confirm|{token}')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}'), InlineKeyboardButton('❌ Отмена', callback_data='settings_budgets')],
+        ])
+        return await _safe_edit_or_reply(q, f"Сохранить новый бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(new)}", reply_markup=kb)
 
     if data.startswith('bud_set_manual|'):
         period = data.split('|', 1)[1]
         context.user_data['budget_manual_period'] = period
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}')]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}'), InlineKeyboardButton('❌ Отмена', callback_data='settings_budgets')]])
         return await _safe_edit_or_reply(q, 'Введи новую сумму бюджета.', reply_markup=kb)
+
+    if data.startswith('bud_confirm|'):
+        token = data.split('|', 1)[1]
+        st = context.user_data.get('budget_pending_edit') or {}
+        if (
+            not isinstance(st, dict)
+            or st.get('token') != token
+            or st.get('actor_user_id') != update.effective_user.id
+            or st.get('used')
+            or st.get('expires_at', 0) < unix_time()
+        ):
+            context.user_data.pop('budget_pending_edit', None)
+            return await q.answer('Подтверждение устарело. Начните заново.', show_alert=True)
+        st['used'] = True
+        context.user_data['budget_pending_edit'] = st
+        period = st['period']
+        amount = int(st['amount'])
+        if period == 'month':
+            set_budget(cid, month=amount)
+        else:
+            set_budget(cid, week=amount)
+        context.user_data.pop('budget_pending_edit', None)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Открыть бюджет', callback_data=f'bud_card|{period}')], [InlineKeyboardButton('💰 К бюджетам', callback_data='settings_budgets')]])
+        return await _safe_edit_or_reply(q, f"✅ Бюджет обновлён\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(amount)}", reply_markup=kb)
 
     if data == 'bud_del':
         wl, ml = get_user_budgets(cid)
@@ -1772,9 +2116,9 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         amount = ml if period == 'month' else wl
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('🗑 Да, удалить', callback_data=f'bud_del_yes|{period}')],
-            [InlineKeyboardButton('⬅️ Отмена', callback_data=f'bud_card|{period}')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}'), InlineKeyboardButton('❌ Отмена', callback_data='settings_budgets')],
         ])
-        return await _safe_edit_or_reply(q, f"Удалить бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(int(amount or 0))}", reply_markup=kb)
+        return await _safe_edit_or_reply(q, f"Удалить бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(int(amount or 0))}\n\nОперации, категории, напоминания и рабочие пространства не будут удалены.", reply_markup=kb)
 
     if data.startswith('bud_del_yes|'):
         period = data.split('|', 1)[1]
@@ -2609,6 +2953,44 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         txt = await build_report(period, str(cid))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_report')]])
         return await q.edit_message_text(txt, parse_mode='Markdown', reply_markup=kb)
+
+    if data.startswith('rep_export|'):
+        try:
+            _, kind, start_s, end_s = data.split('|', 3)
+            dfrom = date.fromisoformat(start_s)
+            dto = date.fromisoformat(end_s)
+            if dto < dfrom or (dto - dfrom).days > 370:
+                raise ValueError('bad_period')
+        except Exception:
+            await q.answer('Кнопка устарела', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Не удалось определить период отчёта. Откройте экспорт из главного меню.', reply_markup=_export_menu_kb())
+        rows = _export_rows(cid, dfrom, dto)
+        fd, p = tempfile.mkstemp(prefix='kopipaste_report_export_', suffix='.xlsx')
+        os.close(fd)
+        try:
+            build_export_xlsx(p, rows, dfrom, dto)
+            label = 'неделю' if kind == 'w' else 'месяц'
+            fname = f'kopipaste_{kind}_{dfrom.isoformat()}_{dto.isoformat()}.xlsx'
+            with open(p, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=cid,
+                    document=f,
+                    filename=fname,
+                    caption=f'📤 Экспорт за {label}\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {len(rows)}',
+                )
+            await q.answer('Готово')
+            return await _safe_edit_or_reply(
+                q,
+                f'✅ Экспорт отчёта готов\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {len(rows)}',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📤 Экспорт ещё раз', callback_data='exp_menu')], [InlineKeyboardButton('🏠 Главное меню', callback_data='start_main')]]),
+            )
+        except Exception as e:
+            log.warning('report_export_failed reason=%s', type(e).__name__)
+            await q.answer('Ошибка', show_alert=True)
+            return await _safe_edit_or_reply(q, 'Не удалось сформировать экспорт отчёта. Попробуйте через Главное меню → Экспорт.', reply_markup=_export_menu_kb())
+        finally:
+            if os.path.exists(p):
+                os.remove(p)
 
     if data in {'exp_today', 'exp_7', 'exp_14', 'exp_m', 'exp_pm', 'exp_y', 'exp_py', 'exp_custom', 'exp_custom_start_today', 'exp_custom_start_yday', 'exp_custom_start_first', 'exp_custom_start_input',
                 'exp_custom_end_today', 'exp_custom_end_yday', 'exp_custom_end_month', 'exp_custom_end_input', 'exp_dl', 'exp_reset', 'exp_cancel'}:

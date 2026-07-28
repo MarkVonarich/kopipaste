@@ -726,6 +726,32 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')]]),
         )
 
+    category_create = context.user_data.get('await_category_create')
+    if isinstance(category_create, dict):
+        if (
+            category_create.get('actor_user_id') != update.effective_user.id
+            or category_create.get('expires_at', 0) < unix_time()
+        ):
+            context.user_data.pop('await_category_create', None)
+            return await emsg.reply_text('Подтверждение устарело. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]))
+        try:
+            result = get_or_create_custom_category(
+                workspace_id=category_create.get('workspace_id'),
+                user_id=cid,
+                op_type=category_create.get('op_type') or 'Расходы',
+                name=text,
+            )
+        except ValueError:
+            return await emsg.reply_text('Введите непустое название категории.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отмена', callback_data='cat_menu')]]))
+        context.user_data.pop('await_category_create', None)
+        if not result.created:
+            return await emsg.reply_text(
+                f'Категория «{result.name}» уже есть. Выберите другое название.',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('➕ Добавить категорию', callback_data='cat|add_type')], [InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]),
+            )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🏷 К категориям', callback_data='cat_menu')], [InlineKeyboardButton('➕ Добавить ещё', callback_data='cat|add_type')]])
+        return await emsg.reply_text(f'✅ Категория добавлена\n\n{result.name}', reply_markup=kb)
+
     history_state = context.user_data.get('history_delete_wizard')
     if isinstance(history_state, dict):
         locale = _message_privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
@@ -1228,14 +1254,14 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('⚠️ Бюджет не может быть меньше 1 ₽')
         if amount >= 1_000_000_000:
             return await emsg.reply_text('⚠️ Слишком большой бюджет')
-        from db.queries import set_budget
-        if period == 'month':
-            set_budget(cid, month=amount)
-        else:
-            set_budget(cid, week=amount)
         context.user_data.pop('budget_manual_period', None)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 К карточке', callback_data=f'bud_card|{period}')]])
-        return await emsg.reply_text(f"✅ Бюджет обновлён: {amount} ₽", reply_markup=kb)
+        token = token_urlsafe(8)
+        context.user_data['budget_pending_edit'] = {'token': token, 'actor_user_id': update.effective_user.id, 'period': period, 'amount': amount, 'expires_at': unix_time() + 600, 'used': False}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('✅ Сохранить', callback_data=f'bud_confirm|{token}')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}'), InlineKeyboardButton('❌ Отмена', callback_data='settings_budgets')],
+        ])
+        return await emsg.reply_text(f"Сохранить новый бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {amount} ₽", reply_markup=kb)
 
     if context.user_data.get('adding_category'):
         p = context.user_data.get('pending', {})

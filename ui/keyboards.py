@@ -89,6 +89,7 @@ def settings_menu_kb(locale: str | None = None):
          InlineKeyboardButton('⏰ Время напоминаний', callback_data='menu_reminder')],
         [InlineKeyboardButton('🔔 Оповещения', callback_data='menu_notifications'),
          InlineKeyboardButton('🧩 Пространства', callback_data='workspace_menu')],
+        [InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')],
         [InlineKeyboardButton(t('menu.limits_budgets', locale), callback_data='lb_hub'),
          InlineKeyboardButton(t('privacy.title', locale), callback_data='privacy_menu')],
         [InlineKeyboardButton('🕒 Часовой пояс', callback_data='menu_tz'),

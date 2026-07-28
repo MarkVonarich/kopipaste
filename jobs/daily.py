@@ -32,6 +32,16 @@ log = logging.getLogger("finbot.daily")
 # Кнопка: «Без операций сегодня»
 INLINE_KB_NOOP = InlineKeyboardMarkup([[InlineKeyboardButton("Без операций сегодня", callback_data="noop_today")]])
 
+EVENING_FEATURE_TIPS = [
+    ("budgets", "💡 Возможность бота\n\nДля категорий можно установить бюджет или лимит и получать спокойные уведомления.", "Настроить лимит", "lb_hub"),
+    ("reminders", "💡 Возможность бота\n\nМожно добавить напоминание о подписке, платеже, будущей трате или доходе.", "Настроить напоминания", "rem_menu"),
+    ("export", "💡 Возможность бота\n\nИсторию операций можно выгрузить в XLSX за нужный период.", "Открыть экспорт", "exp_menu"),
+    ("categories", "💡 Возможность бота\n\nКатегории можно добавлять, объединять и безопасно удалять через настройки в боте.", "Открыть категории", "cat_menu"),
+    ("voice", "💡 Возможность бота\n\nОперации можно отправлять голосом, если голосовой ввод включён.", "Открыть настройки", "menu_settings"),
+    ("reports", "💡 Возможность бота\n\nНедельные и месячные отчёты помогают увидеть динамику расходов.", "Открыть отчёты", "menu_report"),
+    ("edit", "💡 Возможность бота\n\nПоследнюю операцию можно изменить: сумму, дату, тип, категорию или комментарий.", "Открыть меню", "start_main"),
+]
+
 
 def _rem_due_rows(today: date):
     return pg_fetchall("""
@@ -325,6 +335,25 @@ def _pick_template(pool: list[dict], banned: set[int]) -> dict:
     avail = [t for t in pool if t["id"] not in banned]
     return random.choice(avail or pool)
 
+
+def _evening_tip_for(user_id: int, local_day: date) -> tuple[str, InlineKeyboardButton]:
+    idx = (local_day.toordinal() + int(user_id)) % len(EVENING_FEATURE_TIPS)
+    _key, text, label, callback_data = EVENING_FEATURE_TIPS[idx]
+    return text, InlineKeyboardButton(label, callback_data=callback_data)
+
+
+def _evening_reply_markup(user_id: int, local_day: date) -> InlineKeyboardMarkup:
+    _tip, button = _evening_tip_for(user_id, local_day)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Без операций сегодня", callback_data="noop_today")],
+        [button],
+    ])
+
+
+def _with_evening_tip(text: str, user_id: int, local_day: date) -> str:
+    tip, _button = _evening_tip_for(user_id, local_day)
+    return f"{text}\n\n{tip}"
+
 def _already_sent_today(user_id: int, kind: str) -> bool:
     conn = get_conn(); cur = conn.cursor()
     cur.execute("""
@@ -435,7 +464,7 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
             text = pick["text"].format(name=name)
 
             try:
-                await context.bot.send_message(chat_id=uid, text=text, reply_markup=INLINE_KB_NOOP)
+                await context.bot.send_message(chat_id=uid, text=_with_evening_tip(text, uid, now_loc.date()), reply_markup=_evening_reply_markup(uid, now_loc.date()))
                 _log_sent(uid, "evening", pick.get("id"), pick.get("tag"))
             except (Forbidden, BadRequest) as e:
                 log.info("evening: skip %s: %s", uid, e)
@@ -532,6 +561,20 @@ def build_monthly_report_text(user_id: int, period_start: date, period_end: date
     )
 
 
+def weekly_report_kb(period_start: date, period_end: date) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📥 Экспорт за неделю', callback_data=f'rep_export|w|{period_start.isoformat()}|{period_end.isoformat()}')],
+        [InlineKeyboardButton('📤 Открыть экспорт', callback_data='exp_menu')],
+    ])
+
+
+def monthly_report_kb(period_start: date, period_end: date) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📥 Экспорт за месяц', callback_data=f'rep_export|m|{period_start.isoformat()}|{period_end.isoformat()}')],
+        [InlineKeyboardButton('📤 Открыть экспорт', callback_data='exp_menu')],
+    ])
+
+
 async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         _ensure_tables()
@@ -556,7 +599,7 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             text = build_weekly_report_text(uid, start, end)
             try:
-                await context.bot.send_message(chat_id=uid, text=text)
+                await context.bot.send_message(chat_id=uid, text=f"{text}\n\n📥 Хотите сохранить подробные данные за эту неделю?", reply_markup=weekly_report_kb(start, end))
                 _report_mark_sent(uid, "weekly_report", start, end)
                 sent += 1
             except (Forbidden, BadRequest) as e:
@@ -595,7 +638,7 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             text = build_monthly_report_text(uid, start, end)
             try:
-                await context.bot.send_message(chat_id=uid, text=text)
+                await context.bot.send_message(chat_id=uid, text=f"{text}\n\n📥 Подробную выгрузку за месяц можно получить здесь:", reply_markup=monthly_report_kb(start, end))
                 _report_mark_sent(uid, "monthly_report", start, end)
                 sent += 1
             except (Forbidden, BadRequest) as e:
