@@ -45,17 +45,26 @@ Run after deployment and restart.
 
 ## Category and Budget Management
 
-- Create a temporary category from `Настройки -> Категории`.
-- Create an operation in that temporary category.
+- Open `Настройки -> Категории` and confirm the first screen offers `Расходы`, `Доходы`, `Цели`, Back, and Main menu.
+- Open expense and income category lists separately; confirm adding a category from each list preserves that type and does not ask for type again.
+- Open `Цели` and confirm it is informational only and does not create category records.
+- Create a temporary expense category and a temporary income category.
+- Create an operation in the temporary expense category.
 - Add a weekly or monthly budget.
 - Open the budget card and edit the budget amount.
 - Confirm the edit preview before saving.
 - Delete the budget and confirm operations/categories are still present.
-- Open `Настройки -> Категории` and choose `Перенести записи`.
-- Transfer the temporary category records to another category.
+- Open the temporary category card and confirm it shows type, operation count, budget/limit, reminders, and ML mappings.
+- Rename a category with case-only changes and confirm the category remains usable.
+- Try renaming a category to an existing same-type category; confirm the duplicate screen offers transfer/merge, enter another name, open existing, Back, and Cancel.
+- Transfer temporary expense category records to another expense category.
 - Confirm history and reports show the destination category.
-- Delete/archive the source category after transfer.
+- Confirm income category transfer only offers income destinations.
+- Delete/archive the empty source category after transfer.
 - Confirm the source category no longer appears in operation selectors.
+- Delete a category with operations by choosing transfer records and delete; confirm the destination budget is not silently overwritten.
+- Delete another temporary category with operations by choosing permanent deletion; confirm two separate confirmations are required before operations are removed.
+- Confirm protected/system categories such as `Без операций` cannot be renamed or deleted.
 - Trigger or preview an evening reminder and confirm exactly one feature tip appears.
 - Tap the feature-tip CTA and confirm it opens the matching bot flow.
 - Check Back and Cancel buttons for each budget/category step.
