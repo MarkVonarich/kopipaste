@@ -14,7 +14,14 @@ from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardBu
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
 from services.export_flow import clear_export_wait_flags, parse_export_date, validate_export_period
-from services.categories import get_or_create_custom_category, normalize_category_name
+from services.categories import (
+    get_or_create_custom_category,
+    category_reference_counts,
+    is_protected_category,
+    list_managed_categories,
+    normalize_category_name,
+    normalized_category_key,
+)
 from services.operations import category_options, commit_operation_draft, create_operation_draft, load_operation_draft, record_financial_operation
 from services.records import get_user_alias, record_operation
 from services.workspaces import resolve_workspace
@@ -726,6 +733,85 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')]]),
         )
 
+    category_rename = context.user_data.get('category_rename_input')
+    if isinstance(category_rename, dict):
+        type_key = category_rename.get('type_key') or ('income' if category_rename.get('op_type') == 'Доходы' else 'expense')
+        if (
+            category_rename.get('actor_user_id') != update.effective_user.id
+            or category_rename.get('expires_at', 0) < unix_time()
+        ):
+            context.user_data.pop('category_rename_input', None)
+            return await emsg.reply_text('Подтверждение устарело. Откройте категории заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data=f'cat|type|{type_key}')]]))
+        source_name = category_rename.get('source') or ''
+        if is_protected_category(source_name):
+            context.user_data.pop('category_rename_input', None)
+            return await emsg.reply_text('Эту системную категорию нельзя переименовать.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🏷 Категории', callback_data=f'cat|type|{type_key}')]]))
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text or ""):
+            return await emsg.reply_text('Название содержит служебные символы. Введите другое название.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отмена', callback_data=f'cat|type|{type_key}')]]))
+        try:
+            new_name = normalize_category_name(text)
+            source_key = normalized_category_key(source_name)
+            new_key = normalized_category_key(new_name)
+        except ValueError:
+            return await emsg.reply_text('Введите непустое название категории.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('❌ Отмена', callback_data=f'cat|type|{type_key}')]]))
+        op_type = category_rename.get('op_type') or 'Расходы'
+        duplicate = None
+        if new_key != source_key:
+            for item in list_managed_categories(user_id=update.effective_user.id, workspace_id=category_rename.get('workspace_id'), op_type=op_type):
+                if item.normalized_name == new_key:
+                    duplicate = item
+                    break
+        token = token_urlsafe(8)
+        context.user_data.pop('category_rename_input', None)
+        if duplicate:
+            counts = category_reference_counts(user_id=update.effective_user.id, workspace_id=category_rename.get('workspace_id'), op_type=op_type, category=source_name)
+            context.user_data['category_action'] = {
+                'token': token,
+                'actor_user_id': update.effective_user.id,
+                'workspace_id': category_rename.get('workspace_id'),
+                'op_type': op_type,
+                'type_key': type_key,
+                'source': source_name,
+                'destination': duplicate.name,
+                'source_token': category_rename.get('source_token'),
+                'mode': 'duplicate_merge',
+                'expires_at': unix_time() + 600,
+                'used': False,
+            }
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('🔁 Перенести в существующую', callback_data=f'cat|confirm|{token}')],
+                [InlineKeyboardButton('✏️ Ввести другое', callback_data=f'cat|rename_again|{token}')],
+                [InlineKeyboardButton('Открыть существующую', callback_data=f'cat|open_dup|{token}')],
+                [InlineKeyboardButton('⬅️ Назад', callback_data=f"cat|open|{type_key}|{category_rename.get('source_token')}"), InlineKeyboardButton('❌ Отмена', callback_data=f'cat|type|{type_key}')],
+            ])
+            return await emsg.reply_text(
+                f"Категория «{duplicate.name}» уже есть.\n\nМожно перенести в неё записи из «{source_name}». Операций: {counts.operations}.",
+                reply_markup=kb,
+            )
+        counts = category_reference_counts(user_id=update.effective_user.id, workspace_id=category_rename.get('workspace_id'), op_type=op_type, category=source_name)
+        context.user_data['category_action'] = {
+            'token': token,
+            'actor_user_id': update.effective_user.id,
+            'workspace_id': category_rename.get('workspace_id'),
+            'op_type': op_type,
+            'type_key': type_key,
+            'source': source_name,
+            'destination': new_name,
+            'source_token': category_rename.get('source_token'),
+            'mode': 'rename',
+            'expires_at': unix_time() + 600,
+            'used': False,
+        }
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('✅ Переименовать', callback_data=f'cat|confirm|{token}')],
+            [InlineKeyboardButton('✏️ Ввести другое', callback_data=f'cat|rename_again|{token}')],
+            [InlineKeyboardButton('⬅️ Назад', callback_data=f"cat|open|{type_key}|{category_rename.get('source_token')}"), InlineKeyboardButton('❌ Отмена', callback_data=f'cat|type|{type_key}')],
+        ])
+        return await emsg.reply_text(
+            f"Переименовать категорию?\n\n{source_name} → {new_name}\nОпераций: {counts.operations}\nСвязанных настроек: {counts.total - counts.operations}",
+            reply_markup=kb,
+        )
+
     category_create = context.user_data.get('await_category_create')
     if isinstance(category_create, dict):
         if (
@@ -737,7 +823,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         try:
             result = get_or_create_custom_category(
                 workspace_id=category_create.get('workspace_id'),
-                user_id=cid,
+                user_id=update.effective_user.id,
                 op_type=category_create.get('op_type') or 'Расходы',
                 name=text,
             )
@@ -747,9 +833,9 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         if not result.created:
             return await emsg.reply_text(
                 f'Категория «{result.name}» уже есть. Выберите другое название.',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('➕ Добавить категорию', callback_data='cat|add_type')], [InlineKeyboardButton('🏷 Категории', callback_data='cat_menu')]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('➕ Добавить категорию', callback_data=f"cat|add|{category_create.get('type_key') or 'expense'}")], [InlineKeyboardButton('🏷 Категории', callback_data=f"cat|type|{category_create.get('type_key') or 'expense'}")]]),
             )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🏷 К категориям', callback_data='cat_menu')], [InlineKeyboardButton('➕ Добавить ещё', callback_data='cat|add_type')]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🏷 К категориям', callback_data=f"cat|type|{category_create.get('type_key') or 'expense'}")], [InlineKeyboardButton('➕ Добавить ещё', callback_data=f"cat|add|{category_create.get('type_key') or 'expense'}")]])
         return await emsg.reply_text(f'✅ Категория добавлена\n\n{result.name}', reply_markup=kb)
 
     history_state = context.user_data.get('history_delete_wizard')
