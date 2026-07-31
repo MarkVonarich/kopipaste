@@ -134,11 +134,22 @@ def test_queue_claim_is_durable_idempotent_and_skip_locked():
     assert "ON CONFLICT (user_id, notification_type, dedupe_key)" in insert_source
 
 
-def test_challenge_home_navigation_and_notifications_back(monkeypatch):
+def test_challenge_home_navigation_has_no_duplicate_notifications_button(monkeypatch):
     from routers import callbacks
 
     monkeypatch.setattr(callbacks, "track_product_event", lambda _ev: None)
-    monkeypatch.setattr(callbacks, "get_notification_preferences", lambda _cid: {
+    context = SimpleNamespace(user_data={})
+    home = _CallbackQuery("chal|home")
+    asyncio.run(callbacks.callback_handler(_update(home), context))
+    displayed = _callbacks(home.edits[-1][1]["reply_markup"])
+    assert displayed == ["chal|sec|today", "chal|sec|week", "chal|sec|month", "chal|sec|onboarding", "chal|ach", "chal|how", "start_main"]
+    assert "chal|notif" not in displayed
+
+
+def test_challenge_notification_settings_remain_available_from_settings(monkeypatch):
+    from routers import callbacks
+
+    prefs = {
         "morning_enabled": True,
         "evening_enabled": True,
         "limit_alerts_enabled": True,
@@ -151,16 +162,53 @@ def test_challenge_home_navigation_and_notifications_back(monkeypatch):
         "morning_time": "09:00",
         "evening_time": "21:00",
         "quiet_hours_enabled": True,
-    })
-    context = SimpleNamespace(user_data={})
-    home = _CallbackQuery("chal|home")
-    asyncio.run(callbacks.callback_handler(_update(home), context))
-    assert {"chal|sec|today", "chal|sec|week", "chal|sec|month", "chal|sec|onboarding", "chal|ach", "chal|notif", "chal|how"} <= set(_callbacks(home.edits[-1][1]["reply_markup"]))
+    }
+    monkeypatch.setattr(callbacks, "get_notification_preferences", lambda _cid: prefs)
 
-    notif = _CallbackQuery("chal|notif")
-    asyncio.run(callbacks.callback_handler(_update(notif), context))
-    assert context.user_data["notification_back"] == "chal|home"
-    assert "chal|home" in _callbacks(notif.edits[-1][1]["reply_markup"])
+    context = SimpleNamespace(user_data={"notification_back": "menu_settings"})
+    query = _CallbackQuery("menu_notifications")
+    asyncio.run(callbacks.callback_handler(_update(query), context))
+
+    displayed = _callbacks(query.edits[-1][1]["reply_markup"])
+    assert "notif_toggle|challenges" in displayed
+    assert "menu_settings" in displayed
+
+
+def test_challenge_notification_preference_toggle_still_works(monkeypatch):
+    from routers import callbacks
+
+    state = {"enabled": True}
+
+    def _prefs(_cid):
+        return {
+            "morning_enabled": True,
+            "evening_enabled": True,
+            "limit_alerts_enabled": True,
+            "budget_alerts_enabled": True,
+            "subscription_alerts_enabled": True,
+            "recurring_spend_alerts_enabled": True,
+            "weekly_reports_enabled": True,
+            "monthly_reports_enabled": True,
+            "challenge_notifications_enabled": state["enabled"],
+            "morning_time": "09:00",
+            "evening_time": "21:00",
+            "quiet_hours_enabled": True,
+        }
+
+    def _toggle(_cid, key):
+        assert key == "challenges"
+        state["enabled"] = not state["enabled"]
+        return state["enabled"]
+
+    monkeypatch.setattr(callbacks, "get_notification_preferences", _prefs)
+    monkeypatch.setattr(callbacks, "toggle_notification_preference", _toggle)
+
+    context = SimpleNamespace(user_data={"notification_back": "menu_settings"})
+    query = _CallbackQuery("notif_toggle|challenges")
+    asyncio.run(callbacks.callback_handler(_update(query), context))
+
+    assert query.answers[-1][0] == "Челленджи выключены"
+    assert any(button.text == "🏆 Челленджи: выключены" for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
 
 
 def test_reminder_created_inside_quiet_hours_requires_confirmation(monkeypatch):
