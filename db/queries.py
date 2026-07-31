@@ -502,6 +502,17 @@ def reminder_insert(user_id: int, payload: dict) -> int:
                 RETURNING id""", (user_id, payload['title'], payload['rem_type'], payload['category'], payload['amount'], payload.get('currency', 'RUB'), payload['event_date'], payload['repeat_rule'], payload.get('repeat_interval_days'), payload['notify_days_before']))
             rid = int(cur.fetchone()[0])
         conn.commit()
+        track_product_event(ProductEvent(
+            event_name="reminder_created",
+            user_id=user_id,
+            status="success",
+            entity_type="reminder",
+            entity_id=rid,
+            properties={
+                "repeat_rule": payload.get("repeat_rule") or "none",
+                "repeat_kind": "recurring" if (payload.get("repeat_rule") or "none") != "none" else "single",
+            },
+        ))
         return rid
     except Exception:
         conn.rollback()
@@ -539,6 +550,13 @@ def set_category_limit(user_id: int, period: str, category: str, amount: int, cu
                currency=EXCLUDED.currency,
                updated_at=now()
     """, (user_id, period, category, amount, currency))
+    track_product_event(ProductEvent(
+        event_name="limit_created",
+        user_id=user_id,
+        status="success",
+        entity_type="category_limit",
+        properties={"period": period},
+    ))
 
 def get_category_limit(user_id: int, period: str, category: str) -> Optional[Tuple[int, str]]:
     rows = pg_fetchall("""

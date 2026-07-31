@@ -41,6 +41,7 @@ from services.notification_preferences import set_quiet_hours_time
 from services.i18n import resolve_locale, t
 from services.personal_data_deletion import preview_delete_financial_history
 from services.api_usage import ApiUsageEvent, track_api_usage
+from services.product_events import ProductEvent, track_product_event
 from ui.keyboards import category_budget_picker_kb
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
@@ -1278,6 +1279,12 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text('⚠️ Введите время в формате HH:MM, например 22:30')
         start = prefs.get('quiet_hours_start') or '22:30'
         end = prefs.get('quiet_hours_end') or '08:00'
+        track_product_event(ProductEvent(
+            event_name="quiet_hours_updated",
+            user_id=cid,
+            status="success",
+            properties={"field": field},
+        ))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')]])
         return await emsg.reply_text(f'✅ Тихие часы обновлены: {start}–{end}', reply_markup=kb)
 
@@ -1502,6 +1509,12 @@ async def handle_location(update, context: ContextTypes.DEFAULT_TYPE):
         tz_name = tf.timezone_at(lng=loc.longitude, lat=loc.latitude)
         off = 180  # простой дефолт МСК
         update_user_field(cid, 'tz_offset_min', off)
+        track_product_event(ProductEvent(
+            event_name="quiet_hours_updated",
+            user_id=cid,
+            status="success",
+            properties={"destination": "timezone"},
+        ))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
         return await emsg.reply_text(f"✅ Часовой пояс установлен (приблизительно {tz_name}, UTC{off//60:+d}). Можно поправить вручную.", reply_markup=kb)
     except Exception:

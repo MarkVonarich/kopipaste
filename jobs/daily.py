@@ -24,6 +24,7 @@ from db.queries import reminders_list, reminder_update
 from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
 from services.activity import has_financial_activity_today
+from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
 from services.notification_preferences import get_notification_preferences
 from services.notification_engine import preferences_from_dict, should_send_now
 
@@ -65,6 +66,33 @@ def _mark_event(reminder_id: int, user_id: int, event_date: date, notify_days_be
             (reminder_id, user_id, event_date, notify_days_before, event_type))
 
 
+def build_user_reminder_message(reminder_id: int, event_date: date, notify_days_before: int, *, delayed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    rows = pg_fetchall(
+        """
+        SELECT id, user_id, title, rem_type, category, amount, event_date, notify_days_before, repeat_rule, repeat_interval_days
+          FROM public.user_reminders
+         WHERE id=%s
+         LIMIT 1
+        """,
+        (reminder_id,),
+    )
+    if not rows:
+        raise ValueError("reminder_not_found")
+    rid, _uid, title, _rem_type, category, amount, row_event_date, row_ndb, _repeat_rule, _repeat_days = rows[0]
+    event_date = row_event_date or event_date
+    notify_days_before = int(row_ndb if row_ndb is not None else notify_days_before)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Записать', callback_data=f'rem_rec|{rid}')],
+        [InlineKeyboardButton('⏰ Завтра', callback_data=f'rem_snz|{rid}'), InlineKeyboardButton('✏️ Изменить', callback_data=f'rem_o|{rid}')],
+        [InlineKeyboardButton('⏸ Отключить', callback_data=f'rem_tog|{rid}')],
+    ])
+    due_date = event_date - timedelta(days=notify_days_before)
+    day_txt = 'Сегодня событие' if due_date == datetime.utcnow().date() else 'Скоро событие'
+    note = "\n\n⏰ Напоминание доставлено после окончания тихих часов." if delayed else ""
+    text = f"🔔 {day_txt}\n\n{title} — {int(float(amount))} ₽\n\nКатегория: {category}\nДата: {event_date.strftime('%d.%m')}{note}"
+    return text, kb
+
+
 async def user_reminders_job(context: ContextTypes.DEFAULT_TYPE):
     today = datetime.utcnow().date()
     scanned = due = sent = skipped = 0
@@ -76,15 +104,21 @@ async def user_reminders_job(context: ContextTypes.DEFAULT_TYPE):
             if _event_sent(rid, event_date, ndb):
                 skipped += 1
                 continue
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('✅ Записать', callback_data=f'rem_rec|{rid}')],
-                [InlineKeyboardButton('⏰ Завтра', callback_data=f'rem_snz|{rid}'), InlineKeyboardButton('✏️ Изменить', callback_data=f'rem_o|{rid}')],
-                [InlineKeyboardButton('⏸ Отключить', callback_data=f'rem_tog|{rid}')],
-            ])
-            day_txt = 'Сегодня событие' if (event_date - timedelta(days=ndb)) == today else 'Скоро событие'
-            await context.bot.send_message(chat_id=uid, text=f"🔔 {day_txt}\n\n{title} — {int(float(amount))} ₽\n\nКатегория: {category}\nДата: {event_date.strftime('%d.%m')}", reply_markup=kb)
-            _mark_event(rid, uid, event_date, ndb, 'sent')
-            sent += 1
+            text, kb = build_user_reminder_message(rid, event_date, ndb)
+            result = await dispatch_automatic_notification(
+                context,
+                user_id=uid,
+                notification_type="user_reminder",
+                dedupe_key=f"user_reminder:{rid}:{event_date.isoformat()}:{ndb}",
+                policy=DeliveryPolicy.DEFER,
+                text=text,
+                reply_markup=kb,
+                template_key="user_reminder",
+                payload={"reminder_id": int(rid), "event_date": event_date.isoformat(), "notify_days_before": int(ndb)},
+            )
+            if result.status in {"sent", "deferred"}:
+                _mark_event(rid, uid, event_date, ndb, 'sent')
+                sent += 1
     except OperationalError:
         log.exception('user_reminders_job operational_error')
         return
@@ -420,7 +454,16 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
             text = pick["text"].format(name=name)
 
             try:
-                await context.bot.send_message(chat_id=uid, text=text)
+                result = await dispatch_automatic_notification(
+                    context,
+                    user_id=uid,
+                    notification_type="day_nudge",
+                    dedupe_key=f"day_nudge:{uid}:{now_loc.date().isoformat()}",
+                    policy=DeliveryPolicy.SKIP,
+                    text=text,
+                )
+                if result.status != "sent":
+                    continue
                 _log_sent(uid, "morning", pick.get("id"), pick.get("tag"))
             except (Forbidden, BadRequest) as e:
                 log.info("morning: skip %s: %s", uid, e)
@@ -464,7 +507,17 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
             text = pick["text"].format(name=name)
 
             try:
-                await context.bot.send_message(chat_id=uid, text=_with_evening_tip(text, uid, now_loc.date()), reply_markup=_evening_reply_markup(uid, now_loc.date()))
+                result = await dispatch_automatic_notification(
+                    context,
+                    user_id=uid,
+                    notification_type="evening_reminder",
+                    dedupe_key=f"evening_reminder:{uid}:{now_loc.date().isoformat()}",
+                    policy=DeliveryPolicy.SKIP,
+                    text=_with_evening_tip(text, uid, now_loc.date()),
+                    reply_markup=_evening_reply_markup(uid, now_loc.date()),
+                )
+                if result.status != "sent":
+                    continue
                 _log_sent(uid, "evening", pick.get("id"), pick.get("tag"))
             except (Forbidden, BadRequest) as e:
                 log.info("evening: skip %s: %s", uid, e)
@@ -599,7 +652,19 @@ async def weekly_report_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             text = build_weekly_report_text(uid, start, end)
             try:
-                await context.bot.send_message(chat_id=uid, text=f"{text}\n\n📥 Хотите сохранить подробные данные за эту неделю?", reply_markup=weekly_report_kb(start, end))
+                result = await dispatch_automatic_notification(
+                    context,
+                    user_id=uid,
+                    notification_type="weekly_report",
+                    dedupe_key=_report_key("weekly_report", start, end),
+                    policy=DeliveryPolicy.DEFER,
+                    text=f"{text}\n\n📥 Хотите сохранить подробные данные за эту неделю?",
+                    reply_markup=weekly_report_kb(start, end),
+                    template_key="weekly_report",
+                    payload={"start": start.isoformat(), "end": end.isoformat()},
+                )
+                if result.status not in {"sent", "deferred"}:
+                    continue
                 _report_mark_sent(uid, "weekly_report", start, end)
                 sent += 1
             except (Forbidden, BadRequest) as e:
@@ -638,7 +703,19 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             text = build_monthly_report_text(uid, start, end)
             try:
-                await context.bot.send_message(chat_id=uid, text=f"{text}\n\n📥 Подробную выгрузку за месяц можно получить здесь:", reply_markup=monthly_report_kb(start, end))
+                result = await dispatch_automatic_notification(
+                    context,
+                    user_id=uid,
+                    notification_type="monthly_report",
+                    dedupe_key=_report_key("monthly_report", start, end),
+                    policy=DeliveryPolicy.DEFER,
+                    text=f"{text}\n\n📥 Подробную выгрузку за месяц можно получить здесь:",
+                    reply_markup=monthly_report_kb(start, end),
+                    template_key="monthly_report",
+                    payload={"start": start.isoformat(), "end": end.isoformat()},
+                )
+                if result.status not in {"sent", "deferred"}:
+                    continue
                 _report_mark_sent(uid, "monthly_report", start, end)
                 sent += 1
             except (Forbidden, BadRequest) as e:
@@ -760,7 +837,18 @@ async def smart_morning_limit_job(context: ContextTypes.DEFAULT_TYPE):
                 skipped_no_signal += 1
                 continue
             try:
-                await context.bot.send_message(chat_id=uid, text=text)
+                result = await dispatch_automatic_notification(
+                    context,
+                    user_id=uid,
+                    notification_type="smart_morning_limit",
+                    dedupe_key=f"smart_morning_limit:{uid}:{now_loc.date().isoformat()}",
+                    policy=DeliveryPolicy.DEFER,
+                    text=text,
+                    template_key="smart_morning_limit",
+                    payload={"local_date": now_loc.date().isoformat()},
+                )
+                if result.status not in {"sent", "deferred"}:
+                    continue
                 _log_sent(uid, 'smart_morning_limit', None, 'limits')
                 sent += 1
             except (Forbidden, BadRequest) as e:

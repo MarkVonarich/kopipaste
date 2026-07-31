@@ -15,6 +15,7 @@ TOGGLE_FIELDS = {
     "recurring": "recurring_spend_alerts_enabled",
     "weekly": "weekly_reports_enabled",
     "monthly": "monthly_reports_enabled",
+    "challenges": "challenge_notifications_enabled",
 }
 
 
@@ -26,6 +27,7 @@ def get_notification_preferences(user_id: int) -> dict:
                    COALESCE(limit_alerts_enabled, true), COALESCE(budget_alerts_enabled, true),
                    COALESCE(subscription_alerts_enabled, true), COALESCE(recurring_spend_alerts_enabled, true),
                    COALESCE(weekly_reports_enabled, true), COALESCE(monthly_reports_enabled, true),
+                   COALESCE(challenge_notifications_enabled, true),
                    COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
                    COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
                    to_char(quiet_hours_start, 'HH24:MI'),
@@ -48,6 +50,7 @@ def get_notification_preferences(user_id: int) -> dict:
             "recurring_spend_alerts_enabled": True,
             "weekly_reports_enabled": True,
             "monthly_reports_enabled": True,
+            "challenge_notifications_enabled": True,
             "morning_time": "08:30",
             "evening_time": "20:30",
             "quiet_hours_enabled": False,
@@ -64,11 +67,12 @@ def get_notification_preferences(user_id: int) -> dict:
         "recurring_spend_alerts_enabled": bool(r[5]),
         "weekly_reports_enabled": bool(r[6]),
         "monthly_reports_enabled": bool(r[7]),
-        "morning_time": r[8],
-        "evening_time": r[9],
-        "quiet_hours_enabled": bool(r[10] and r[11]),
-        "quiet_hours_start": r[10],
-        "quiet_hours_end": r[11],
+        "challenge_notifications_enabled": bool(r[8]),
+        "morning_time": r[9],
+        "evening_time": r[10],
+        "quiet_hours_enabled": bool(r[11] and r[12]),
+        "quiet_hours_start": r[11],
+        "quiet_hours_end": r[12],
     }
 
 

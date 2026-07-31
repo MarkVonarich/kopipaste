@@ -7,6 +7,8 @@ from telegram.ext import ContextTypes
 
 from .daily import evening_reminder_job, weekly_report_job, monthly_report_job, smart_morning_limit_job, user_reminders_job
 from services.currency import update_fx_rates
+from services.automatic_notifications import process_due_notifications
+from services.challenges import challenge_daily_prompt_job
 from services.posthog_exporter import export_job_run, load_posthog_config
 from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER, ENABLE_SMART_MORNING_LIMITS, POSTHOG_EXPORT_INTERVAL_SECONDS
 
@@ -33,6 +35,36 @@ async def posthog_outbox_export_job(context: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(export_job_run)
     except Exception as e:
         log.warning("posthog_export: failed reason=%s", type(e).__name__)
+
+
+async def automatic_notifications_due_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        counts = await process_due_notifications(context)
+        if counts.get("claimed"):
+            log.info(
+                "automatic_notifications: claimed=%s sent=%s retrying=%s dead_letter=%s skipped=%s",
+                counts.get("claimed"),
+                counts.get("sent"),
+                counts.get("retrying"),
+                counts.get("dead_letter"),
+                counts.get("skipped"),
+            )
+    except Exception as e:
+        log.warning("automatic_notifications: failed reason=%s", type(e).__name__)
+
+
+async def challenges_prompt_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        counts = await challenge_daily_prompt_job(context)
+        if any(counts.values()):
+            log.info(
+                "challenges_prompt: sent=%s deferred=%s skipped=%s",
+                counts.get("sent"),
+                counts.get("deferred"),
+                counts.get("skipped"),
+            )
+    except Exception as e:
+        log.warning("challenges_prompt: failed reason=%s", type(e).__name__)
 
 
 def register_jobs(app):
@@ -76,6 +108,10 @@ def register_jobs(app):
         log.info('Skipped job "smart_morning_limit" by feature flag')
     app.job_queue.run_repeating(user_reminders_job, interval=300, first=260, name="user_reminders_job")
     log.info('Added job "user_reminders_job"')
+    app.job_queue.run_repeating(automatic_notifications_due_job, interval=60, first=60, name="automatic_notifications_due")
+    log.info('Added job "automatic_notifications_due"')
+    app.job_queue.run_repeating(challenges_prompt_job, interval=3600, first=360, name="challenge_daily_prompt")
+    log.info('Added job "challenge_daily_prompt"')
 
     posthog_config = load_posthog_config()
     if posthog_config.can_send:
