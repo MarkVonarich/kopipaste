@@ -16,6 +16,7 @@ from db.queries import (
 from cache.global_dict import bump_global_popularity, global_suggestions
 from utils.text import norm_text, format_date_ru_with_weekday
 from db.database import get_conn, pg_fetchall, pg_exec
+from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
 from services.operations import record_financial_operation
 
 log = logging.getLogger("finbot.records")
@@ -161,7 +162,17 @@ async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, co
                 label = "неделя" if period == 'week' else "месяц"
                 # короткая формулировка без цифр сумм
                 text = f"⚠️ ЛИМИТ_ПО_СТРОКА {_md_escape(category)}» ({label}): {new_band}%."
-                await context.bot.send_message(chat_id=chat_id, text=text)
+                await dispatch_automatic_notification(
+                    context,
+                    user_id=chat_id,
+                    chat_id=chat_id,
+                    notification_type="category_limit_warning",
+                    dedupe_key=f"category_limit_warning:{period}:{norm_text(category)}:{new_band}:{start.isoformat()}",
+                    policy=DeliveryPolicy.DEFER,
+                    text=text,
+                    template_key="category_limit_warning",
+                    payload={"text": text},
+                )
             except Exception as e:
                 log.debug("warn send failed: %s", e)
 

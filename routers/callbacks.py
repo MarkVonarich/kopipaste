@@ -5,6 +5,7 @@ from telegram.error import BadRequest
 from db.database import get_conn, pg_fetchall, pg_exec
 from datetime import datetime, timedelta, date
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 from telegram.ext import ContextTypes
 from db.queries import (
     upsert_user_alias, update_user_field, set_budget,
@@ -51,6 +52,8 @@ from services.export_xlsx import build_export_xlsx
 from services.export_flow import clear_export_wait_flags, export_state_has_period, parse_export_date, preset_period, validate_export_period
 from services.budgeting import build_budget_status, list_category_budget_groups, list_general_limits, period_bounds, render_limit_alert
 from services.budgeting import create_category_budget_group, list_active_expense_categories
+from services.automatic_notifications import is_quiet_local, quiet_hours_window
+from services.challenges import achievements_for_user, upsert_assignments
 from services.i18n import t
 from services.notification_preferences import get_notification_preferences, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
 from services.personal_data_deletion import delete_financial_history, delete_user_data, history_period_bounds, preview_delete_financial_history
@@ -543,6 +546,7 @@ NOTIFICATION_TOGGLE_LABELS = {
     'recurring': ('Регулярные траты', 'recurring_spend_alerts_enabled', '🔁 Регулярные траты: включены', '⛔ Регулярные траты: выключены'),
     'weekly': ('Недельные отчёты', 'weekly_reports_enabled', '📅 Недельные отчёты: включены', '📅 Недельные отчёты: выключены'),
     'monthly': ('Месячные отчёты', 'monthly_reports_enabled', '🗓 Месячные отчёты: включены', '🗓 Месячные отчёты: выключены'),
+    'challenges': ('Челленджи', 'challenge_notifications_enabled', '🏆 Челленджи: включены', '🏆 Челленджи: выключены'),
 }
 
 
@@ -561,6 +565,7 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
          InlineKeyboardButton(_notif_label(prefs, 'recurring'), callback_data='notif_toggle|recurring')],
         [InlineKeyboardButton(_notif_label(prefs, 'weekly'), callback_data='notif_toggle|weekly'),
          InlineKeyboardButton(_notif_label(prefs, 'monthly'), callback_data='notif_toggle|monthly')],
+        [InlineKeyboardButton(_notif_label(prefs, 'challenges'), callback_data='notif_toggle|challenges')],
         [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
         [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
     ])
@@ -568,11 +573,12 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
 
 async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAULT_TYPE):
     back_dest = context.user_data.get('notification_back') or 'menu_settings'
-    if back_dest not in {'menu_settings', 'lb_hub', 'rem_menu', 'start_main'}:
+    if back_dest not in {'menu_settings', 'lb_hub', 'rem_menu', 'start_main', 'chal|home'}:
         back_dest = 'menu_settings'
     prefs = get_notification_preferences(cid)
     text = (
         '🔔 Оповещения\n\n'
+        'Автоматические сообщения учитывают тихие часы. Ответы на ваши действия приходят сразу.\n\n'
         f"Утро: {prefs['morning_time']}\n"
         f"Вечер: {prefs['evening_time']}\n"
         f"Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}"
@@ -623,11 +629,142 @@ async def _render_quiet_hours(q, cid: int):
     end = prefs.get('quiet_hours_end') or '08:00'
     text = (
         '🌙 Тихие часы\n\n'
+        'Пауза работает только для автоматических напоминаний, отчётов, лимитов и челленджей. Если вы сами нажали кнопку или написали боту, ответ придёт сразу.\n\n'
         f"Статус: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}\n"
         f"Период: {start}–{end}\n"
         f"Часовой пояс: {_notification_timezone_label(cid)}"
     )
     return await _safe_edit_or_reply(q, text, reply_markup=_quiet_hours_markup(prefs))
+
+
+CHALLENGE_SECTION_LABELS = {
+    "today": "Сегодня",
+    "week": "Неделя",
+    "month": "Месяц",
+    "onboarding": "Старт",
+}
+
+
+def _challenge_home_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Сегодня", callback_data="chal|sec|today"), InlineKeyboardButton("Неделя", callback_data="chal|sec|week")],
+        [InlineKeyboardButton("Месяц", callback_data="chal|sec|month"), InlineKeyboardButton("Старт", callback_data="chal|sec|onboarding")],
+        [InlineKeyboardButton("🏅 Достижения", callback_data="chal|ach"), InlineKeyboardButton("🔔 Оповещения", callback_data="chal|notif")],
+        [InlineKeyboardButton("Как работает", callback_data="chal|how")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="start_main")],
+    ])
+
+
+async def _render_challenge_home(q, user_id: int):
+    track_product_event(ProductEvent(
+        event_name="challenge_screen_opened",
+        user_id=user_id,
+        status="success",
+        properties={"section": "home"},
+    ))
+    text = "🏆 Челленджи\n\nВыберите период или откройте достижения."
+    return await _safe_edit_or_reply(q, text, reply_markup=_challenge_home_kb())
+
+
+def _render_challenge_cards(section: str, cards) -> tuple[str, InlineKeyboardMarkup]:
+    label = CHALLENGE_SECTION_LABELS.get(section, section)
+    lines = [f"🏆 {label}", ""]
+    rows = []
+    if not cards:
+        lines.append("Все задания этого раздела уже выполнены.")
+    for card in cards:
+        done = "✅" if card.completed else "◻️"
+        lines.extend([
+            f"{done} {card.definition.title}",
+            card.definition.description,
+            f"Прогресс: {min(card.progress, card.target)}/{card.target}",
+            "",
+        ])
+        if not card.completed:
+            rows.append([InlineKeyboardButton(card.definition.cta_label[:48], callback_data=f"chal|cta|{card.definition.key}")])
+    rows.append([InlineKeyboardButton("⬅️ Челленджи", callback_data="chal|home"), InlineKeyboardButton("🏠 Главное", callback_data="start_main")])
+    return "\n".join(lines).strip(), InlineKeyboardMarkup(rows)
+
+
+async def _render_challenge_section(q, user_id: int, section: str):
+    if section not in CHALLENGE_SECTION_LABELS:
+        return await q.answer("Раздел недоступен", show_alert=True)
+    cards = upsert_assignments(user_id, section)
+    track_product_event(ProductEvent(
+        event_name="challenge_screen_opened",
+        user_id=user_id,
+        status="success",
+        properties={"section": section},
+    ))
+    text, kb = _render_challenge_cards(section, cards)
+    return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+
+async def _render_challenge_achievements(q, user_id: int):
+    rows = achievements_for_user(user_id)
+    lines = ["🏅 Достижения", ""]
+    earned_count = 0
+    for item, earned_at in rows:
+        earned = earned_at is not None
+        earned_count += 1 if earned else 0
+        lines.append(f"{'✅' if earned else '◻️'} {item.title} — {item.description}")
+    lines.insert(1, f"{earned_count}/{len(rows)} получено")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Челленджи", callback_data="chal|home"), InlineKeyboardButton("🏠 Главное", callback_data="start_main")]])
+    return await _safe_edit_or_reply(q, "\n".join(lines), reply_markup=kb)
+
+
+async def _render_challenge_how(q):
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Челленджи", callback_data="chal|home"), InlineKeyboardButton("🏠 Главное", callback_data="start_main")]])
+    text = (
+        "🏆 Как работает\n\n"
+        "Челленджи считаются по вашим локальным действиям в боте: операциям, отчётам, напоминаниям, лимитам и настройкам. "
+        "PostHog не используется как источник прогресса.\n\n"
+        "Оповещения о челленджах подчиняются тихим часам."
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=kb)
+
+
+def _challenge_destination(callback_data: str) -> str:
+    if callback_data == "menu_history":
+        return "history"
+    if callback_data == "cat_menu":
+        return "category_management"
+    if callback_data == "menu_tz":
+        return "timezone"
+    return callback_data.split("|", 1)[0]
+
+
+def _reminder_quiet_warning(draft: dict, user_id: int) -> tuple[bool, str | None]:
+    try:
+        event_date = draft.get("event_date")
+        if not isinstance(event_date, date):
+            return False, None
+        days_before = int(draft.get("notify_days_before") or 0)
+        due_date = event_date - timedelta(days=days_before)
+        rows = pg_fetchall("SELECT COALESCE(reminder_hour, 20) FROM public.users WHERE user_id=%s LIMIT 1", (user_id,))
+        hour = int(rows[0][0] if rows else 20)
+        window = quiet_hours_window(user_id)
+        if not window.enabled or window.start is None or window.end is None:
+            return False, None
+        local_due = datetime.combine(due_date, datetime.min.time().replace(hour=hour), tzinfo=ZoneInfo(window.timezone_name))
+        if not is_quiet_local(local_due, window.start, window.end):
+            return False, None
+        return True, f"{due_date.strftime('%d.%m.%Y')} в {hour:02d}:00"
+    except Exception:
+        return False, None
+
+
+def _save_reminder_draft(user_id: int, draft: dict) -> int:
+    return reminder_insert(user_id, {
+        'title': draft['title'],
+        'rem_type': draft['rem_type'],
+        'category': draft['category'],
+        'amount': draft['amount'],
+        'event_date': draft['event_date'],
+        'repeat_rule': draft.get('repeat_rule', 'none'),
+        'repeat_interval_days': draft.get('repeat_interval_days'),
+        'notify_days_before': draft.get('notify_days_before', 1),
+    })
 
 
 def _privacy_locale(user_id: int, telegram_language_code: str | None = None) -> str:
@@ -1220,6 +1357,7 @@ async def _op_edit_router(update, context: ContextTypes.DEFAULT_TYPE):
 async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ''
+    cid = update.effective_chat.id if update.effective_chat else update.effective_user.id
 
     if data == 'group_setup':
         chat = update.effective_chat
@@ -1280,6 +1418,44 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith(('gpick|', 'gadd|', 'gcancel|')):
         return await _handle_group_draft_callback(update, context, data)
+
+    if data == "chal|home":
+        await q.answer()
+        return await _render_challenge_home(q, update.effective_user.id)
+
+    if data.startswith("chal|sec|"):
+        section = data.split("|", 2)[2]
+        await q.answer()
+        return await _render_challenge_section(q, update.effective_user.id, section)
+
+    if data == "chal|ach":
+        await q.answer()
+        return await _render_challenge_achievements(q, update.effective_user.id)
+
+    if data == "chal|notif":
+        context.user_data["notification_back"] = "chal|home"
+        await q.answer()
+        return await _render_notification_settings(q, cid, context)
+
+    if data == "chal|how":
+        await q.answer()
+        return await _render_challenge_how(q)
+
+    if data.startswith("chal|cta|"):
+        key = data.split("|", 2)[2]
+        from services.challenges import ALL_CHALLENGES
+
+        definition = ALL_CHALLENGES.get(key)
+        if not definition:
+            return await q.answer("Челлендж недоступен", show_alert=True)
+        track_product_event(ProductEvent(
+            event_name="challenge_cta_opened",
+            user_id=update.effective_user.id,
+            status="success",
+            properties={"challenge_key": definition.key, "destination": _challenge_destination(definition.cta_callback)},
+        ))
+        q.data = definition.cta_callback
+        return await callback_handler(update, context)
 
     # === NOOP ("Без операций сегодня") ===
     if data == 'noop_today':
@@ -2386,9 +2562,30 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Сохранить', callback_data='rem_save')], [InlineKeyboardButton('✏️ Изменить', callback_data='rem_add')], [InlineKeyboardButton('❌ Отмена', callback_data='rem_menu')]])
         await q.answer()
         return await _safe_edit_or_reply(q, txt, reply_markup=kb)
-    if data == 'rem_save':
+    if data == 'rem_quiet_time':
+        context.user_data.pop('rem_quiet_confirmed', None)
+        context.user_data['await_rem_edit'] = {'rid': -1, 'field': 'notify_draft'}
+        await q.answer()
+        return await q.message.reply_text('За сколько дней напомнить? (0..30)')
+
+    if data in {'rem_save', 'rem_quiet_save'}:
         d = context.user_data.get('rem_draft') or {}
-        rid = reminder_insert(cid, {'title': d['title'], 'rem_type': d['rem_type'], 'category': d['category'], 'amount': d['amount'], 'event_date': d['event_date'], 'repeat_rule': d.get('repeat_rule', 'none'), 'repeat_interval_days': d.get('repeat_interval_days'), 'notify_days_before': d.get('notify_days_before', 1)})
+        if data == 'rem_save' and not context.user_data.get('rem_quiet_confirmed'):
+            quiet, due_label = _reminder_quiet_warning(d, cid)
+            if quiet:
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton('✅ Сохранить с задержкой', callback_data='rem_quiet_save')],
+                    [InlineKeyboardButton('✏️ Изменить время', callback_data='rem_quiet_time')],
+                    [InlineKeyboardButton('❌ Отмена', callback_data='rem_menu')],
+                ])
+                await q.answer()
+                return await _safe_edit_or_reply(
+                    q,
+                    f"🌙 В это время будут тихие часы.\n\nПлановое напоминание: {due_label}. Если сохранить, бот доставит его после окончания тихих часов.",
+                    reply_markup=kb,
+                )
+        context.user_data.pop('rem_quiet_confirmed', None)
+        rid = _save_reminder_draft(cid, d)
         log.info('reminder_saved user_id=%s reminder_id=%s', cid, rid)
         context.user_data.pop('rem_draft', None)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('📋 К напоминаниям', callback_data='rem_menu')], [InlineKeyboardButton('➕ Добавить ещё', callback_data='rem_add')], [InlineKeyboardButton('⬅️ Главное меню', callback_data='start_main')]])
@@ -2565,10 +2762,22 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if action == 'toggle':
                 enabled = toggle_quiet_hours(cid)
+                track_product_event(ProductEvent(
+                    event_name="quiet_hours_enabled",
+                    user_id=update.effective_user.id,
+                    status="success",
+                    properties={"enabled": bool(enabled)},
+                ))
                 await q.answer('Тихие часы включены' if enabled else 'Тихие часы выключены')
                 return await _render_quiet_hours(q, cid)
             if action in {'start', 'end'} and len(parts) > 2:
                 set_quiet_hours_time(cid, action, parts[2])
+                track_product_event(ProductEvent(
+                    event_name="quiet_hours_updated",
+                    user_id=update.effective_user.id,
+                    status="success",
+                    properties={"field": action},
+                ))
                 await q.answer('Время сохранено')
                 return await _render_quiet_hours(q, cid)
             if action == 'manual' and len(parts) > 2:
@@ -2914,6 +3123,12 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith('tz_set|'):
         off = int(data.split('|', 1)[1])
         update_user_field(cid, 'tz_offset_min', off)
+        track_product_event(ProductEvent(
+            event_name="quiet_hours_updated",
+            user_id=update.effective_user.id,
+            status="success",
+            properties={"destination": "timezone"},
+        ))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
         return await q.edit_message_text(f"✅ Часовой пояс установлен: UTC{off//60:+d}", reply_markup=kb)
 
@@ -3344,6 +3559,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('rep|'):
         period = data.split('|', 1)[1]
+        if period == 'week':
+            track_product_event(ProductEvent(event_name="weekly_report_opened", user_id=update.effective_user.id, status="success"))
+        elif period == 'month':
+            track_product_event(ProductEvent(event_name="monthly_report_opened", user_id=update.effective_user.id, status="success"))
         txt = await build_report(period, str(cid))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_report')]])
         return await q.edit_message_text(txt, parse_mode='Markdown', reply_markup=kb)

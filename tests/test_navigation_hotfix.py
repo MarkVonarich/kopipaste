@@ -161,7 +161,7 @@ def test_public_keyboards_emit_handled_callbacks_and_no_legacy_main_menu():
     ]
     emitted = {cb for markup in public_markups for cb in _callbacks(markup)}
     direct_handlers = {
-        "menu_examples", "lb_hub", "rem_menu", "exp_menu", "menu_settings", "menu_help",
+        "menu_examples", "lb_hub", "rem_menu", "exp_menu", "menu_settings", "menu_help", "chal|home",
         "lim_list", "gl_menu", "cbg_menu", "lb_status", "menu_notifications", "start_main",
         "menu_currency", "menu_reminder", "workspace_menu", "privacy_menu", "cat_menu", "menu_tz", "menu_support",
         "exp_today", "exp_7", "exp_14", "exp_m", "exp_pm", "exp_y", "exp_py", "exp_custom",
@@ -170,6 +170,7 @@ def test_public_keyboards_emit_handled_callbacks_and_no_legacy_main_menu():
     assert emitted <= direct_handlers
     assert "menu_report" not in _callbacks(main_menu_kb("ru"))
     assert "menu_analytics" not in _callbacks(main_menu_kb("ru"))
+    assert "chal|home" in _callbacks(main_menu_kb("ru"))
     assert all(len(cb.encode("utf-8")) <= 64 for cb in emitted)
 
 

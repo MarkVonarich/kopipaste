@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from psycopg2 import errors
 
 from db.database import get_conn, pg_fetchall
+from services.product_events import ProductEvent, track_product_event
 from utils.text import norm_text
 
 
@@ -667,6 +668,15 @@ def rename_category(
 
             counts = CategoryReferenceCounts(**{**before.as_dict(), **changed})
         conn.commit()
+        track_product_event(ProductEvent(
+            event_name="category_renamed",
+            user_id=user_id,
+            workspace_id=workspace_id,
+            status="success",
+            entity_type="category",
+            entity_id=category_id,
+            properties={"op_type": op_type},
+        ))
         return CategoryRenameResult(
             source=source_name,
             destination=destination_name,
@@ -938,6 +948,15 @@ def get_or_create_custom_category(
             )
             category_id = int(cur.fetchone()[0])
         conn.commit()
+        track_product_event(ProductEvent(
+            event_name="category_created",
+            user_id=user_id,
+            workspace_id=workspace_id,
+            status="success",
+            entity_type="category",
+            entity_id=category_id,
+            properties={"op_type": op_type},
+        ))
         return CategoryResult(name=display_name, normalized_name=key, created=True, category_id=category_id)
     except errors.UndefinedTable:
         conn.rollback()

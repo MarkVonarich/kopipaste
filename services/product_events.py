@@ -113,6 +113,12 @@ def track_product_event(ev: ProductEvent, *, strict: bool = False) -> int | None
         with conn.cursor() as cur:
             event_id = insert_product_event_cur(cur, ev, create_outbox=True)
         conn.commit()
+        try:
+            from services.challenges import process_product_event
+
+            process_product_event(ev)
+        except Exception as exc:
+            log.warning("challenge_event_processing_failed event=%s error_code=%s", ev.event_name, safe_error_code(exc))
         return event_id
     except (errors.UndefinedTable, errors.InvalidSchemaName):
         if conn is not None:
