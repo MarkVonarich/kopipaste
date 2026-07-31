@@ -649,7 +649,7 @@ def _challenge_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Сегодня", callback_data="chal|sec|today"), InlineKeyboardButton("Неделя", callback_data="chal|sec|week")],
         [InlineKeyboardButton("Месяц", callback_data="chal|sec|month"), InlineKeyboardButton("Старт", callback_data="chal|sec|onboarding")],
-        [InlineKeyboardButton("🏅 Достижения", callback_data="chal|ach"), InlineKeyboardButton("🔔 Оповещения", callback_data="chal|notif")],
+        [InlineKeyboardButton("🏅 Достижения", callback_data="chal|ach")],
         [InlineKeyboardButton("Как работает", callback_data="chal|how")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="start_main")],
     ])
@@ -662,7 +662,7 @@ async def _render_challenge_home(q, user_id: int):
         status="success",
         properties={"section": "home"},
     ))
-    text = "🏆 Челленджи\n\nВыберите период или откройте достижения."
+    text = "🏆 Челленджи\n\nВыберите период, достижения или справку."
     return await _safe_edit_or_reply(q, text, reply_markup=_challenge_home_kb())
 
 
@@ -1431,11 +1431,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == "chal|ach":
         await q.answer()
         return await _render_challenge_achievements(q, update.effective_user.id)
-
-    if data == "chal|notif":
-        context.user_data["notification_back"] = "chal|home"
-        await q.answer()
-        return await _render_notification_settings(q, cid, context)
 
     if data == "chal|how":
         await q.answer()
