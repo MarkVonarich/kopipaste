@@ -45,9 +45,8 @@ Run after deployment and restart.
 
 ## Category and Budget Management
 
-- Open `Настройки -> Категории` and confirm the first screen offers `Расходы`, `Доходы`, `Цели`, Back, and Main menu.
+- Open `Настройки -> Категории` and confirm the first screen offers only `Расходы`, `Доходы`, Back, and Main menu.
 - Open expense and income category lists separately; confirm adding a category from each list preserves that type and does not ask for type again.
-- Open `Цели` and confirm it is informational only and does not create category records.
 - Create a temporary expense category and a temporary income category.
 - Create an operation in the temporary expense category.
 - Add a weekly or monthly budget.
@@ -68,6 +67,31 @@ Run after deployment and restart.
 - Trigger or preview an evening reminder and confirm exactly one feature tip appears.
 - Tap the feature-tip CTA and confirm it opens the matching bot flow.
 - Check Back and Cancel buttons for each budget/category step.
+
+## Financial Goals
+
+- Open Main menu and confirm `🎯 Цели` exists next to `🏆 Челленджи`.
+- Confirm `Настройки -> Категории` no longer shows a Goals category placeholder.
+- Open `🎯 Цели`.
+- Create `✈️ Тестовый отпуск` with target `10 000 ₽`, deadline about two months ahead, and already saved `1 000 ₽`.
+- Choose monthly plan and confirm a recommended contribution is shown.
+- Confirm Back from Goals home, list, card, contribution, plan and edit screens returns one logical step.
+- Enable reminders for the goal.
+- Open `Настройки -> Оповещения` and confirm `Цели` reflects the global setting.
+- Add a manual contribution and confirm progress plus next contribution recalculate.
+- Withdraw part of the goal and confirm the plan recalculates.
+- Adjust current balance and confirm an adjustment appears in movement history.
+- Record a test salary income in a linked salary category and confirm one immediate goal suggestion appears.
+- Press the salary suggestion contribution twice quickly and confirm only one goal movement is created.
+- Use `Напомнить позже` and confirm a row enters the automatic notification system.
+- Enable quiet hours around the snooze time and confirm the snoozed reminder is deferred once.
+- Pause the goal and confirm scheduled reminders stop.
+- Resume the goal, change the deadline and confirm the recommendation recalculates.
+- Reach the target and confirm completion options are shown.
+- Archive and restore the goal.
+- Permanently delete a separate test goal and confirm ordinary linked operations remain.
+- Confirm another user or workspace cannot access the goal.
+- Confirm PostHog receives safe goal events without goal names, exact amounts, raw text or deadlines.
 
 ## Reminders
 

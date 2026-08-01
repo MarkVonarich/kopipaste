@@ -9,6 +9,7 @@ from .daily import evening_reminder_job, weekly_report_job, monthly_report_job, 
 from services.currency import update_fx_rates
 from services.automatic_notifications import process_due_notifications
 from services.challenges import challenge_daily_prompt_job
+from services.goals import enqueue_due_goal_reminders
 from services.posthog_exporter import export_job_run, load_posthog_config
 from settings import ENABLE_DAY_NUDGE, ENABLE_EVENING_REMINDER, ENABLE_SMART_MORNING_LIMITS, POSTHOG_EXPORT_INTERVAL_SECONDS
 
@@ -67,6 +68,21 @@ async def challenges_prompt_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("challenges_prompt: failed reason=%s", type(e).__name__)
 
 
+async def goal_reminders_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        counts = await asyncio.to_thread(enqueue_due_goal_reminders)
+        if any(counts.values()):
+            log.info(
+                "goal_reminders: queued=%s deferred=%s duplicate=%s blocked=%s",
+                counts.get("queued"),
+                counts.get("deferred"),
+                counts.get("duplicate"),
+                counts.get("blocked"),
+            )
+    except Exception as e:
+        log.warning("goal_reminders: failed reason=%s", type(e).__name__)
+
+
 def register_jobs(app):
     log.info(
         "scheduler flags: ENABLE_DAY_NUDGE=%s ENABLE_EVENING_REMINDER=%s ENABLE_SMART_MORNING_LIMITS=%s",
@@ -112,6 +128,8 @@ def register_jobs(app):
     log.info('Added job "automatic_notifications_due"')
     app.job_queue.run_repeating(challenges_prompt_job, interval=3600, first=360, name="challenge_daily_prompt")
     log.info('Added job "challenge_daily_prompt"')
+    app.job_queue.run_repeating(goal_reminders_scan_job, interval=300, first=320, name="goal_reminders_scan")
+    log.info('Added job "goal_reminders_scan"')
 
     posthog_config = load_posthog_config()
     if posthog_config.can_send:

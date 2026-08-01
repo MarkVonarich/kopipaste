@@ -16,6 +16,7 @@ TOGGLE_FIELDS = {
     "weekly": "weekly_reports_enabled",
     "monthly": "monthly_reports_enabled",
     "challenges": "challenge_notifications_enabled",
+    "goals": "goal_notifications_enabled",
 }
 
 
@@ -28,6 +29,7 @@ def get_notification_preferences(user_id: int) -> dict:
                    COALESCE(subscription_alerts_enabled, true), COALESCE(recurring_spend_alerts_enabled, true),
                    COALESCE(weekly_reports_enabled, true), COALESCE(monthly_reports_enabled, true),
                    COALESCE(challenge_notifications_enabled, false),
+                   COALESCE(goal_notifications_enabled, false),
                    COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
                    COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
                    to_char(quiet_hours_start, 'HH24:MI'),
@@ -51,6 +53,7 @@ def get_notification_preferences(user_id: int) -> dict:
             "weekly_reports_enabled": True,
             "monthly_reports_enabled": True,
             "challenge_notifications_enabled": False,
+            "goal_notifications_enabled": False,
             "morning_time": "08:30",
             "evening_time": "20:30",
             "quiet_hours_enabled": False,
@@ -68,17 +71,18 @@ def get_notification_preferences(user_id: int) -> dict:
         "weekly_reports_enabled": bool(r[6]),
         "monthly_reports_enabled": bool(r[7]),
         "challenge_notifications_enabled": bool(r[8]),
-        "morning_time": r[9],
-        "evening_time": r[10],
-        "quiet_hours_enabled": bool(r[11] and r[12]),
-        "quiet_hours_start": r[11],
-        "quiet_hours_end": r[12],
+        "goal_notifications_enabled": bool(r[9]),
+        "morning_time": r[10],
+        "evening_time": r[11],
+        "quiet_hours_enabled": bool(r[12] and r[13]),
+        "quiet_hours_start": r[12],
+        "quiet_hours_end": r[13],
     }
 
 
 def toggle_notification_preference(user_id: int, key: str) -> bool:
     field = TOGGLE_FIELDS[key]
-    default_enabled = False if key == "challenges" else True
+    default_enabled = False if key in {"challenges", "goals"} else True
     insert_value = not default_enabled
     conn = get_conn()
     try:

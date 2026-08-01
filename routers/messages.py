@@ -42,6 +42,19 @@ from services.i18n import resolve_locale, t
 from services.personal_data_deletion import preview_delete_financial_history
 from services.api_usage import ApiUsageEvent, track_api_usage
 from services.product_events import ProductEvent, track_product_event
+from services.goals import (
+    GoalError,
+    add_goal_movement,
+    create_goal,
+    format_date_ru,
+    format_money,
+    get_goal,
+    parse_money,
+    parse_nonnegative_money,
+    render_goal_card_text,
+    update_goal_details,
+    update_goal_plan,
+)
 from ui.keyboards import category_budget_picker_kb
 from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
 import logging
@@ -202,6 +215,78 @@ def _parse_reminder_event_date(text: str, today):
 
 def _fmt_reminder_money(v: int) -> str:
     return f"{int(v):,}".replace(',', ' ') + ' ₽'
+
+
+def _goal_error_text(code: str) -> str:
+    return {
+        "invalid_amount": "Введите сумму больше нуля.",
+        "past_deadline": "Срок цели не может быть в прошлом.",
+        "insufficient_balance": "На цели доступна меньшая сумма.",
+        "empty_name": "Введите непустое название цели.",
+        "control_characters": "Название содержит служебные символы.",
+        "name_too_long": "Название слишком длинное.",
+        "duplicate_name": "Активная цель с таким названием уже есть.",
+        "goal_not_found": "Эта кнопка устарела. Откройте цель заново.",
+        "wrong_actor": "Эту цель может менять только владелец.",
+    }.get(code, "Не удалось сохранить изменения. Данные цели не изменены. Попробуйте позже.")
+
+
+def _goal_card_kb(goal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎯 К цели", callback_data=f"goal|o|{goal_id}")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="start_main")],
+    ])
+
+
+def _goal_reminder_prompt_kb(goal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Включить напоминания", callback_data=f"goal|remtog|{goal_id}")],
+        [InlineKeyboardButton("Пока без напоминаний", callback_data=f"goal|o|{goal_id}")],
+    ])
+
+
+def _goal_confirm_kb(token: str, goal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"goal|confirm|{token}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal_id}"), InlineKeyboardButton("❌ Отмена", callback_data=f"goal|o|{goal_id}")],
+    ])
+
+
+def _goal_preview_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Создать цель", callback_data="goal|save")],
+        [InlineKeyboardButton("RUB", callback_data="goal|cur|RUB"), InlineKeyboardButton("USD", callback_data="goal|cur|USD"), InlineKeyboardButton("EUR", callback_data="goal|cur|EUR")],
+        [InlineKeyboardButton("Отмена", callback_data="goal|cancel")],
+    ])
+
+
+def _goal_creation_preview(draft: dict) -> str:
+    target = parse_money(draft.get("target_amount", "0"))
+    saved = parse_nonnegative_money(draft.get("initial_amount") or "0")
+    remaining = max(target - saved, Decimal("0"))
+    return (
+        "🎯 Проверьте цель\n\n"
+        f"Название: {draft.get('display_name')}\n"
+        f"Целевая сумма: {format_money(target, draft.get('currency') or 'RUB')}\n"
+        f"Уже накоплено: {format_money(saved, draft.get('currency') or 'RUB')}\n"
+        f"Осталось: {format_money(remaining, draft.get('currency') or 'RUB')}\n"
+        f"Срок: {format_date_ru(date.fromisoformat(draft['deadline'])) if draft.get('deadline') else 'без срока'}\n"
+        f"Валюта: {draft.get('currency') or 'RUB'}"
+    )
+
+
+def _goal_schedule_config(frequency: str) -> dict:
+    if frequency == "monthly":
+        return {"day": 5}
+    if frequency == "twice_monthly":
+        return {"days": [5, 20]}
+    if frequency == "weekly":
+        return {"weekday": 0}
+    if frequency == "salary_monthly":
+        return {"day": 5, "salary_payments_per_month": 1}
+    if frequency == "salary_twice_monthly":
+        return {"days": [5, 20], "salary_payments_per_month": 2}
+    return {}
 
 
 def _next_monthly_date(dt: date) -> date:
@@ -733,6 +818,137 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             t('privacy.stale', locale),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='privacy_menu')]]),
         )
+
+    goal_draft = context.user_data.get('goal_draft')
+    if isinstance(goal_draft, dict):
+        if goal_draft.get('actor_user_id') != update.effective_user.id or goal_draft.get('expires_at', 0) < unix_time():
+            context.user_data.pop('goal_draft', None)
+            return await emsg.reply_text('Черновик цели устарел. Начните заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🎯 Цели', callback_data='goal|home')]]))
+        step = goal_draft.get('step')
+        try:
+            if step == 'name':
+                from services.goals import normalize_goal_name
+
+                goal_draft['display_name'] = normalize_goal_name(text)
+                goal_draft['step'] = 'target'
+                goal_draft['expires_at'] = unix_time() + 1800
+                context.user_data['goal_draft'] = goal_draft
+                return await emsg.reply_text('Введите целевую сумму.')
+            if step == 'target':
+                goal_draft['target_amount'] = str(parse_money(text))
+                goal_draft['step'] = 'deadline_choice'
+                goal_draft['expires_at'] = unix_time() + 1800
+                context.user_data['goal_draft'] = goal_draft
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton('Без срока', callback_data='goal|deadline|none')],
+                    [InlineKeyboardButton('✏️ Ввести срок', callback_data='goal|deadline|input')],
+                    [InlineKeyboardButton('❌ Отмена', callback_data='goal|cancel')],
+                ])
+                return await emsg.reply_text('У цели есть срок?', reply_markup=kb)
+            if step == 'deadline':
+                parsed = _parse_flexible_date(text)
+                today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+                if not parsed or parsed < today:
+                    return await emsg.reply_text('Срок цели не может быть в прошлом. Введите дату ещё раз.')
+                goal_draft['deadline'] = parsed.isoformat()
+                goal_draft['step'] = 'initial'
+                context.user_data['goal_draft'] = goal_draft
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton('Пока 0', callback_data='goal|saved|zero')],
+                    [InlineKeyboardButton('✏️ Ввести сумму', callback_data='goal|saved|input')],
+                    [InlineKeyboardButton('❌ Отмена', callback_data='goal|cancel')],
+                ])
+                return await emsg.reply_text('Сколько уже накоплено?', reply_markup=kb)
+            if step == 'initial':
+                goal_draft['initial_amount'] = str(parse_nonnegative_money(text))
+                goal_draft['step'] = 'preview'
+                context.user_data['goal_draft'] = goal_draft
+                return await emsg.reply_text(_goal_creation_preview(goal_draft), reply_markup=_goal_preview_kb())
+        except GoalError as exc:
+            return await emsg.reply_text(_goal_error_text(str(exc)))
+
+    goal_action = context.user_data.get('goal_action')
+    if isinstance(goal_action, dict):
+        if goal_action.get('actor_user_id') != update.effective_user.id or goal_action.get('expires_at', 0) < unix_time():
+            context.user_data.pop('goal_action', None)
+            return await emsg.reply_text('Действие с целью устарело. Откройте цель заново.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🎯 Цели', callback_data='goal|home')]]))
+        goal_id = int(goal_action.get('goal_id'))
+        workspace_id = goal_action.get('workspace_id')
+        mode = goal_action.get('mode')
+        goal = get_goal(goal_id, update.effective_user.id, workspace_id)
+        if not goal:
+            context.user_data.pop('goal_action', None)
+            return await emsg.reply_text('Цель не найдена.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🎯 Цели', callback_data='goal|home')]]))
+        try:
+            if mode in {'contribution', 'withdrawal'}:
+                amount = parse_money(text)
+                token = token_urlsafe(8)
+                goal_action.update({'token': token, 'amount': str(amount), 'expires_at': unix_time() + 900, 'used': False})
+                context.user_data['goal_action'] = goal_action
+                verb = 'пополнить' if mode == 'contribution' else 'снять'
+                return await emsg.reply_text(f"Подтвердите: {verb} {format_money(amount, goal.currency)}.", reply_markup=_goal_confirm_kb(token, goal.id))
+            if mode == 'adjustment':
+                new_balance = parse_nonnegative_money(text)
+                diff = new_balance - goal.current_balance
+                token = token_urlsafe(8)
+                goal_action.update({'token': token, 'new_balance': str(new_balance), 'expires_at': unix_time() + 900, 'used': False})
+                context.user_data['goal_action'] = goal_action
+                return await emsg.reply_text(
+                    f"Корректировка прогресса\n\nБыло: {format_money(goal.current_balance, goal.currency)}\n"
+                    f"Станет: {format_money(new_balance, goal.currency)}\n"
+                    f"Корректировка: {format_money(abs(diff), goal.currency)}",
+                    reply_markup=_goal_confirm_kb(token, goal.id),
+                )
+            if mode == 'plan_contribution':
+                amount = parse_money(text)
+                goal = update_goal_plan(
+                    goal_id=goal.id,
+                    owner_user_id=update.effective_user.id,
+                    workspace_id=workspace_id,
+                    strategy='contribution',
+                    frequency=goal_action.get('frequency') or 'none',
+                    deadline=goal.deadline,
+                    comfortable_amount=amount,
+                    schedule_config=_goal_schedule_config(goal_action.get('frequency') or 'none'),
+                )
+                context.user_data.pop('goal_action', None)
+                return await emsg.reply_text("Хотите получать напоминания о плановых пополнениях?", reply_markup=_goal_reminder_prompt_kb(goal.id))
+            if mode == 'plan_deadline':
+                parsed = _parse_flexible_date(text)
+                today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+                if not parsed or parsed < today:
+                    return await emsg.reply_text('Срок цели не может быть в прошлом. Введите дату ещё раз.')
+                goal = update_goal_plan(
+                    goal_id=goal.id,
+                    owner_user_id=update.effective_user.id,
+                    workspace_id=workspace_id,
+                    strategy='deadline',
+                    frequency=goal_action.get('frequency') or 'monthly',
+                    deadline=parsed,
+                    schedule_config=_goal_schedule_config(goal_action.get('frequency') or 'monthly'),
+                )
+                context.user_data.pop('goal_action', None)
+                return await emsg.reply_text("Хотите получать напоминания о плановых пополнениях?", reply_markup=_goal_reminder_prompt_kb(goal.id))
+            if mode == 'edit_name':
+                goal = update_goal_details(goal_id=goal.id, owner_user_id=update.effective_user.id, workspace_id=workspace_id, display_name=text)
+                context.user_data.pop('goal_action', None)
+                return await emsg.reply_text(render_goal_card_text(goal), reply_markup=_goal_card_kb(goal.id))
+            if mode == 'edit_target':
+                goal = update_goal_details(goal_id=goal.id, owner_user_id=update.effective_user.id, workspace_id=workspace_id, target_amount=parse_money(text))
+                context.user_data.pop('goal_action', None)
+                return await emsg.reply_text(render_goal_card_text(goal), reply_markup=_goal_card_kb(goal.id))
+            if mode == 'edit_deadline':
+                parsed = None if text.strip().lower() in {'без срока', 'нет', 'none'} else _parse_flexible_date(text)
+                if parsed is None and text.strip().lower() not in {'без срока', 'нет', 'none'}:
+                    return await emsg.reply_text('Не понял дату. Напишите, например: 01.12.2026 или «без срока».')
+                goal = update_goal_details(goal_id=goal.id, owner_user_id=update.effective_user.id, workspace_id=workspace_id, deadline=parsed)
+                context.user_data.pop('goal_action', None)
+                return await emsg.reply_text(render_goal_card_text(goal), reply_markup=_goal_card_kb(goal.id))
+        except GoalError as exc:
+            return await emsg.reply_text(_goal_error_text(str(exc)))
+        except Exception:
+            log.warning('goal_text_action_failed user_id=%s mode=%s', update.effective_user.id, mode)
+            return await emsg.reply_text('Не удалось сохранить изменения. Данные цели не изменены. Попробуйте позже.')
 
     category_rename = context.user_data.get('category_rename_input')
     if isinstance(category_rename, dict):

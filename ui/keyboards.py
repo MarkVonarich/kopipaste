@@ -14,7 +14,8 @@ def main_menu_kb(locale: str | None = None):
          InlineKeyboardButton(t('menu.reminders', locale), callback_data='rem_menu')],
         [InlineKeyboardButton(t('menu.export', locale), callback_data='exp_menu'),
          InlineKeyboardButton(t('menu.settings', locale), callback_data='menu_settings')],
-        [InlineKeyboardButton('🏆 Челленджи', callback_data='chal|home')],
+        [InlineKeyboardButton('🎯 Цели', callback_data='goal|home'),
+         InlineKeyboardButton('🏆 Челленджи', callback_data='chal|home')],
         [InlineKeyboardButton(t('menu.help', locale), callback_data='menu_help')],
     ])
 

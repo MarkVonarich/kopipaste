@@ -52,13 +52,31 @@ from services.export_xlsx import build_export_xlsx
 from services.export_flow import clear_export_wait_flags, export_state_has_period, parse_export_date, preset_period, validate_export_period
 from services.budgeting import build_budget_status, list_category_budget_groups, list_general_limits, period_bounds, render_limit_alert
 from services.budgeting import create_category_budget_group, list_active_expense_categories
-from services.automatic_notifications import is_quiet_local, quiet_hours_window
+from services.automatic_notifications import DeliveryPolicy, is_quiet_local, queue_automatic_notification, quiet_hours_window
 from services.challenges import achievements_for_user, upsert_assignments
 from services.i18n import t
 from services.notification_preferences import get_notification_preferences, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
 from services.personal_data_deletion import delete_financial_history, delete_user_data, history_period_bounds, preview_delete_financial_history
 from services.analytics_privacy import apply_account_deletion
 from services.product_events import ProductEvent, track_product_event
+from services.goals import (
+    GoalError,
+    add_goal_movement,
+    create_goal,
+    delete_goal_permanently,
+    format_date_ru,
+    format_money,
+    get_goal,
+    goal_status_label,
+    list_goals,
+    list_movements,
+    parse_money,
+    render_goal_card_text,
+    set_goal_reminders,
+    set_goal_status,
+    update_goal_details,
+    update_goal_plan,
+)
 from services.security_events import SecurityEvent, track_security_event
 import tempfile
 import os
@@ -429,6 +447,9 @@ async def _safe_edit_or_reply(q, text: str, reply_markup=None, parse_mode: str |
 
 async def render_main_menu(q, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('await_group_custom_category', None)
+    context.user_data.pop('goal_draft', None)
+    context.user_data.pop('goal_action', None)
+    context.user_data.pop('goal_delete_confirm', None)
     clear_export_wait_flags(context.user_data)
     locale = get_user_locale(chat_id)
     return await _safe_edit_or_reply(q, t('menu.main.title', locale), reply_markup=canonical_main_menu_kb(locale))
@@ -547,12 +568,13 @@ NOTIFICATION_TOGGLE_LABELS = {
     'weekly': ('Недельные отчёты', 'weekly_reports_enabled', '📅 Недельные отчёты: включены', '📅 Недельные отчёты: выключены'),
     'monthly': ('Месячные отчёты', 'monthly_reports_enabled', '🗓 Месячные отчёты: включены', '🗓 Месячные отчёты: выключены'),
     'challenges': ('Челленджи', 'challenge_notifications_enabled', '🏆 Челленджи: включены', '🏆 Челленджи: выключены'),
+    'goals': ('Цели', 'goal_notifications_enabled', '🎯 Цели: включены', '🎯 Цели: выключены'),
 }
 
 
 def _notif_label(prefs: dict, key: str) -> str:
     _, field, on_label, off_label = NOTIFICATION_TOGGLE_LABELS[key]
-    default_value = False if key == 'challenges' else True
+    default_value = False if key in {'challenges', 'goals'} else True
     return on_label if prefs.get(field, default_value) else off_label
 
 
@@ -566,6 +588,7 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
          InlineKeyboardButton(_notif_label(prefs, 'recurring'), callback_data='notif_toggle|recurring')],
         [InlineKeyboardButton(_notif_label(prefs, 'weekly'), callback_data='notif_toggle|weekly'),
          InlineKeyboardButton(_notif_label(prefs, 'monthly'), callback_data='notif_toggle|monthly')],
+        [InlineKeyboardButton(_notif_label(prefs, 'goals'), callback_data='notif_toggle|goals')],
         [InlineKeyboardButton(_notif_label(prefs, 'challenges'), callback_data='notif_challenges')],
         [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
         [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
@@ -763,6 +786,230 @@ def _challenge_destination(callback_data: str) -> str:
     return callback_data.split("|", 1)[0]
 
 
+def _goal_workspace(update) -> int | None:
+    return resolve_workspace(
+        update.effective_chat.id if update.effective_chat else update.effective_user.id,
+        update.effective_user.id,
+        getattr(update.effective_chat, 'type', 'private') or 'private',
+    ).workspace_id
+
+
+def _goal_nav_kb(back: str = "goal|home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data=back), InlineKeyboardButton("🏠 Главное меню", callback_data="start_main")],
+    ])
+
+
+def _goal_home_kb(goals) -> InlineKeyboardMarkup:
+    rows = []
+    for goal in goals[:8]:
+        rows.append([InlineKeyboardButton(goal.display_name[:40], callback_data=f"goal|o|{goal.id}")])
+    rows.append([InlineKeyboardButton("➕ Создать цель", callback_data="goal|new")])
+    if goals:
+        rows.append([InlineKeyboardButton("✅ Завершённые", callback_data="goal|list|done"), InlineKeyboardButton("🗄 Архив", callback_data="goal|list|arch")])
+    rows.append([InlineKeyboardButton("📘 Как это работает", callback_data="goal|how")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="start_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _render_goals_home(q, context: ContextTypes.DEFAULT_TYPE, update):
+    user_id = update.effective_user.id
+    workspace_id = _goal_workspace(update)
+    goals = list_goals(user_id, workspace_id, status_group="active")
+    track_product_event(ProductEvent(
+        event_name="goal_screen_opened",
+        user_id=user_id,
+        workspace_id=workspace_id,
+        status="success",
+        properties={"section": "home"},
+    ))
+    if not goals:
+        text = (
+            "🎯 Финансовые цели\n\n"
+            "Цель — это не просто сумма накоплений.\n"
+            "Finuchet рассчитает план и подскажет следующий шаг."
+        )
+    else:
+        lines = ["🎯 Финансовые цели", "", f"Активных целей: {len(goals)}", ""]
+        for goal in goals[:5]:
+            lines.append(f"{goal.display_name} — {format_money(goal.current_balance, goal.currency)} из {format_money(goal.target_amount, goal.currency)}")
+        text = "\n".join(lines)
+    context.user_data["goal_last_list"] = "home"
+    return await _safe_edit_or_reply(q, text, reply_markup=_goal_home_kb(goals))
+
+
+async def _render_goal_list(q, context: ContextTypes.DEFAULT_TYPE, update, group: str):
+    user_id = update.effective_user.id
+    workspace_id = _goal_workspace(update)
+    status_group = "completed" if group == "done" else "archive"
+    goals = list_goals(user_id, workspace_id, status_group=status_group)
+    title = "✅ Завершённые цели" if group == "done" else "🗄 Архив целей"
+    rows = [[InlineKeyboardButton(goal.display_name[:40], callback_data=f"goal|o|{goal.id}|{group}")] for goal in goals[:10]]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="goal|home"), InlineKeyboardButton("🏠 Главное меню", callback_data="start_main")])
+    text = title if goals else f"{title}\n\nЗдесь пока пусто."
+    context.user_data["goal_last_list"] = group
+    return await _safe_edit_or_reply(q, text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+def _goal_card_kb(goal_id: int, back_group: str = "home") -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("➕ Пополнить", callback_data=f"goal|add|{goal_id}"), InlineKeyboardButton("➖ Снять", callback_data=f"goal|wd|{goal_id}")],
+        [InlineKeyboardButton("📅 План", callback_data=f"goal|pl|{goal_id}"), InlineKeyboardButton("🔔 Напоминания", callback_data=f"goal|rem|{goal_id}")],
+        [InlineKeyboardButton("✏️ Изменить", callback_data=f"goal|edit|{goal_id}"), InlineKeyboardButton("Ещё", callback_data=f"goal|more|{goal_id}")],
+    ]
+    if back_group == "done":
+        back = "goal|list|done"
+    elif back_group == "arch":
+        back = "goal|list|arch"
+    else:
+        back = "goal|home"
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back), InlineKeyboardButton("🏠 Главное меню", callback_data="start_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _render_goal_card(q, context: ContextTypes.DEFAULT_TYPE, update, goal_id: int, back_group: str | None = None):
+    user_id = update.effective_user.id
+    workspace_id = _goal_workspace(update)
+    goal = get_goal(goal_id, user_id, workspace_id)
+    if not goal:
+        return await _safe_edit_or_reply(q, "Эта кнопка устарела. Откройте цель заново.", reply_markup=_goal_nav_kb("goal|home"))
+    back = back_group or context.user_data.get("goal_last_list") or "home"
+    return await _safe_edit_or_reply(q, render_goal_card_text(goal), reply_markup=_goal_card_kb(goal.id, back))
+
+
+def _goal_plan_kb(goal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Успеть к дате", callback_data=f"goal|ps|{goal_id}|deadline")],
+        [InlineKeyboardButton("💳 Комфортная сумма", callback_data=f"goal|ps|{goal_id}|contribution")],
+        [InlineKeyboardButton("👐 Пока без плана", callback_data=f"goal|ps|{goal_id}|none")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal_id}"), InlineKeyboardButton("🏠 Главное меню", callback_data="start_main")],
+    ])
+
+
+def _goal_reminder_prompt_kb(goal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Включить напоминания", callback_data=f"goal|remtog|{goal_id}")],
+        [InlineKeyboardButton("Пока без напоминаний", callback_data=f"goal|o|{goal_id}")],
+    ])
+
+
+def _goal_frequency_kb(goal_id: int, strategy: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("После каждой зарплаты", callback_data=f"goal|fr|{goal_id}|{strategy}|salary_monthly")],
+        [InlineKeyboardButton("Один раз в месяц", callback_data=f"goal|fr|{goal_id}|{strategy}|monthly")],
+        [InlineKeyboardButton("Два раза в месяц", callback_data=f"goal|fr|{goal_id}|{strategy}|twice_monthly")],
+        [InlineKeyboardButton("Раз в неделю", callback_data=f"goal|fr|{goal_id}|{strategy}|weekly")],
+        [InlineKeyboardButton("Без расписания", callback_data=f"goal|fr|{goal_id}|{strategy}|none")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|pl|{goal_id}"), InlineKeyboardButton("❌ Отмена", callback_data=f"goal|o|{goal_id}")],
+    ])
+
+
+async def _render_goal_plan_menu(q, update, goal_id: int):
+    goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+    if not goal:
+        return await _safe_edit_or_reply(q, "Эта кнопка устарела. Откройте цель заново.", reply_markup=_goal_nav_kb("goal|home"))
+    text = (
+        "📅 План цели\n\n"
+        f"Стратегия: {goal.strategy}\n"
+        f"Периодичность: {goal.frequency}\n"
+        f"Рекомендуемый взнос: {format_money(goal.planned_contribution_amount or 0, goal.currency)}\n"
+        f"Следующая дата: {format_date_ru(goal.next_contribution_date)}\n\n"
+        "Как вы хотите построить план?"
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=_goal_plan_kb(goal_id))
+
+
+def _goal_more_kb(goal_id: int, status: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📋 История цели", callback_data=f"goal|hist|{goal_id}")]]
+    if status == "paused":
+        rows.append([InlineKeyboardButton("▶️ Возобновить", callback_data=f"goal|st|{goal_id}|active")])
+    elif status == "active":
+        rows.append([InlineKeyboardButton("⏸ Пауза", callback_data=f"goal|st|{goal_id}|paused")])
+    if status == "archived":
+        rows.append([InlineKeyboardButton("♻️ Восстановить", callback_data=f"goal|st|{goal_id}|active")])
+        rows.append([InlineKeyboardButton("🗑 Удалить навсегда", callback_data=f"goal|del1|{goal_id}")])
+    else:
+        rows.append([InlineKeyboardButton("🗄 Архивировать", callback_data=f"goal|st|{goal_id}|archived")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal_id}"), InlineKeyboardButton("🏠 Главное меню", callback_data="start_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _render_goal_history(q, update, goal_id: int):
+    user_id = update.effective_user.id
+    workspace_id = _goal_workspace(update)
+    goal = get_goal(goal_id, user_id, workspace_id)
+    if not goal:
+        return await _safe_edit_or_reply(q, "Цель не найдена.", reply_markup=_goal_nav_kb("goal|home"))
+    rows = list_movements(goal.id, user_id, workspace_id, limit=10)
+    labels = {"initial": "Старт", "contribution": "Пополнение", "withdrawal": "Снятие", "adjustment": "Корректировка"}
+    lines = [f"📋 История цели\n\n{goal.display_name}", ""]
+    if not rows:
+        lines.append("Движений пока нет.")
+    for item in rows:
+        occurred = item.occurred_at.date() if hasattr(item.occurred_at, "date") else None
+        lines.append(f"{format_date_ru(occurred)} — {labels.get(item.movement_type, item.movement_type)}: {format_money(item.amount, goal.currency)}")
+    return await _safe_edit_or_reply(q, "\n".join(lines), reply_markup=_goal_nav_kb(f"goal|more|{goal.id}"))
+
+
+def _goal_creation_preview(draft: dict) -> str:
+    target = parse_money(draft.get("target_amount", "0"))
+    saved = Decimal(str(draft.get("initial_amount") or "0"))
+    remaining = max(target - saved, Decimal("0"))
+    return (
+        "🎯 Проверьте цель\n\n"
+        f"Название: {draft.get('display_name')}\n"
+        f"Целевая сумма: {format_money(target, draft.get('currency') or 'RUB')}\n"
+        f"Уже накоплено: {format_money(saved, draft.get('currency') or 'RUB')}\n"
+        f"Осталось: {format_money(remaining, draft.get('currency') or 'RUB')}\n"
+        f"Срок: {format_date_ru(date.fromisoformat(draft['deadline'])) if draft.get('deadline') else 'без срока'}\n"
+        f"Валюта: {draft.get('currency') or 'RUB'}"
+    )
+
+
+def _goal_preview_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Создать цель", callback_data="goal|save")],
+        [InlineKeyboardButton("RUB", callback_data="goal|cur|RUB"), InlineKeyboardButton("USD", callback_data="goal|cur|USD"), InlineKeyboardButton("EUR", callback_data="goal|cur|EUR")],
+        [InlineKeyboardButton("Изменить название", callback_data="goal|new")],
+        [InlineKeyboardButton("Отмена", callback_data="goal|cancel")],
+    ])
+
+
+def _goal_confirm_kb(token: str, goal_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"goal|confirm|{token}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal_id}"), InlineKeyboardButton("❌ Отмена", callback_data=f"goal|o|{goal_id}")],
+    ])
+
+
+def _goal_error_text(code: str) -> str:
+    return {
+        "invalid_amount": "Введите сумму больше нуля.",
+        "past_deadline": "Срок цели не может быть в прошлом.",
+        "insufficient_balance": "На цели недостаточно средств.",
+        "empty_name": "Введите непустое название цели.",
+        "control_characters": "Название содержит служебные символы.",
+        "name_too_long": "Название слишком длинное.",
+        "duplicate_name": "Активная цель с таким названием уже есть.",
+        "goal_not_found": "Эта кнопка устарела. Откройте цель заново.",
+        "wrong_actor": "Эту цель может менять только владелец.",
+    }.get(code, "Не удалось сохранить изменения. Данные цели не изменены. Попробуйте позже.")
+
+
+def _schedule_config_for_frequency(frequency: str) -> dict:
+    if frequency == "monthly":
+        return {"day": 5}
+    if frequency == "twice_monthly":
+        return {"days": [5, 20]}
+    if frequency == "weekly":
+        return {"weekday": 0}
+    if frequency == "salary_monthly":
+        return {"day": 5, "salary_payments_per_month": 1}
+    if frequency == "salary_twice_monthly":
+        return {"days": [5, 20], "salary_payments_per_month": 2}
+    return {}
+
+
 def _reminder_quiet_warning(draft: dict, user_id: int) -> tuple[bool, str | None]:
     try:
         event_date = draft.get("event_date")
@@ -935,7 +1182,6 @@ def _category_type_selector_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💸 Расходы', callback_data='cat|type|expense')],
         [InlineKeyboardButton('💰 Доходы', callback_data='cat|type|income')],
-        [InlineKeyboardButton('🎯 Цели', callback_data='cat|goals')],
         [InlineKeyboardButton('⬅️ Назад', callback_data='menu_settings')],
         [InlineKeyboardButton('🏠 Главное меню', callback_data='start_main')],
     ])
@@ -1481,6 +1727,343 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         q.data = definition.cta_callback
         return await callback_handler(update, context)
 
+    if data == "goal|home":
+        await q.answer()
+        return await _render_goals_home(q, context, update)
+
+    if data == "goal|new":
+        workspace = resolve_workspace(cid, update.effective_user.id, getattr(update.effective_chat, 'type', 'private') or 'private')
+        context.user_data["goal_draft"] = {
+            "actor_user_id": update.effective_user.id,
+            "workspace_id": workspace.workspace_id,
+            "step": "name",
+            "currency": get_user_currency(update.effective_user.id),
+            "expires_at": unix_time() + 1800,
+        }
+        track_product_event(ProductEvent(event_name="goal_creation_started", user_id=update.effective_user.id, workspace_id=workspace.workspace_id, status="started"))
+        await q.answer()
+        return await _safe_edit_or_reply(q, "🎯 Новая цель\n\nВведите название цели.", reply_markup=_goal_nav_kb("goal|home"))
+
+    if data in {"goal|how"}:
+        await q.answer()
+        return await _safe_edit_or_reply(
+            q,
+            "📘 Как работают цели\n\n"
+            "Цель — это финансовый план с отдельной внутренней историей движений. "
+            "Пополнение цели не создаёт расход или доход и не меняет обычные итоги.\n\n"
+            "Можно выбрать срок, комфортную сумму или оставить цель без расписания. "
+            "Автоматические напоминания идут через общий диспетчер и соблюдают тихие часы.",
+            reply_markup=_goal_nav_kb("goal|home"),
+        )
+
+    if data.startswith("goal|list|"):
+        await q.answer()
+        return await _render_goal_list(q, context, update, data.split("|", 2)[2])
+
+    if data.startswith("goal|o|"):
+        parts = data.split("|")
+        await q.answer()
+        return await _render_goal_card(q, context, update, int(parts[2]), parts[3] if len(parts) > 3 else None)
+
+    if data.startswith("goal|sal|"):
+        parts = data.split("|")
+        if len(parts) < 5:
+            return await q.answer("Кнопка устарела", show_alert=True)
+        action, goal_id, operation_id = parts[2], int(parts[3]), int(parts[4])
+        workspace_id = _goal_workspace(update)
+        goal = get_goal(goal_id, update.effective_user.id, workspace_id)
+        if not goal:
+            return await q.answer("Цель не найдена", show_alert=True)
+        if action == "a":
+            amount = goal.planned_contribution_amount or goal.comfortable_amount
+            if not amount or amount <= 0:
+                return await q.answer("Сумма по плану пока недоступна", show_alert=True)
+            goal, _movement, created = add_goal_movement(
+                goal_id=goal.id,
+                owner_user_id=update.effective_user.id,
+                workspace_id=workspace_id,
+                actor_user_id=update.effective_user.id,
+                movement_type="contribution",
+                amount=amount,
+                source="income_suggestion",
+                linked_operation_id=operation_id,
+                idempotency_key=f"goal:{goal.id}:income:{operation_id}:accepted",
+            )
+            track_product_event(ProductEvent(event_name="goal_income_suggestion_accepted", user_id=update.effective_user.id, workspace_id=workspace_id, status="accepted", currency=goal.currency, properties={"source": "income_operation"}))
+            await q.answer("Пополнение сохранено" if created else "Уже сохранено")
+            return await _render_goal_card(q, context, update, goal.id)
+        if action == "m":
+            context.user_data["goal_action"] = {"actor_user_id": update.effective_user.id, "workspace_id": workspace_id, "goal_id": goal.id, "mode": "contribution", "expires_at": unix_time() + 900}
+            await q.answer()
+            return await q.message.reply_text("Введите сумму пополнения цели.")
+        if action == "s":
+            text = f"🎯 Напоминание о цели\n\n{goal.display_name}\nПополнить цель можно из карточки."
+            queue_automatic_notification(
+                user_id=update.effective_user.id,
+                workspace_id=workspace_id,
+                notification_type="goal_salary_snooze",
+                dedupe_key=f"goal:{goal.id}:salary_snooze:{operation_id}:tomorrow",
+                policy=DeliveryPolicy.DEFER,
+                template_key="goal_salary_snooze",
+                payload={"text": text, "goal_id": goal.id, "buttons": [[{"label": "🎯 Открыть цель", "callback_data": f"goal|o|{goal.id}"}]]},
+                original_scheduled_at=datetime.now() + timedelta(days=1),
+            )
+            track_product_event(ProductEvent(event_name="goal_income_suggestion_snoozed", user_id=update.effective_user.id, workspace_id=workspace_id, status="snoozed", properties={"source": "income_operation"}))
+            return await q.answer("Напомню позже")
+        if action == "x":
+            track_product_event(ProductEvent(event_name="goal_income_suggestion_dismissed", user_id=update.effective_user.id, workspace_id=workspace_id, status="dismissed", properties={"source": "income_operation"}))
+            return await q.answer("Пропущено")
+
+    if data.startswith("goal|cur|"):
+        draft = context.user_data.get("goal_draft") or {}
+        if draft.get("actor_user_id") != update.effective_user.id or draft.get("expires_at", 0) < unix_time():
+            context.user_data.pop("goal_draft", None)
+            return await q.answer("Черновик устарел. Начните заново.", show_alert=True)
+        draft["currency"] = data.split("|", 2)[2]
+        context.user_data["goal_draft"] = draft
+        await q.answer("Валюта обновлена")
+        return await _safe_edit_or_reply(q, _goal_creation_preview(draft), reply_markup=_goal_preview_kb())
+
+    if data == "goal|deadline|none":
+        draft = context.user_data.get("goal_draft") or {}
+        draft["deadline"] = None
+        draft["step"] = "initial"
+        context.user_data["goal_draft"] = draft
+        await q.answer()
+        return await _safe_edit_or_reply(q, "Сколько уже накоплено?\n\nМожно нажать «Пока 0».", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Пока 0", callback_data="goal|saved|zero")],
+            [InlineKeyboardButton("✏️ Ввести сумму", callback_data="goal|saved|input")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="goal|new"), InlineKeyboardButton("❌ Отмена", callback_data="goal|cancel")],
+        ]))
+
+    if data == "goal|deadline|input":
+        draft = context.user_data.get("goal_draft") or {}
+        draft["step"] = "deadline"
+        context.user_data["goal_draft"] = draft
+        await q.answer()
+        return await q.message.reply_text("Введите срок цели.\n\nНапример: 01.12.2026")
+
+    if data == "goal|saved|zero":
+        draft = context.user_data.get("goal_draft") or {}
+        draft["initial_amount"] = "0"
+        draft["step"] = "preview"
+        context.user_data["goal_draft"] = draft
+        await q.answer()
+        return await _safe_edit_or_reply(q, _goal_creation_preview(draft), reply_markup=_goal_preview_kb())
+
+    if data == "goal|saved|input":
+        draft = context.user_data.get("goal_draft") or {}
+        draft["step"] = "initial"
+        context.user_data["goal_draft"] = draft
+        await q.answer()
+        return await q.message.reply_text("Введите уже накопленную сумму.")
+
+    if data == "goal|cancel":
+        context.user_data.pop("goal_draft", None)
+        context.user_data.pop("goal_action", None)
+        await q.answer("Отменено")
+        return await _render_goals_home(q, context, update)
+
+    if data == "goal|save":
+        draft = context.user_data.get("goal_draft") or {}
+        if draft.get("actor_user_id") != update.effective_user.id or draft.get("expires_at", 0) < unix_time():
+            context.user_data.pop("goal_draft", None)
+            return await q.answer("Черновик устарел. Начните заново.", show_alert=True)
+        try:
+            goal = create_goal(
+                owner_user_id=update.effective_user.id,
+                workspace_id=draft.get("workspace_id"),
+                display_name=draft.get("display_name"),
+                target_amount=draft.get("target_amount"),
+                currency=draft.get("currency"),
+                deadline=date.fromisoformat(draft["deadline"]) if draft.get("deadline") else None,
+                initial_amount=draft.get("initial_amount") or "0",
+            )
+        except GoalError as exc:
+            return await q.answer(_goal_error_text(str(exc)), show_alert=True)
+        except Exception:
+            log.warning("goal_create_failed user_id=%s", update.effective_user.id)
+            return await _safe_edit_or_reply(q, "Не удалось сохранить цель. Данные цели не изменены. Попробуйте позже.", reply_markup=_goal_nav_kb("goal|home"))
+        context.user_data.pop("goal_draft", None)
+        await q.answer("Цель создана")
+        return await _safe_edit_or_reply(q, "Как вы хотите построить план?", reply_markup=_goal_plan_kb(goal.id))
+
+    if data.startswith("goal|pl|"):
+        await q.answer()
+        return await _render_goal_plan_menu(q, update, int(data.split("|")[2]))
+
+    if data.startswith("goal|ps|"):
+        _, _, goal_id_s, strategy = data.split("|", 3)
+        goal_id = int(goal_id_s)
+        if strategy == "none":
+            goal = update_goal_plan(goal_id=goal_id, owner_user_id=update.effective_user.id, workspace_id=_goal_workspace(update), strategy="none", frequency="none")
+            await q.answer("План обновлён")
+            return await _safe_edit_or_reply(q, "Хотите получать напоминания о плановых пополнениях?", reply_markup=_goal_reminder_prompt_kb(goal.id))
+        await q.answer()
+        return await _safe_edit_or_reply(q, "Выберите периодичность пополнений.", reply_markup=_goal_frequency_kb(goal_id, strategy))
+
+    if data.startswith("goal|fr|"):
+        _, _, goal_id_s, strategy, frequency = data.split("|", 4)
+        goal_id = int(goal_id_s)
+        if strategy == "contribution":
+            context.user_data["goal_action"] = {"actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": goal_id, "mode": "plan_contribution", "frequency": frequency, "expires_at": unix_time() + 900}
+            await q.answer()
+            return await q.message.reply_text("Введите комфортную сумму одного пополнения.")
+        goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+        if not goal:
+            return await q.answer("Цель не найдена", show_alert=True)
+        if not goal.deadline:
+            context.user_data["goal_action"] = {"actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": goal_id, "mode": "plan_deadline", "frequency": frequency, "expires_at": unix_time() + 900}
+            await q.answer()
+            return await q.message.reply_text("Введите срок цели для плана.")
+        schedule = _schedule_config_for_frequency(frequency)
+        goal = update_goal_plan(goal_id=goal_id, owner_user_id=update.effective_user.id, workspace_id=_goal_workspace(update), strategy="deadline", frequency=frequency, deadline=goal.deadline, schedule_config=schedule)
+        await q.answer("План обновлён")
+        return await _safe_edit_or_reply(q, "Хотите получать напоминания о плановых пополнениях?", reply_markup=_goal_reminder_prompt_kb(goal.id))
+
+    if data.startswith(("goal|add|", "goal|wd|", "goal|adj|")):
+        parts = data.split("|")
+        mode = {"add": "contribution", "wd": "withdrawal", "adj": "adjustment"}[parts[1]]
+        goal_id = int(parts[2])
+        goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+        if not goal:
+            return await q.answer("Цель не найдена", show_alert=True)
+        if mode == "contribution":
+            text = f"➕ Пополнение\n\nСейчас: {format_money(goal.current_balance, goal.currency)}"
+            if goal.planned_contribution_amount:
+                text += f"\nРекомендация: {format_money(goal.planned_contribution_amount, goal.currency)}"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Пополнить рекомендованную сумму", callback_data=f"goal|rec|{goal.id}")],
+                [InlineKeyboardButton("Ввести другую сумму", callback_data=f"goal|amt|{goal.id}|contribution")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal.id}")],
+            ])
+            await q.answer()
+            return await _safe_edit_or_reply(q, text, reply_markup=kb)
+        context.user_data["goal_action"] = {"actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": goal.id, "mode": mode, "expires_at": unix_time() + 900}
+        await q.answer()
+        prompt = "Введите сумму снятия." if mode == "withdrawal" else "Введите новую текущую сумму цели."
+        return await q.message.reply_text(prompt)
+
+    if data.startswith("goal|rec|"):
+        goal_id = int(data.split("|")[2])
+        goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+        if not goal or not goal.planned_contribution_amount:
+            return await q.answer("Рекомендованная сумма пока недоступна", show_alert=True)
+        token = token_urlsafe(8)
+        context.user_data["goal_action"] = {"token": token, "actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": goal.id, "mode": "contribution", "amount": str(goal.planned_contribution_amount), "expires_at": unix_time() + 900, "used": False}
+        return await _safe_edit_or_reply(q, f"Пополнить цель на {format_money(goal.planned_contribution_amount, goal.currency)}?", reply_markup=_goal_confirm_kb(token, goal.id))
+
+    if data.startswith("goal|amt|"):
+        _, _, goal_id_s, mode = data.split("|", 3)
+        context.user_data["goal_action"] = {"actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": int(goal_id_s), "mode": mode, "expires_at": unix_time() + 900}
+        await q.answer()
+        return await q.message.reply_text("Введите сумму.")
+
+    if data.startswith("goal|confirm|"):
+        token = data.split("|", 2)[2]
+        st = context.user_data.get("goal_action") or {}
+        if st.get("token") != token or st.get("actor_user_id") != update.effective_user.id or st.get("workspace_id") != _goal_workspace(update) or st.get("used") or st.get("expires_at", 0) < unix_time():
+            context.user_data.pop("goal_action", None)
+            return await q.answer("Действие устарело. Откройте цель заново.", show_alert=True)
+        st["used"] = True
+        context.user_data["goal_action"] = st
+        mode = st.get("mode")
+        try:
+            if mode == "adjustment":
+                goal, _movement, _created = add_goal_movement(goal_id=st["goal_id"], owner_user_id=update.effective_user.id, workspace_id=st.get("workspace_id"), actor_user_id=update.effective_user.id, movement_type="adjustment", new_balance=st.get("new_balance"), idempotency_key=f"goal:{st['goal_id']}:adjust:{token}")
+            else:
+                goal, _movement, _created = add_goal_movement(goal_id=st["goal_id"], owner_user_id=update.effective_user.id, workspace_id=st.get("workspace_id"), actor_user_id=update.effective_user.id, movement_type=mode, amount=st.get("amount"), idempotency_key=f"goal:{st['goal_id']}:{mode}:{token}")
+        except GoalError as exc:
+            context.user_data.pop("goal_action", None)
+            return await q.answer(_goal_error_text(str(exc)), show_alert=True)
+        context.user_data.pop("goal_action", None)
+        await q.answer("Сохранено")
+        return await _render_goal_card(q, context, update, goal.id)
+
+    if data.startswith("goal|rem|"):
+        goal_id = int(data.split("|")[2])
+        goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+        if not goal:
+            return await q.answer("Цель не найдена", show_alert=True)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Включить напоминания" if not goal.reminders_enabled else "Выключить напоминания", callback_data=f"goal|remtog|{goal.id}")],
+            [InlineKeyboardButton("⚙️ Общие оповещения", callback_data="menu_notifications")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal.id}")],
+        ])
+        await q.answer()
+        return await _safe_edit_or_reply(q, f"🔔 Напоминания цели\n\nДля доставки нужны и общая настройка «Цели», и включение на этой цели.\n\nНа цели: {'включены' if goal.reminders_enabled else 'выключены'}", reply_markup=kb)
+
+    if data.startswith("goal|remtog|"):
+        goal_id = int(data.split("|")[2])
+        goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+        if not goal:
+            return await q.answer("Цель не найдена", show_alert=True)
+        enabling = not goal.reminders_enabled
+        if enabling:
+            prefs = get_notification_preferences(cid)
+            if not prefs.get("goal_notifications_enabled", False):
+                toggle_notification_preference(cid, "goals")
+        goal = set_goal_reminders(goal.id, update.effective_user.id, _goal_workspace(update), enabling)
+        await q.answer("Обновлено")
+        return await _render_goal_card(q, context, update, goal.id)
+
+    if data.startswith("goal|edit|"):
+        goal_id = int(data.split("|")[2])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Название", callback_data=f"goal|ef|{goal_id}|name"), InlineKeyboardButton("Сумма", callback_data=f"goal|ef|{goal_id}|target")],
+            [InlineKeyboardButton("Срок", callback_data=f"goal|ef|{goal_id}|deadline"), InlineKeyboardButton("Текущий прогресс", callback_data=f"goal|adj|{goal_id}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|o|{goal_id}")],
+        ])
+        await q.answer()
+        return await _safe_edit_or_reply(q, "✏️ Что изменить?", reply_markup=kb)
+
+    if data.startswith("goal|ef|"):
+        _, _, goal_id_s, field = data.split("|", 3)
+        context.user_data["goal_action"] = {"actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": int(goal_id_s), "mode": f"edit_{field}", "expires_at": unix_time() + 900}
+        await q.answer()
+        prompt = {"name": "Введите новое название.", "target": "Введите новую целевую сумму.", "deadline": "Введите новый срок или «без срока»."}.get(field, "Введите новое значение.")
+        return await q.message.reply_text(prompt)
+
+    if data.startswith("goal|more|"):
+        goal_id = int(data.split("|")[2])
+        goal = get_goal(goal_id, update.effective_user.id, _goal_workspace(update))
+        if not goal:
+            return await q.answer("Цель не найдена", show_alert=True)
+        await q.answer()
+        return await _safe_edit_or_reply(q, f"Ещё\n\n{goal.display_name}\n{goal_status_label(goal)}", reply_markup=_goal_more_kb(goal.id, goal.status))
+
+    if data.startswith("goal|hist|"):
+        await q.answer()
+        return await _render_goal_history(q, update, int(data.split("|")[2]))
+
+    if data.startswith("goal|st|"):
+        _, _, goal_id_s, status = data.split("|", 3)
+        event_status = "active" if status == "active" else status
+        goal = set_goal_status(int(goal_id_s), update.effective_user.id, _goal_workspace(update), event_status)
+        await q.answer("Обновлено")
+        return await _render_goal_card(q, context, update, goal.id)
+
+    if data.startswith("goal|del1|"):
+        goal_id = int(data.split("|")[2])
+        token = token_urlsafe(8)
+        context.user_data["goal_delete_confirm"] = {"token": token, "actor_user_id": update.effective_user.id, "workspace_id": _goal_workspace(update), "goal_id": goal_id, "expires_at": unix_time() + 600}
+        await q.answer()
+        return await _safe_edit_or_reply(q, "Удалить цель навсегда?\n\nЭто удалит только цель, её движения и будущие goal-уведомления. Обычные финансовые операции останутся.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Да, продолжить", callback_data=f"goal|del2|{token}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data=f"goal|more|{goal_id}")],
+        ]))
+
+    if data.startswith("goal|del2|"):
+        token = data.split("|", 2)[2]
+        st = context.user_data.get("goal_delete_confirm") or {}
+        if st.get("token") != token or st.get("actor_user_id") != update.effective_user.id or st.get("workspace_id") != _goal_workspace(update) or st.get("expires_at", 0) < unix_time():
+            context.user_data.pop("goal_delete_confirm", None)
+            return await q.answer("Подтверждение устарело.", show_alert=True)
+        count = delete_goal_permanently(st["goal_id"], update.effective_user.id, st.get("workspace_id"))
+        context.user_data.pop("goal_delete_confirm", None)
+        await q.answer("Удалено")
+        return await _safe_edit_or_reply(q, f"✅ Цель удалена\n\nДвижений удалено: {count}", reply_markup=_goal_nav_kb("goal|home"))
+
     # === NOOP ("Без операций сегодня") ===
     if data == 'noop_today':
         cid = update.effective_chat.id
@@ -1823,16 +2406,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('category_rename_input', None)
             context.user_data.pop('category_action', None)
             return await _render_category_list(q, context, update, type_key)
-        if action == 'goals':
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('⬅️ Назад', callback_data='cat_menu')],
-                [InlineKeyboardButton('🏠 Главное меню', callback_data='start_main')],
-            ])
-            return await _safe_edit_or_reply(
-                q,
-                'Категории целей\n\nЦели пока настраиваются отдельно от финансовых категорий. Здесь ничего не создаётся и не меняется.',
-                reply_markup=kb,
-            )
         if action == 'add' and len(parts) > 2 and parts[2] in CATEGORY_TYPES:
             context.user_data['await_category_create'] = {
                 'actor_user_id': user_id,
@@ -2786,6 +3359,12 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 status="success",
             ))
             return await _render_challenge_notification_settings(q, cid)
+        if key == 'goals':
+            track_product_event(ProductEvent(
+                event_name="goal_notifications_enabled" if enabled else "goal_notifications_disabled",
+                user_id=update.effective_user.id,
+                status="success",
+            ))
         return await _render_notification_settings(q, cid, context)
 
     if data == 'notif_quiet_hours':
@@ -3898,35 +4477,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await q.message.reply_text(f'📊 Инвестировано за месяц: {inv} {get_user_currency(cid)}')
 
     if data.startswith('goal_status|'):
-        cat = data.split('|', 1)[1]
-        try:
-            rows = pg_fetchall(
-                """
-                SELECT COALESCE(target,0) FROM public.goals
-                 WHERE user_id=%s AND category=%s
-                 LIMIT 1
-                """,
-                (cid, cat)
-            )
-            target = rows[0][0] if rows else 0
-        except Exception:
-            target = 0
-        saved_rows = pg_fetchall(
-            """
-            SELECT COALESCE(SUM(amount),0) FROM public.operations
-             WHERE chat_id=%s AND (type='Сбережения' OR type='Цель') AND category=%s
-            """,
-            (cid, cat)
-        )
-        saved = saved_rows[0][0] if saved_rows else 0
-        pct = int(saved / target * 100) if target else 0
-        bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
-        remain = max(target - saved, 0)
-        txt = (f"🎯 Цель «{cat}»\n"
-               f"Накоплено: {saved}/{target} ({pct}%)\n"
-               f"[{bar}]\n"
-               f"Осталось: {remain} {get_user_currency(cid)}")
-        return await q.message.reply_text(txt)
+        await q.answer()
+        return await _render_goals_home(q, context, update)
 
     log.warning(
         'unknown_callback_data callback_data=%s chat_type=%s',

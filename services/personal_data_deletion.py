@@ -18,8 +18,11 @@ PERSONAL_TABLES = {
     "subscription_patterns": "user_id=%s OR workspace_id = ANY(%s)",
     "recurring_spend_patterns": "user_id=%s OR workspace_id = ANY(%s)",
     "operation_drafts": "actor_user_id=%s OR workspace_id = ANY(%s)",
+    "financial_goals": "owner_user_id=%s OR workspace_id = ANY(%s)",
+    "goal_drafts": "owner_user_id=%s OR workspace_id = ANY(%s)",
     "financial_activity_events": "user_id=%s OR workspace_id = ANY(%s)",
     "notification_events": "user_id=%s OR workspace_id = ANY(%s)",
+    "automatic_notifications": "user_id=%s OR workspace_id = ANY(%s)",
     "notification_preferences": "user_id=%s",
     "custom_categories": "user_id=%s OR workspace_id = ANY(%s)",
     "user_aliases": "user_id=%s",
@@ -223,6 +226,19 @@ def delete_financial_history(user_id: int, start_date: date | None, end_date: da
                 counts["operation_drafts"] = int(cur.rowcount)
             else:
                 counts["operation_drafts"] = 0
+
+            if start_date is None and end_date is None:
+                goal_columns = _table_columns(cur, "financial_goals")
+                if {"owner_user_id", "workspace_id"} <= goal_columns:
+                    params = [user_id]
+                    scope = "owner_user_id=%s"
+                    if workspace_ids:
+                        scope += " OR workspace_id = ANY(%s)"
+                        params.append(workspace_ids)
+                    cur.execute(f"DELETE FROM public.financial_goals WHERE {scope}", tuple(params))
+                    counts["financial_goals"] = int(cur.rowcount)
+                else:
+                    counts["financial_goals"] = 0
 
             cur.execute("DELETE FROM public.operations WHERE id=ANY(%s)", (operation_ids,))
             counts["operations"] = int(cur.rowcount)
