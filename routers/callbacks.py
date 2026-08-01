@@ -552,7 +552,8 @@ NOTIFICATION_TOGGLE_LABELS = {
 
 def _notif_label(prefs: dict, key: str) -> str:
     _, field, on_label, off_label = NOTIFICATION_TOGGLE_LABELS[key]
-    return on_label if prefs.get(field, True) else off_label
+    default_value = False if key == 'challenges' else True
+    return on_label if prefs.get(field, default_value) else off_label
 
 
 def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboardMarkup:
@@ -565,7 +566,7 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
          InlineKeyboardButton(_notif_label(prefs, 'recurring'), callback_data='notif_toggle|recurring')],
         [InlineKeyboardButton(_notif_label(prefs, 'weekly'), callback_data='notif_toggle|weekly'),
          InlineKeyboardButton(_notif_label(prefs, 'monthly'), callback_data='notif_toggle|monthly')],
-        [InlineKeyboardButton(_notif_label(prefs, 'challenges'), callback_data='notif_toggle|challenges')],
+        [InlineKeyboardButton(_notif_label(prefs, 'challenges'), callback_data='notif_challenges')],
         [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
         [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
     ])
@@ -584,6 +585,34 @@ async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAU
         f"Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}"
     )
     return await _safe_edit_or_reply(q, text, reply_markup=_notification_settings_markup(prefs, back_dest))
+
+
+def _challenge_notification_settings_markup(enabled: bool) -> InlineKeyboardMarkup:
+    toggle_label = 'Выключить' if enabled else 'Включить'
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_label, callback_data='notif_toggle|challenges')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_notifications')],
+        [InlineKeyboardButton('🏠 Главное меню', callback_data='start_main')],
+    ])
+
+
+async def _render_challenge_notification_settings(q, cid: int):
+    prefs = get_notification_preferences(cid)
+    enabled = bool(prefs.get('challenge_notifications_enabled', False))
+    if enabled:
+        text = (
+            '🏆 Челленджи: включены\n\n'
+            'Бот может присылать не более одного планового напоминания в день, а также сообщать о выполненных заданиях. '
+            'Тихие часы соблюдаются.'
+        )
+    else:
+        text = (
+            '🏆 Челленджи: выключены\n\n'
+            'Уведомления о челленджах выключены по умолчанию.\n\n'
+            'Челленджи и прогресс доступны в разделе «Челленджи». '
+            'Включите оповещения, если хотите получать напоминания и сообщения о выполнении заданий.'
+        )
+    return await _safe_edit_or_reply(q, text, reply_markup=_challenge_notification_settings_markup(enabled))
 
 
 def _quiet_hours_markup(prefs: dict) -> InlineKeyboardMarkup:
@@ -2738,6 +2767,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'menu_notifications':
         return await _render_notification_settings(q, cid, context)
 
+    if data == 'notif_challenges':
+        await q.answer()
+        return await _render_challenge_notification_settings(q, cid)
+
     if data.startswith('notif_toggle|'):
         key = data.split('|', 1)[1]
         try:
@@ -2746,6 +2779,13 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
         label = NOTIFICATION_TOGGLE_LABELS.get(key, ('Оповещения', '', '', ''))[0]
         await q.answer(f'{label} {"включены" if enabled else "выключены"}')
+        if key == 'challenges':
+            track_product_event(ProductEvent(
+                event_name="challenge_notifications_enabled" if enabled else "challenge_notifications_disabled",
+                user_id=update.effective_user.id,
+                status="success",
+            ))
+            return await _render_challenge_notification_settings(q, cid)
         return await _render_notification_settings(q, cid, context)
 
     if data == 'notif_quiet_hours':

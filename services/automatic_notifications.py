@@ -43,6 +43,12 @@ class DispatchResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class NotificationInsertResult:
+    notification_id: int
+    created: bool
+
+
 def parse_hhmm(value: str | None) -> time | None:
     if not value:
         return None
@@ -157,7 +163,7 @@ def _insert_deferred(
     earliest_delivery_at: datetime,
     timezone_name: str,
     policy: DeliveryPolicy,
-) -> int | None:
+) -> NotificationInsertResult | None:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -168,10 +174,7 @@ def _insert_deferred(
                      payload, delivery_policy, original_scheduled_at, earliest_delivery_at,
                      timezone_name, status)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending')
-                ON CONFLICT (user_id, notification_type, dedupe_key) DO UPDATE
-                   SET earliest_delivery_at=LEAST(public.automatic_notifications.earliest_delivery_at, EXCLUDED.earliest_delivery_at),
-                       updated_at=now()
-                 WHERE public.automatic_notifications.status IN ('pending','claimed')
+                ON CONFLICT (user_id, notification_type, dedupe_key) DO NOTHING
                 RETURNING id
                 """,
                 (
@@ -188,6 +191,70 @@ def _insert_deferred(
                 ),
             )
             row = cur.fetchone()
+            if row:
+                conn.commit()
+                return NotificationInsertResult(int(row[0]), True)
+            cur.execute(
+                """
+                UPDATE public.automatic_notifications
+                   SET earliest_delivery_at=LEAST(public.automatic_notifications.earliest_delivery_at, %s),
+                       updated_at=now()
+                 WHERE user_id=%s AND notification_type=%s AND dedupe_key=%s
+                   AND status IN ('pending','claimed')
+                RETURNING id
+                """,
+                (earliest_delivery_at, user_id, notification_type, dedupe_key),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return NotificationInsertResult(int(row[0]), False) if row else None
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _claim_immediate_send(
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    notification_type: str,
+    dedupe_key: str,
+    template_key: str,
+    payload: dict[str, Any],
+    original_scheduled_at: datetime,
+    timezone_name: str,
+    policy: DeliveryPolicy,
+) -> int | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.automatic_notifications
+                    (user_id, workspace_id, notification_type, dedupe_key, template_key,
+                     payload, delivery_policy, original_scheduled_at, earliest_delivery_at,
+                     timezone_name, status, locked_at, locked_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'claimed',now(),%s)
+                ON CONFLICT (user_id, notification_type, dedupe_key) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    user_id,
+                    workspace_id,
+                    notification_type,
+                    dedupe_key,
+                    template_key,
+                    Json(payload),
+                    policy.value,
+                    original_scheduled_at,
+                    original_scheduled_at,
+                    timezone_name,
+                    f"immediate-{socket.gethostname()}"[:128],
+                ),
+            )
+            row = cur.fetchone()
         conn.commit()
         return int(row[0]) if row else None
     except Exception:
@@ -197,7 +264,7 @@ def _insert_deferred(
         conn.close()
 
 
-def _mark_skip(*, user_id: int, notification_type: str, dedupe_key: str, reason: str) -> None:
+def _mark_skip(*, user_id: int, notification_type: str, dedupe_key: str, reason: str) -> bool:
     try:
         conn = get_conn()
         try:
@@ -209,14 +276,82 @@ def _mark_skip(*, user_id: int, notification_type: str, dedupe_key: str, reason:
                          original_scheduled_at, earliest_delivery_at, status, skip_reason)
                     VALUES (%s,%s,%s,%s,'skip',now(),now(),'skipped',%s)
                     ON CONFLICT (user_id, notification_type, dedupe_key) DO NOTHING
+                    RETURNING id
                     """,
                     (user_id, notification_type, dedupe_key, notification_type, reason),
                 )
+                created = cur.fetchone() is not None
             conn.commit()
+            return created
         finally:
             conn.close()
     except Exception:
         log.info("automatic_notification_skip_record_failed type=%s reason=%s", notification_type, safe_error_code(reason))
+        return False
+
+
+def queue_automatic_notification(
+    *,
+    user_id: int,
+    workspace_id: int | None = None,
+    notification_type: str,
+    dedupe_key: str,
+    policy: DeliveryPolicy,
+    template_key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    original_scheduled_at: datetime | None = None,
+) -> DispatchResult:
+    window, now_utc, quiet = quiet_context(user_id, now_utc=original_scheduled_at)
+    if quiet and policy == DeliveryPolicy.SKIP:
+        created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="quiet_hours")
+        if created is False:
+            return DispatchResult("duplicate", reason="dedupe")
+        return DispatchResult("skipped", reason="quiet_hours")
+    due = next_quiet_end_utc(now_utc, window) if quiet and policy == DeliveryPolicy.DEFER else now_utc
+    insert_result = _insert_deferred(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        notification_type=notification_type,
+        dedupe_key=dedupe_key,
+        template_key=template_key or notification_type,
+        payload=payload or {},
+        original_scheduled_at=original_scheduled_at or now_utc,
+        earliest_delivery_at=due,
+        timezone_name=window.timezone_name,
+        policy=policy,
+    )
+    if insert_result is None:
+        return DispatchResult("duplicate", reason="dedupe")
+    notification_id = getattr(insert_result, "notification_id", insert_result)
+    created = bool(getattr(insert_result, "created", True))
+    return DispatchResult("queued" if created else "deferred", deferred_until=due, notification_id=int(notification_id), reason="quiet_hours" if quiet else None)
+
+
+def suppress_unsent_challenge_notifications(*, reason: str = "challenge_notifications_default_off_rollout") -> int:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.automatic_notifications
+                   SET status='skipped',
+                       skip_reason=%s,
+                       locked_at=NULL,
+                       locked_by=NULL,
+                       updated_at=now()
+                 WHERE notification_type IN ('challenge_prompt','challenge_completed','achievement_granted')
+                   AND status IN ('pending','claimed')
+                """,
+                (reason,),
+            )
+            changed = int(cur.rowcount or 0)
+        conn.commit()
+        return changed
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 async def dispatch_automatic_notification(
@@ -238,7 +373,9 @@ async def dispatch_automatic_notification(
 ) -> DispatchResult:
     window, now_utc, quiet = quiet_context(user_id, now_utc=original_scheduled_at)
     if quiet and policy == DeliveryPolicy.SKIP:
-        _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="quiet_hours")
+        created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="quiet_hours")
+        if created is False:
+            return DispatchResult("duplicate", reason="dedupe")
         track_product_event(ProductEvent(
             event_name="automatic_notification_skipped_quiet_hours",
             user_id=user_id,
@@ -249,7 +386,7 @@ async def dispatch_automatic_notification(
         return DispatchResult("skipped", reason="quiet_hours")
     if quiet and policy == DeliveryPolicy.DEFER:
         due = next_quiet_end_utc(now_utc, window)
-        notification_id = _insert_deferred(
+        insert_result = _insert_deferred(
             user_id=user_id,
             workspace_id=workspace_id,
             notification_type=notification_type,
@@ -261,14 +398,32 @@ async def dispatch_automatic_notification(
             timezone_name=window.timezone_name,
             policy=policy,
         )
-        track_product_event(ProductEvent(
-            event_name="automatic_notification_deferred",
-            user_id=user_id,
-            workspace_id=workspace_id,
-            status="deferred",
-            properties={"notification_type": notification_type, "policy": policy.value},
-        ))
-        return DispatchResult("deferred", deferred_until=due, notification_id=notification_id, reason="quiet_hours")
+        if insert_result is None:
+            return DispatchResult("duplicate", reason="dedupe")
+        notification_id = getattr(insert_result, "notification_id", insert_result)
+        created = bool(getattr(insert_result, "created", True))
+        if created:
+            track_product_event(ProductEvent(
+                event_name="automatic_notification_deferred",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                status="deferred",
+                properties={"notification_type": notification_type, "policy": policy.value},
+            ))
+        return DispatchResult("deferred", deferred_until=due, notification_id=int(notification_id), reason="quiet_hours")
+    notification_id = _claim_immediate_send(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        notification_type=notification_type,
+        dedupe_key=dedupe_key,
+        template_key=template_key or notification_type,
+        payload=payload or {},
+        original_scheduled_at=original_scheduled_at or now_utc,
+        timezone_name=window.timezone_name,
+        policy=policy,
+    )
+    if notification_id is None:
+        return DispatchResult("duplicate", reason="dedupe")
     try:
         await context.bot.send_message(
             chat_id=chat_id or user_id,
@@ -277,6 +432,7 @@ async def dispatch_automatic_notification(
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
         )
+        mark_notification_sent(notification_id)
         track_product_event(ProductEvent(
             event_name="automatic_notification_sent",
             user_id=user_id,
@@ -284,8 +440,9 @@ async def dispatch_automatic_notification(
             status="sent",
             properties={"notification_type": notification_type, "policy": policy.value},
         ))
-        return DispatchResult("sent")
+        return DispatchResult("sent", notification_id=notification_id)
     except (Forbidden, BadRequest) as exc:
+        mark_notification_skipped(notification_id, exc)
         log.info("automatic_notification_send_skipped type=%s reason=%s", notification_type, safe_error_code(exc))
         return DispatchResult("skipped", reason=safe_error_code(exc))
 
@@ -375,6 +532,30 @@ def mark_notification_sent(notification_id: int) -> None:
                  WHERE id=%s AND status <> 'sent'
                 """,
                 (int(notification_id),),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def mark_notification_skipped(notification_id: int, reason: Exception | str) -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.automatic_notifications
+                   SET status='skipped',
+                       skip_reason=%s,
+                       locked_at=NULL,
+                       locked_by=NULL,
+                       updated_at=now()
+                 WHERE id=%s AND status <> 'sent'
+                """,
+                (safe_error_code(reason), int(notification_id)),
             )
         conn.commit()
     except Exception:
@@ -478,6 +659,14 @@ async def process_due_notifications(context: ContextTypes.DEFAULT_TYPE, *, limit
                 status="sent",
                 properties={"notification_type": row["notification_type"], "deferred": True},
             ))
+            if row["notification_type"] in {"challenge_prompt", "challenge_completed", "achievement_granted"}:
+                track_product_event(ProductEvent(
+                    event_name="challenge_notification_sent",
+                    user_id=row["user_id"],
+                    workspace_id=row.get("workspace_id"),
+                    status="sent",
+                    properties={"notification_type": row["notification_type"], "deferred": True},
+                ))
         except ValueError as exc:
             mark_notification_failed(row["id"], exc)
             counts["skipped"] += 1
