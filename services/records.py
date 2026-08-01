@@ -18,6 +18,7 @@ from utils.text import norm_text, format_date_ru_with_weekday
 from db.database import get_conn, pg_fetchall, pg_exec
 from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
 from services.operations import record_financial_operation
+from services.goals import build_salary_suggestion_text, format_money, salary_suggestion_goals
 
 log = logging.getLogger("finbot.records")
 
@@ -335,6 +336,38 @@ async def record_operation(cat: str, amt: int, dt,
             reply_markup=kb,
             reply_to_message_id=reply_to_msg_id if reply_to_msg_id else None,
         )
+
+    try:
+        if typ == 'Доходы' and recorded.operation_id:
+            goals = salary_suggestion_goals(
+                owner_user_id=actor_user_id,
+                workspace_id=recorded.workspace_id,
+                category=cat,
+                currency=recorded.currency,
+            )
+            if goals:
+                buttons = []
+                for goal in goals[:5]:
+                    amount = goal.planned_contribution_amount or goal.comfortable_amount
+                    label = goal.display_name[:32]
+                    if amount:
+                        label = f"{label} · {format_money(amount, goal.currency)}"[:48]
+                    buttons.append([InlineKeyboardButton(label, callback_data=f"goal|sal|a|{goal.id}|{recorded.operation_id}")])
+                buttons.append([InlineKeyboardButton("Изменить сумму", callback_data=f"goal|sal|m|{goals[0].id}|{recorded.operation_id}")])
+                buttons.append([InlineKeyboardButton("Напомнить позже", callback_data=f"goal|sal|s|{goals[0].id}|{recorded.operation_id}"), InlineKeyboardButton("Пропустить", callback_data=f"goal|sal|x|{goals[0].id}|{recorded.operation_id}")])
+                await context.bot.send_message(chat_id=cid, text=build_salary_suggestion_text(goals), reply_markup=InlineKeyboardMarkup(buttons))
+                from services.product_events import ProductEvent, track_product_event
+
+                track_product_event(ProductEvent(
+                    event_name="goal_income_suggestion_shown",
+                    user_id=actor_user_id,
+                    workspace_id=recorded.workspace_id,
+                    status="shown",
+                    currency=recorded.currency,
+                    properties={"source": "income_operation"},
+                ))
+    except Exception as e:
+        log.debug("goal salary suggestion skipped: %s", e)
 
     # Очистим batch_item_text, чтобы не «липло»
     context.user_data["batch_item_text"] = ""

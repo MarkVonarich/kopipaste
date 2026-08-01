@@ -66,7 +66,9 @@ def test_category_menu_starts_with_type_selector(monkeypatch):
 
     assert "Категории" in menu.edits[-1][0]
     assert "Выберите тип, категории которого хотите настроить." in menu.edits[-1][0]
-    assert {"cat|type|expense", "cat|type|income", "cat|goals", "menu_settings", "start_main"} <= set(_callbacks(menu.edits[-1][1]["reply_markup"]))
+    callbacks_data = set(_callbacks(menu.edits[-1][1]["reply_markup"]))
+    assert {"cat|type|expense", "cat|type|income", "menu_settings", "start_main"} <= callbacks_data
+    assert "cat|goals" not in callbacks_data
     assert called["list"] == 0
 
 
@@ -96,19 +98,20 @@ def test_category_type_list_preserves_income_add_type(monkeypatch):
     assert context.user_data["await_category_create"]["type_key"] == "income"
 
 
-def test_category_goals_screen_is_informational(monkeypatch):
+def test_category_goals_placeholder_removed_and_real_goals_entry_is_main_menu(monkeypatch):
     from routers import callbacks
+    from ui.keyboards import main_menu_kb
 
     called = {"list": 0}
     monkeypatch.setattr(callbacks, "_category_workspace", lambda _update: 10)
     monkeypatch.setattr(callbacks, "list_managed_categories", lambda **_kwargs: called.__setitem__("list", called["list"] + 1))
 
     context = SimpleNamespace(user_data={})
-    goals = _CallbackQuery("cat|goals")
-    asyncio.run(callbacks.callback_handler(_update(goals), context))
+    menu = _CallbackQuery("cat_menu")
+    asyncio.run(callbacks.callback_handler(_update(menu), context))
 
-    assert "Категории целей" in goals.edits[-1][0]
-    assert "ничего не создаётся" in goals.edits[-1][0]
+    assert "cat|goals" not in _callbacks(menu.edits[-1][1]["reply_markup"])
+    assert "goal|home" in _callbacks(main_menu_kb("ru"))
     assert called["list"] == 0
 
 
