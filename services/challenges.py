@@ -52,6 +52,13 @@ class AchievementDefinition:
     description: str
 
 
+@dataclass(frozen=True)
+class ChallengePrompt:
+    card: ChallengeCard
+    text: str
+    purpose: str = "daily_progress_prompt"
+
+
 ONBOARDING_CHALLENGES = [
     ChallengeDefinition("first_operation", "Первая операция", "Запишите первый расход или доход.", "once", "first_operation", 1, "onboarding", "Добавить операцию", "menu_examples", "Первая операция сохранена."),
     ChallengeDefinition("first_income", "Первый доход", "Сохраните первую операцию дохода.", "once", "first_income", 1, "onboarding", "Добавить доход", "income_status", "Первый доход сохранён."),
@@ -399,13 +406,16 @@ def process_product_event(ev) -> None:
         properties["op_type"] = properties.get("operation_type")
     achievement_key = _achievement_for_event(event_name, properties)
     if achievement_key:
-        grant_achievement(int(user_id), achievement_key)
+        if grant_achievement(int(user_id), achievement_key):
+            _queue_achievement_notification(int(user_id), achievement_key)
     try:
         for section in ("onboarding", "today", "week", "month"):
             cards = upsert_assignments(int(user_id), section)
             completed = [c for c in cards if c.completed]
             if completed:
                 log.info("challenge_progress_updated completed=%s", len(completed))
+                for card in completed:
+                    _queue_challenge_completion(int(user_id), card)
     except Exception as exc:
         log.warning("challenge_progress_failed reason=%s", safe_error_code(exc))
 
@@ -415,9 +425,9 @@ def challenge_prompt_candidates() -> list[int]:
         rows = pg_fetchall(
             """
             SELECT np.user_id
-              FROM public.notification_preferences np
+             FROM public.notification_preferences np
               JOIN public.users u ON u.user_id=np.user_id
-             WHERE COALESCE(np.challenge_notifications_enabled, true)
+             WHERE COALESCE(np.challenge_notifications_enabled, false)
              ORDER BY np.user_id
              LIMIT 500
             """
@@ -430,7 +440,11 @@ def challenge_prompt_candidates() -> list[int]:
         return []
 
 
-def build_challenge_prompt(user_id: int) -> str | None:
+def challenge_notifications_enabled(user_id: int) -> bool:
+    return bool(get_notification_preferences(user_id).get("challenge_notifications_enabled", False))
+
+
+def build_challenge_prompt(user_id: int) -> ChallengePrompt | None:
     try:
         cards = upsert_assignments(user_id, "today")
     except Exception as exc:
@@ -440,11 +454,55 @@ def build_challenge_prompt(user_id: int) -> str | None:
     if not active:
         return None
     card = active[0]
-    return (
+    text = (
         "🏆 Челлендж дня\n\n"
         f"{card.definition.title}\n"
         f"{card.definition.description}\n\n"
         f"Прогресс: {min(card.progress, card.target)}/{card.target}"
+    )
+    return ChallengePrompt(card=card, text=text)
+
+
+def _challenge_button_payload() -> list[list[dict[str, str]]]:
+    return [[{"label": "🏆 Открыть челленджи", "callback_data": "chal|home"}]]
+
+
+def _queue_challenge_completion(user_id: int, card: ChallengeCard) -> None:
+    if not challenge_notifications_enabled(user_id):
+        return
+    from services.automatic_notifications import DeliveryPolicy, queue_automatic_notification
+
+    text = (
+        "🏆 Челлендж выполнен\n\n"
+        f"{card.definition.title}\n"
+        f"{card.definition.completion_copy}"
+    )
+    queue_automatic_notification(
+        user_id=user_id,
+        notification_type="challenge_completed",
+        dedupe_key=f"challenge:{card.definition.key}:{card.period_key}:challenge_completed",
+        policy=DeliveryPolicy.DEFER,
+        template_key="challenge_completed",
+        payload={"text": text, "buttons": _challenge_button_payload(), "challenge_key": card.definition.key, "period_key": card.period_key},
+    )
+
+
+def _queue_achievement_notification(user_id: int, achievement_key: str) -> None:
+    if not challenge_notifications_enabled(user_id):
+        return
+    item = next((achievement for achievement in ACHIEVEMENTS if achievement.key == achievement_key), None)
+    if item is None:
+        return
+    from services.automatic_notifications import DeliveryPolicy, queue_automatic_notification
+
+    text = f"🏅 Достижение получено\n\n{item.title}\n{item.description}"
+    queue_automatic_notification(
+        user_id=user_id,
+        notification_type="achievement_granted",
+        dedupe_key=f"achievement:{achievement_key}:achievement_granted",
+        policy=DeliveryPolicy.DEFER,
+        template_key="achievement_granted",
+        payload={"text": text, "buttons": _challenge_button_payload(), "achievement_key": achievement_key},
     )
 
 
@@ -454,23 +512,28 @@ async def challenge_daily_prompt_job(context) -> dict[str, int]:
 
     counts = {"sent": 0, "deferred": 0, "skipped": 0}
     for user_id in challenge_prompt_candidates():
-        prefs = get_notification_preferences(user_id)
-        if not prefs.get("challenge_notifications_enabled", True):
+        if not challenge_notifications_enabled(user_id):
             continue
         local_today = user_local_today(user_id)
-        text = build_challenge_prompt(user_id)
-        if not text:
+        prompt = build_challenge_prompt(user_id)
+        if not prompt:
             continue
         result = await dispatch_automatic_notification(
             context,
             user_id=user_id,
             notification_type="challenge_prompt",
-            dedupe_key=f"challenge_prompt:{local_today.isoformat()}",
+            dedupe_key=f"challenge:{local_today.isoformat()}:daily_progress_prompt",
             policy=DeliveryPolicy.SKIP,
-            text=text,
+            text=prompt.text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Открыть челленджи", callback_data="chal|home")]]),
             template_key="challenge_prompt",
-            payload={"text": text, "buttons": [[{"label": "🏆 Открыть челленджи", "callback_data": "chal|home"}]]},
+            payload={
+                "text": prompt.text,
+                "buttons": _challenge_button_payload(),
+                "challenge_key": prompt.card.definition.key,
+                "period_key": prompt.card.period_key,
+                "purpose": prompt.purpose,
+            },
             original_scheduled_at=datetime.now(timezone.utc),
         )
         if result.status in counts:

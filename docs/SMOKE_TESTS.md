@@ -84,6 +84,31 @@ Run after deployment and restart.
 - Confirm duplicate notification thresholds are not sent.
 - Confirm an eligible achievement is awarded once.
 
+## Challenge Notifications Opt-In
+
+- Open `Настройки -> Оповещения`.
+- Confirm `Челленджи` is disabled after rollout.
+- Open `Челленджи` manually and confirm all progress remains visible.
+- Complete part of a challenge.
+- Wait through an hourly scheduler scan.
+- Confirm no challenge message arrives while challenge notifications are disabled.
+- Complete a challenge.
+- Confirm no unsolicited completion message arrives while disabled.
+- Open `Челленджи` manually and confirm it is completed.
+- Enable challenge notifications explicitly from `Настройки -> Оповещения -> Челленджи`.
+- Confirm the bot acknowledges the setting immediately.
+- Wait through multiple hourly scheduler scans.
+- Confirm no more than one routine daily challenge reminder arrives.
+- Complete another challenge.
+- Confirm exactly one completion message arrives.
+- Confirm no duplicate completion message arrives later.
+- Enable quiet hours covering the test time.
+- Confirm a routine stale challenge prompt is skipped.
+- Confirm a meaningful completion notification is deferred only once.
+- Disable challenge notifications again.
+- Confirm future challenge notifications stop.
+- Confirm normal reminders and reports remain operational.
+
 ## Backward Compatibility
 
 - Existing personal records remain visible.

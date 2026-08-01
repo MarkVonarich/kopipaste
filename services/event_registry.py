@@ -50,6 +50,8 @@ PRODUCT_EVENT_GROUPS = {
     "challenge_cta_opened": "challenges",
     "challenge_notification_sent": "challenges",
     "challenge_notification_skipped_quiet_hours": "challenges",
+    "challenge_notifications_enabled": "settings",
+    "challenge_notifications_disabled": "settings",
     "automatic_notification_deferred": "notifications",
     "automatic_notification_skipped_quiet_hours": "notifications",
     "automatic_notification_sent": "notifications",

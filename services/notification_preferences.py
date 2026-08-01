@@ -27,7 +27,7 @@ def get_notification_preferences(user_id: int) -> dict:
                    COALESCE(limit_alerts_enabled, true), COALESCE(budget_alerts_enabled, true),
                    COALESCE(subscription_alerts_enabled, true), COALESCE(recurring_spend_alerts_enabled, true),
                    COALESCE(weekly_reports_enabled, true), COALESCE(monthly_reports_enabled, true),
-                   COALESCE(challenge_notifications_enabled, true),
+                   COALESCE(challenge_notifications_enabled, false),
                    COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
                    COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
                    to_char(quiet_hours_start, 'HH24:MI'),
@@ -50,7 +50,7 @@ def get_notification_preferences(user_id: int) -> dict:
             "recurring_spend_alerts_enabled": True,
             "weekly_reports_enabled": True,
             "monthly_reports_enabled": True,
-            "challenge_notifications_enabled": True,
+            "challenge_notifications_enabled": False,
             "morning_time": "08:30",
             "evening_time": "20:30",
             "quiet_hours_enabled": False,
@@ -78,18 +78,20 @@ def get_notification_preferences(user_id: int) -> dict:
 
 def toggle_notification_preference(user_id: int, key: str) -> bool:
     field = TOGGLE_FIELDS[key]
+    default_enabled = False if key == "challenges" else True
+    insert_value = not default_enabled
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 INSERT INTO public.notification_preferences (user_id, {field})
-                VALUES (%s, false)
+                VALUES (%s, %s)
                 ON CONFLICT (user_id) DO UPDATE
-                   SET {field}=NOT COALESCE(public.notification_preferences.{field}, true)
+                   SET {field}=NOT COALESCE(public.notification_preferences.{field}, %s)
                 RETURNING {field}
                 """,
-                (user_id,),
+                (user_id, insert_value, default_enabled),
             )
             value = bool(cur.fetchone()[0])
         conn.commit()
