@@ -18,12 +18,14 @@ from utils.text import norm_text, format_date_ru_with_weekday
 from db.database import get_conn, pg_fetchall, pg_exec
 from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
 from services.limit_alerts import (
+    EXCEEDED_BAND,
     build_category_limit_dedupe_key,
+    build_category_limit_exceeded_dedupe_key,
     category_limit_alert_markup,
     render_category_limit_alert,
     safe_limit_threshold_event_properties,
 )
-from services.operations import record_financial_operation
+from services.operations import RecordedOperation, record_financial_operation
 from services.goals import build_salary_suggestion_text, format_money, salary_suggestion_goals
 from services.product_events import ProductEvent, track_product_event
 from services.user_time import user_local_date
@@ -111,6 +113,33 @@ def _period_bounds(period: str, user_id: int):
     return first, today
 
 
+def _has_previous_exceeded_alert(
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    period: str,
+    period_start,
+    category_key: str,
+) -> bool:
+    workspace_part = workspace_id if workspace_id is not None else 0
+    prefix = f"category_limit_exceeded:{user_id}:{workspace_part}:{period}:{period_start.isoformat()}:{category_key}:"
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT 1
+              FROM public.automatic_notifications
+             WHERE user_id=%s
+               AND notification_type='category_limit_warning'
+               AND left(dedupe_key, length(%s)) = %s
+             LIMIT 1
+            """,
+            (user_id, prefix, prefix),
+        )
+        return bool(rows)
+    except Exception:
+        return False
+
+
 async def _check_category_limits_and_warn(
     chat_id: int,
     category: str,
@@ -118,6 +147,8 @@ async def _check_category_limits_and_warn(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     workspace_id: int | None = None,
+    operation_id: int | None = None,
+    source: str = "operation_commit",
 ):
     """
     Проверяем лимиты (week/month) для категории и шлём предупреждение при переходе через 80/90/100/exceeded.
@@ -151,6 +182,7 @@ async def _check_category_limits_and_warn(
         if not alert:
             continue
         new_band = alert.threshold_band
+        is_exceeded = new_band == EXCEEDED_BAND
 
         # читаем состояние
         st_rows = pg_fetchall("""
@@ -165,24 +197,54 @@ async def _check_category_limits_and_warn(
         if st_date is not None and start > st_date:
             last_band = 0
 
-        if new_band > last_band:
+        if is_exceeded and operation_id is None:
+            continue
+
+        if is_exceeded or new_band > last_band:
+            state_band = 100 if is_exceeded else new_band
             pg_exec("""
                 INSERT INTO public.category_limit_state (user_id, period, category, last_band, updated_at)
                 VALUES (%s,%s,%s,%s, now())
                 ON CONFLICT (user_id, period, category) DO UPDATE
-                   SET last_band=EXCLUDED.last_band, updated_at=now()
-            """, (chat_id, period, category, new_band))
+                   SET last_band=GREATEST(public.category_limit_state.last_band, EXCLUDED.last_band),
+                       updated_at=now()
+            """, (chat_id, period, category, state_band))
             try:
                 category_key = norm_text(category)
-                dedupe_key = build_category_limit_dedupe_key(
-                    user_id=chat_id,
-                    workspace_id=workspace_id,
-                    period=period,
-                    period_start=start,
-                    category_key=category_key,
-                    band=new_band,
-                )
-                await dispatch_automatic_notification(
+                if is_exceeded:
+                    previous_exceeded = _has_previous_exceeded_alert(
+                        user_id=chat_id,
+                        workspace_id=workspace_id,
+                        period=period,
+                        period_start=start,
+                        category_key=category_key,
+                    )
+                    dedupe_key = build_category_limit_exceeded_dedupe_key(
+                        user_id=chat_id,
+                        workspace_id=workspace_id,
+                        period=period,
+                        period_start=start,
+                        category_key=category_key,
+                        operation_id=int(operation_id),
+                    )
+                    alert = render_category_limit_alert(
+                        category=category,
+                        period=period,
+                        spent=spent,
+                        limit=limit_amt,
+                        currency=cur,
+                        intensified=previous_exceeded,
+                    ) or alert
+                else:
+                    dedupe_key = build_category_limit_dedupe_key(
+                        user_id=chat_id,
+                        workspace_id=workspace_id,
+                        period=period,
+                        period_start=start,
+                        category_key=category_key,
+                        band=new_band,
+                    )
+                result = await dispatch_automatic_notification(
                     context,
                     user_id=chat_id,
                     chat_id=chat_id,
@@ -200,7 +262,10 @@ async def _check_category_limits_and_warn(
                         "buttons": [[{"label": "Открыть лимиты", "callback_data": "lim_list"}], [{"label": "Изменить лимит", "callback_data": "lim_list"}], [{"label": "Отключить уведомления", "callback_data": "menu_notifications"}]],
                     },
                     disable_web_page_preview=True,
+                    force_immediate=True,
                 )
+                if result.status == "duplicate":
+                    continue
                 track_product_event(ProductEvent(
                     event_name="limit_threshold_reached",
                     user_id=chat_id,
@@ -212,11 +277,25 @@ async def _check_category_limits_and_warn(
                         period=period,
                         status=alert.status,
                         currency=cur,
-                        source="operation_commit",
+                        source=source,
                     ),
                 ))
             except Exception as e:
                 log.debug("warn send failed: %s", e)
+
+
+async def send_operation_limit_alert(recorded: RecordedOperation | None, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not recorded or recorded.type != 'Расходы' or not recorded.operation_id:
+        return
+    await _check_category_limits_and_warn(
+        recorded.user_id,
+        recorded.category,
+        recorded.operation_date,
+        context,
+        workspace_id=recorded.workspace_id,
+        operation_id=recorded.operation_id,
+        source=recorded.source or "operation_commit",
+    )
 
 
 async def record_operation(cat: str, amt: int, dt,
@@ -417,7 +496,7 @@ async def record_operation(cat: str, amt: int, dt,
     # После записи — проверяем лимиты по категории (только для Расходов)
     try:
         if typ == 'Расходы':
-            await _check_category_limits_and_warn(cid, cat, dt, context, workspace_id=recorded.workspace_id)
+            await send_operation_limit_alert(recorded, context)
     except Exception as e:
         log.debug("limit-check failed: %s", e)
 

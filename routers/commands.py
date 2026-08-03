@@ -16,15 +16,13 @@ from db.queries import ensure_user, get_user_budgets, get_user_currency, get_use
 from services.ml_train import train_model
 from ui.keyboards import export_menu_kb, help_menu_kb, limits_budgets_hub_kb, main_menu_kb, reminders_menu_kb, settings_menu_kb
 from services.onboarding import onboarding_welcome
-from settings import ADMIN_USER_IDS, VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL
-import os
-import shutil
+from settings import ADMIN_USER_IDS
 from jobs.daily import previous_week_period, previous_month_period, build_weekly_report_text, build_monthly_report_text, _build_smart_morning_text
 from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
 from services.quick import get_quick_buttons
 from services.reminder_totals import render_reminder_totals
-from services.receipt_parser import ocr_credential_diagnostic
+from services.voice_transcription import voice_config_status
 from services.activity import has_financial_activity_today
 from services.i18n import resolve_locale, t
 from services.notification_preview import build_preview, render_admin_preview
@@ -60,7 +58,7 @@ async def on_startup(app):
         BotCommand('admin_monthly_report_preview', 'Превью месячного отчёта (admin)'),
         BotCommand('admin_smart_morning_preview', 'Превью утреннего лимит-сигнала (admin)'),
         BotCommand('admin_category_learning_debug', 'Диагностика global category learning (admin)'),
-        BotCommand('admin_voice_status', 'Статус voice/OCR ключей (admin)'),
+        BotCommand('admin_voice_status', 'Статус голосового ввода (admin)'),
         BotCommand('admin_activity_status', 'Статус activity/inactivity (admin)'),
     ]
     for admin_id in ADMIN_USER_IDS:
@@ -298,15 +296,16 @@ async def cmd_admin_voice_status(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update):
         track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_voice_status", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
-    ocr_diag = ocr_credential_diagnostic()
+    status = voice_config_status()
     txt = (
-        f"VOICE_INPUT_ENABLED: {VOICE_INPUT_ENABLED}\n"
-        f"VOICE_TRANSCRIBE_PROVIDER: {VOICE_TRANSCRIBE_PROVIDER}\n"
-        f"VOICE_TRANSCRIBE_MODEL: {VOICE_TRANSCRIBE_MODEL}\n"
-        f"OPENAI_API_KEY configured: {ocr_diag['OPENAI_API_KEY_configured']}\n"
-        f"RECEIPT_OCR_API_KEY configured: {ocr_diag['RECEIPT_OCR_API_KEY_configured']}\n"
-        f"OCR credential source: {ocr_diag['selected_source']}\n"
-        f"FFMPEG_AVAILABLE: {bool(shutil.which('ffmpeg'))}"
+        f"enabled: {status.enabled}\n"
+        f"provider: {status.provider or 'none'}\n"
+        f"model: {status.model or 'none'}\n"
+        f"credential_present: {status.credential_present}\n"
+        f"dependency_available: {status.dependency_available}\n"
+        f"ffmpeg_available: {status.ffmpeg_available}\n"
+        f"ffprobe_available: {status.ffprobe_available}\n"
+        f"max_duration_seconds: {status.max_duration_seconds}"
     )
     await update.message.reply_text(txt)
 

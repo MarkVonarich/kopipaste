@@ -79,6 +79,7 @@ from services.goals import (
     update_goal_plan,
 )
 from services.security_events import SecurityEvent, track_security_event
+from services.records import send_operation_limit_alert
 import tempfile
 import os
 from time import time as unix_time
@@ -419,6 +420,7 @@ async def _handle_group_draft_callback(update, context: ContextTypes.DEFAULT_TYP
         f"Добавил(а): {user_name}"
     )
     await q.answer('Уже сохранено' if result['status'] == 'already_committed' else 'Сохранено')
+    await send_operation_limit_alert(recorded, context)
     return await _safe_edit_or_reply(q, text)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -3487,7 +3489,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             if amount is None:
                 await q.answer('Дробные суммы пока не поддерживаются', show_alert=True)
             else:
-                record_financial_operation(
+                recorded = record_financial_operation(
                     chat_id=cid,
                     actor_user_id=update.effective_user.id,
                     op_date=dt,
@@ -3500,6 +3502,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                     raw_text=cur.get('raw_text') or cur.get('merchant'),
                 )
                 await _send_standard_op_confirmation(context, cid, update.effective_user, dt, cur.get('type') or 'Расходы', cur.get('category') or 'Другое', amount, cur.get('merchant') or 'From image')
+                await send_operation_limit_alert(recorded, context)
                 log.info('receipt_review: saved index=%s user=%s', idx, cid)
                 context.user_data['receipt_saved_count'] = int(context.user_data.get('receipt_saved_count') or 0) + 1
                 await q.answer('Сохранено')
@@ -3622,7 +3625,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             if amount is None:
                 skipped += 1
                 continue
-            record_financial_operation(
+            recorded = record_financial_operation(
                 chat_id=cid,
                 actor_user_id=update.effective_user.id,
                 op_date=dt,
@@ -3635,6 +3638,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 raw_text=c.get('raw_text') or c.get('merchant'),
             )
             await _send_standard_op_confirmation(context, cid, update.effective_user, dt, c.get('type') or 'Расходы', c.get('category') or 'Другое', amount, c.get('merchant') or 'From image')
+            await send_operation_limit_alert(recorded, context)
             total += amount
             written += 1
         log.info('receipt_confirm_all: inserted=%s user=%s', written, cid)
@@ -4365,7 +4369,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
         if not r:
             return await q.answer('Не найдено', show_alert=True)
-        record_financial_operation(
+        recorded = record_financial_operation(
             chat_id=cid,
             actor_user_id=update.effective_user.id,
             op_date=r['event_date'],
@@ -4378,6 +4382,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             raw_text=r['title'],
         )
         await _send_standard_op_confirmation(context, cid, update.effective_user, r['event_date'], r['rem_type'], r['category'], int(r['amount']), r['title'])
+        await send_operation_limit_alert(recorded, context)
         if r['repeat_rule'] == 'none':
             reminder_update(cid, rid, is_active=False)
         elif r['repeat_rule'] == 'weekly':

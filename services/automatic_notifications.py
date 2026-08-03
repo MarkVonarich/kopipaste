@@ -368,8 +368,11 @@ async def dispatch_automatic_notification(
     payload: dict[str, Any] | None = None,
     original_scheduled_at: datetime | None = None,
     disable_web_page_preview: bool | None = None,
+    force_immediate: bool = False,
 ) -> DispatchResult:
     window, now_utc, quiet = quiet_context(user_id, now_utc=original_scheduled_at)
+    if force_immediate:
+        quiet = False
     if quiet and policy == DeliveryPolicy.SKIP:
         created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="quiet_hours")
         if created is False:

@@ -169,7 +169,9 @@ def test_limit_alert_copy_bands_buttons_and_safe_analytics():
         threshold_band,
     )
 
-    assert threshold_band(Decimal("790"), Decimal("1000")) is None
+    assert threshold_band(Decimal("490"), Decimal("1000")) is None
+    assert threshold_band(Decimal("500"), Decimal("1000")) == 50
+    assert threshold_band(Decimal("790"), Decimal("1000")) == 50
     assert threshold_band(Decimal("800"), Decimal("1000")) == 80
     assert threshold_band(Decimal("900"), Decimal("1000")) == 90
     assert threshold_band(Decimal("1000"), Decimal("1000")) == 100

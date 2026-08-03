@@ -20,6 +20,16 @@ Run after deployment and restart.
 
 - Send a short voice message such as `coffee 250`.
 - Confirm the operation saves and evening inactivity reminder is suppressed.
+- Confirm voice input is enabled.
+- Send `Магнит пятьсот семьдесят`.
+- Confirm the operation amount is `570`.
+- Send `Дикси тысяча`.
+- Confirm the operation amount is `1 000`.
+- Send unclear speech.
+- Confirm the response says what was heard and gives a parse-specific example.
+- Send a voice expense that crosses a category limit.
+- Confirm the category-limit card appears immediately.
+- Confirm typed operations still work.
 - Send a receipt/screenshot.
 - Confirm selected operations save and evening inactivity reminder is suppressed.
 
@@ -117,8 +127,16 @@ Run after deployment and restart.
 - Confirm changing timezone marks stale pending automatic notifications as skipped with reason `timezone_changed_stale_notification`.
 - Set daily reminder hour to `20:00`; at a non-20 local hour, confirm the evening reminder job does not send or defer a stale evening reminder.
 - Enable quiet hours crossing midnight and confirm reminders, reports, limits, challenges and goals respect the saved timezone rather than server time.
-- Create or stage a category limit below 80% and confirm no limit alert is sent.
-- Cross 80%, 90%, 100%, and exceeded states in a new period and confirm each alert has readable Russian copy with percentage, spent, limit, and remaining or exceeded amount.
+- Create test category `Продукты`.
+- Set a weekly category limit to `2 000 RUB`.
+- Add `1 000 RUB` expense and confirm the 50% card.
+- Add `600 RUB` expense and confirm the 80% card.
+- Add `200 RUB` expense and confirm the 90% card.
+- Add another `200 RUB` expense and confirm the 100% card.
+- Add `130 RUB` expense and confirm an exceeded card showing `2 130 / 2 000` and `130`.
+- Add `150 RUB` expense and confirm another exceeded card showing `2 280 / 2 000` and `280`.
+- Repeat the same update/callback and confirm no duplicate card appears for the same operation.
+- Confirm normal scheduler scans do not resend exceeded cards.
 - Confirm limit alert buttons open existing limit/settings screens and no dead callback appears.
 - Confirm repeated scans in the same period do not resend the same category-limit band.
 - Confirm safe analytics for `limit_threshold_reached` contain only threshold band, period, status, currency and source.

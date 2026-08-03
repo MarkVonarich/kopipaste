@@ -9,7 +9,8 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-APPROACHING_BANDS = (80, 90)
+HALF_USED_BAND = 50
+APPROACHING_BANDS = (50, 80, 90)
 REACHED_BAND = 100
 EXCEEDED_BAND = 101
 
@@ -46,6 +47,8 @@ def threshold_band(spent: Decimal | int | float | str, limit: Decimal | int | fl
         return 90
     if percentage >= 80:
         return 80
+    if percentage >= 50:
+        return 50
     return None
 
 
@@ -54,6 +57,8 @@ def alert_status_for_band(band: int) -> str:
         return "exceeded"
     if band == REACHED_BAND:
         return "reached"
+    if band == HALF_USED_BAND:
+        return "half_used"
     return "approaching"
 
 
@@ -70,6 +75,19 @@ def build_category_limit_dedupe_key(
     return f"category_limit:{user_id}:{workspace_part}:{period}:{period_start.isoformat()}:{category_key}:{band}"
 
 
+def build_category_limit_exceeded_dedupe_key(
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    period: str,
+    period_start: date,
+    category_key: str,
+    operation_id: int,
+) -> str:
+    workspace_part = workspace_id if workspace_id is not None else 0
+    return f"category_limit_exceeded:{user_id}:{workspace_part}:{period}:{period_start.isoformat()}:{category_key}:{int(operation_id)}"
+
+
 def render_category_limit_alert(
     *,
     category: str,
@@ -77,6 +95,7 @@ def render_category_limit_alert(
     spent: Decimal | int | float | str,
     limit: Decimal | int | float | str,
     currency: str | None,
+    intensified: bool = False,
 ) -> LimitAlert | None:
     limit_dec = Decimal(str(limit or 0))
     if limit_dec <= 0:
@@ -93,15 +112,20 @@ def render_category_limit_alert(
     limit_txt = _money(limit_dec, currency)
     if status == "exceeded":
         exceeded_txt = _money(spent_dec - limit_dec, currency)
-        title = "🚨 Лимит превышен"
-        detail = f"Превышение: <b>{exceeded_txt}</b>"
+        title = "🚨 Лимит превышен ещё сильнее" if intensified else "🚨 Лимит превышен"
+        detail = f"Превышение: <b>{exceeded_txt}</b>\n\nОбрати внимание на следующие траты по этой категории."
     elif status == "reached":
-        title = "⚠️ Лимит достигнут"
-        detail = "Остаток: <b>0</b>"
+        title = "🚨 Лимит исчерпан"
+        detail = "Следующая трата превысит лимит."
+    elif status == "half_used":
+        remaining_txt = _money(limit_dec - spent_dec, currency)
+        title = "ℹ️ Половина лимита использована"
+        detail = f"Осталось: <b>{remaining_txt}</b>\n\nПока всё в пределах плана."
     else:
         remaining_txt = _money(limit_dec - spent_dec, currency)
-        title = "⚠️ Лимит почти израсходован"
-        detail = f"Осталось: <b>{remaining_txt}</b>"
+        title = "⚠️ До лимита осталось совсем немного" if band == 90 else "⚠️ Лимит почти израсходован"
+        tail = "\n\nБудь внимательнее с дальнейшими тратами." if band == 80 else ""
+        detail = f"Осталось: <b>{remaining_txt}</b>{tail}"
     text = (
         f"{title}\n\n"
         f"<b>{category_html}</b> — {period_label} лимит.\n"
