@@ -9,10 +9,10 @@ from psycopg2 import errors
 from psycopg2.extras import Json
 
 from db.database import get_conn, pg_fetchall
-from services.automatic_notifications import user_timezone_name
 from services.analytics_privacy import safe_error_code, sanitize_properties
 from services.notification_preferences import get_notification_preferences
 from services.product_events import ProductEvent, track_product_event
+from services.user_time import user_local_date
 from settings import VOICE_INPUT_ENABLED
 
 log = logging.getLogger(__name__)
@@ -135,13 +135,7 @@ def _period_bounds(local_today: date, period_type: str) -> tuple[date | None, da
 
 
 def user_local_today(user_id: int, *, now_utc: datetime | None = None) -> date:
-    tz_name, _reason = user_timezone_name(user_id)
-    now = now_utc or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    from zoneinfo import ZoneInfo
-
-    return now.astimezone(ZoneInfo(tz_name)).date()
+    return user_local_date(user_id, now_utc=now_utc)
 
 
 def _feature_enabled(defn: ChallengeDefinition) -> bool:

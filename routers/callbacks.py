@@ -52,13 +52,14 @@ from services.export_xlsx import build_export_xlsx
 from services.export_flow import clear_export_wait_flags, export_state_has_period, parse_export_date, preset_period, validate_export_period
 from services.budgeting import build_budget_status, list_category_budget_groups, list_general_limits, period_bounds, render_limit_alert
 from services.budgeting import create_category_budget_group, list_active_expense_categories
-from services.automatic_notifications import DeliveryPolicy, is_quiet_local, queue_automatic_notification, quiet_hours_window
+from services.automatic_notifications import DeliveryPolicy, is_quiet_local, queue_automatic_notification, quiet_hours_window, suppress_stale_timezone_sensitive_notifications
 from services.challenges import achievements_for_user, upsert_assignments
 from services.i18n import t
-from services.notification_preferences import get_notification_preferences, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
+from services.notification_preferences import get_notification_preferences, set_notification_timezone, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
 from services.personal_data_deletion import delete_financial_history, delete_user_data, history_period_bounds, preview_delete_financial_history
 from services.analytics_privacy import apply_account_deletion
 from services.product_events import ProductEvent, track_product_event
+from services.user_time import TIMEZONE_CHOICES, resolve_user_timezone, user_local_date
 from services.goals import (
     GoalError,
     add_goal_movement,
@@ -591,6 +592,7 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
         [InlineKeyboardButton(_notif_label(prefs, 'goals'), callback_data='notif_toggle|goals')],
         [InlineKeyboardButton(_notif_label(prefs, 'challenges'), callback_data='notif_challenges')],
         [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
+        [InlineKeyboardButton('🕒 Часовой пояс', callback_data='notif_tz')],
         [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
     ])
 
@@ -605,7 +607,8 @@ async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAU
         'Автоматические сообщения учитывают тихие часы. Ответы на ваши действия приходят сразу.\n\n'
         f"Утро: {prefs['morning_time']}\n"
         f"Вечер: {prefs['evening_time']}\n"
-        f"Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}"
+        f"Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}\n"
+        f"Часовой пояс: {_notification_timezone_label(cid)}"
     )
     return await _safe_edit_or_reply(q, text, reply_markup=_notification_settings_markup(prefs, back_dest))
 
@@ -652,27 +655,31 @@ def _quiet_hours_markup(prefs: dict) -> InlineKeyboardMarkup:
 
 
 def _notification_timezone_label(user_id: int) -> str:
-    try:
-        rows = pg_fetchall(
-            """
-            SELECT COALESCE(np.timezone, uws.timezone, 'Europe/Moscow')
-              FROM public.users u
-              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
-              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
-             WHERE u.user_id=%s
-             LIMIT 1
-            """,
-            (user_id,),
-        )
-        if rows and rows[0][0]:
-            return rows[0][0]
-    except Exception:
-        pass
-    try:
-        off = get_user_tz(user_id)
-        return f"UTC{off // 60:+d}"
-    except Exception:
-        return "Europe/Moscow"
+    resolved = resolve_user_timezone(user_id)
+    return resolved.timezone_name
+
+
+def _timezone_markup(current_tz: str, back_dest: str = "menu_notifications") -> InlineKeyboardMarkup:
+    rows = []
+    for idx in range(0, len(TIMEZONE_CHOICES), 2):
+        row = []
+        for label, tz_name in TIMEZONE_CHOICES[idx:idx + 2]:
+            marker = "✅ " if tz_name == current_tz else ""
+            row.append(InlineKeyboardButton(f"{marker}{label}", callback_data=f"tz|set|{tz_name}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Другая IANA", callback_data="tz|manual")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_dest)])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _render_notification_timezone(q, cid: int, *, back_dest: str = "menu_notifications"):
+    resolved = resolve_user_timezone(cid)
+    text = (
+        "🕒 Часовой пояс\n\n"
+        f"Текущий: {resolved.timezone_name}\n\n"
+        "Он используется для будущих напоминаний, отчётов, лимитов, целей и тихих часов."
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=_timezone_markup(resolved.timezone_name, back_dest))
 
 
 async def _render_quiet_hours(q, cid: int):
@@ -2068,9 +2075,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'noop_today':
         cid = update.effective_chat.id
         conn = get_conn(); cur = conn.cursor()
-        cur.execute("SELECT COALESCE(tz_offset_min,180) FROM public.users WHERE user_id=%s", (cid,))
-        row = cur.fetchone(); tz = int(row[0]) if row and row[0] is not None else 0
-        local_today = (datetime.utcnow() + timedelta(minutes=tz)).date()
+        local_today = user_local_date(cid)
         try:
             cur.execute(
                 "INSERT INTO public.operations (chat_id, user_id, op_date, type, category, amount, comment, raw_text) "
@@ -2089,9 +2094,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'noop_delete':
         cid = update.effective_chat.id
         conn = get_conn(); cur = conn.cursor()
-        cur.execute("SELECT COALESCE(tz_offset_min,180) FROM public.users WHERE user_id=%s", (cid,))
-        row = cur.fetchone(); tz = int(row[0]) if row and row[0] is not None else 0
-        local_today = (datetime.utcnow() + timedelta(minutes=tz)).date()
+        local_today = user_local_date(cid)
         cur.execute("DELETE FROM public.operations WHERE chat_id=%s AND op_date=%s AND type='noop'", (cid, local_today))
         conn.commit(); cur.close(); conn.close()
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('Без операций сегодня', callback_data='noop_today')]])
@@ -2904,7 +2907,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         locale = _privacy_locale(update.effective_user.id, getattr(update.effective_user, 'language_code', None))
         period = data.split('|', 2)[2]
         try:
-            today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+            today = user_local_date(update.effective_user.id)
             start_date, end_date = history_period_bounds(period, today)
         except Exception:
             return await q.answer(t('privacy.stale', locale), show_alert=True)
@@ -3370,6 +3373,33 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'notif_quiet_hours':
         return await _render_quiet_hours(q, cid)
 
+    if data in {'notif_tz', 'menu_tz'}:
+        return await _render_notification_timezone(q, cid, back_dest='menu_settings' if data == 'menu_tz' else 'menu_notifications')
+
+    if data.startswith('tz|'):
+        parts = data.split('|', 2)
+        action = parts[1] if len(parts) > 1 else ''
+        try:
+            if action == 'set' and len(parts) > 2:
+                prefs = set_notification_timezone(cid, parts[2])
+                skipped = suppress_stale_timezone_sensitive_notifications(cid)
+                track_product_event(ProductEvent(
+                    event_name="timezone_updated",
+                    user_id=update.effective_user.id,
+                    status="success",
+                    properties={"destination": "notifications", "stale_notifications_suppressed": bool(skipped)},
+                ))
+                await q.answer('Часовой пояс сохранён')
+                return await _render_notification_timezone(q, cid)
+            if action == 'manual':
+                context.user_data['await_timezone_name'] = True
+                await q.answer()
+                return await q.message.reply_text('Введите IANA-часовой пояс, например Europe/Moscow')
+        except ValueError:
+            return await q.answer('Введите корректный IANA-часовой пояс', show_alert=True)
+        except Exception:
+            return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
+
     if data.startswith('quiet|'):
         parts = data.split('|')
         action = parts[1] if len(parts) > 1 else ''
@@ -3710,41 +3740,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_reminder')]])
         return await q.edit_message_text("Введите час (0–23), во сколько напоминать:", reply_markup=kb)
-
-    # Часовой пояс
-    if data == 'menu_tz':
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('Определить по месту 📍', callback_data='tz_detect')],
-            [InlineKeyboardButton('Выбрать вручную', callback_data='tz_manual')],
-            [InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')],
-        ])
-        return await q.edit_message_text('Выбор часового пояса:', reply_markup=kb)
-
-    if data == 'tz_manual':
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('UTC+2', callback_data='tz_set|120'),
-             InlineKeyboardButton('UTC+3 (МСК)', callback_data='tz_set|180'),
-             InlineKeyboardButton('UTC+4', callback_data='tz_set|240')],
-            [InlineKeyboardButton('UTC+5', callback_data='tz_set|300'),
-             InlineKeyboardButton('UTC+6', callback_data='tz_set|360'),
-             InlineKeyboardButton('UTC+7', callback_data='tz_set|420')],
-            [InlineKeyboardButton('UTC+8', callback_data='tz_set|480'),
-             InlineKeyboardButton('UTC+9', callback_data='tz_set|540')],
-            [InlineKeyboardButton('◀️ Назад', callback_data='menu_tz')],
-        ])
-        return await q.edit_message_text('Выберите UTC-смещение:', reply_markup=kb)
-
-    if data.startswith('tz_set|'):
-        off = int(data.split('|', 1)[1])
-        update_user_field(cid, 'tz_offset_min', off)
-        track_product_event(ProductEvent(
-            event_name="quiet_hours_updated",
-            user_id=update.effective_user.id,
-            status="success",
-            properties={"destination": "timezone"},
-        ))
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
-        return await q.edit_message_text(f"✅ Часовой пояс установлен: UTC{off//60:+d}", reply_markup=kb)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Лимиты по категориям — ветки

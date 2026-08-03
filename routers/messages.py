@@ -37,11 +37,13 @@ from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
 from services.budgeting import create_category_budget_group, list_active_expense_categories, upsert_general_limit
-from services.notification_preferences import set_quiet_hours_time
+from services.automatic_notifications import suppress_stale_timezone_sensitive_notifications
+from services.notification_preferences import set_notification_timezone, set_quiet_hours_time
 from services.i18n import resolve_locale, t
 from services.personal_data_deletion import preview_delete_financial_history
 from services.api_usage import ApiUsageEvent, track_api_usage
 from services.product_events import ProductEvent, track_product_event
+from services.user_time import is_valid_timezone_name, user_local_date
 from services.goals import (
     GoalError,
     add_goal_movement,
@@ -847,7 +849,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 return await emsg.reply_text('У цели есть срок?', reply_markup=kb)
             if step == 'deadline':
                 parsed = _parse_flexible_date(text)
-                today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+                today = user_local_date(update.effective_user.id)
                 if not parsed or parsed < today:
                     return await emsg.reply_text('Срок цели не может быть в прошлом. Введите дату ещё раз.')
                 goal_draft['deadline'] = parsed.isoformat()
@@ -915,7 +917,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 return await emsg.reply_text("Хотите получать напоминания о плановых пополнениях?", reply_markup=_goal_reminder_prompt_kb(goal.id))
             if mode == 'plan_deadline':
                 parsed = _parse_flexible_date(text)
-                today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+                today = user_local_date(update.effective_user.id)
                 if not parsed or parsed < today:
                     return await emsg.reply_text('Срок цели не может быть в прошлом. Введите дату ещё раз.')
                 goal = update_goal_plan(
@@ -1064,7 +1066,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 t('privacy.stale', locale),
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t('privacy.back', locale), callback_data='hist|menu')]]),
             )
-        today = (datetime.utcnow() + timedelta(minutes=get_user_tz(update.effective_user.id))).date()
+        today = user_local_date(update.effective_user.id)
         parsed = parse_export_date(text, today)
         if parsed is None:
             return await emsg.reply_text(
@@ -1504,6 +1506,26 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')]])
         return await emsg.reply_text(f'✅ Тихие часы обновлены: {start}–{end}', reply_markup=kb)
 
+    if context.user_data.pop('await_timezone_name', False):
+        tz_name = text.strip()
+        if not is_valid_timezone_name(tz_name):
+            context.user_data['await_timezone_name'] = True
+            return await emsg.reply_text('⚠️ Введите корректный IANA-часовой пояс, например Europe/Moscow')
+        try:
+            set_notification_timezone(cid, tz_name)
+            skipped = suppress_stale_timezone_sensitive_notifications(cid)
+        except Exception:
+            context.user_data['await_timezone_name'] = True
+            return await emsg.reply_text('⚠️ Не удалось сохранить часовой пояс. Попробуйте ещё раз.')
+        track_product_event(ProductEvent(
+            event_name="timezone_updated",
+            user_id=cid,
+            status="success",
+            properties={"destination": "notifications", "stale_notifications_suppressed": bool(skipped)},
+        ))
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🕒 Часовой пояс', callback_data='notif_tz')]])
+        return await emsg.reply_text(f'✅ Часовой пояс сохранён: {tz_name}', reply_markup=kb)
+
     if context.user_data.pop('setting_week', False):
         if not re.fullmatch(r'\d+', text.strip()):
             context.user_data['setting_week'] = True
@@ -1722,17 +1744,17 @@ async def handle_location(update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         tf = TimezoneFinder()
-        tz_name = tf.timezone_at(lng=loc.longitude, lat=loc.latitude)
-        off = 180  # простой дефолт МСК
-        update_user_field(cid, 'tz_offset_min', off)
+        tz_name = tf.timezone_at(lng=loc.longitude, lat=loc.latitude) or 'Europe/Moscow'
+        set_notification_timezone(cid, tz_name)
+        skipped = suppress_stale_timezone_sensitive_notifications(cid)
         track_product_event(ProductEvent(
-            event_name="quiet_hours_updated",
+            event_name="timezone_updated",
             user_id=cid,
             status="success",
-            properties={"destination": "timezone"},
+            properties={"destination": "notifications", "stale_notifications_suppressed": bool(skipped)},
         ))
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_settings')]])
-        return await emsg.reply_text(f"✅ Часовой пояс установлен (приблизительно {tz_name}, UTC{off//60:+d}). Можно поправить вручную.", reply_markup=kb)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🕒 Часовой пояс', callback_data='notif_tz')]])
+        return await emsg.reply_text(f"✅ Часовой пояс установлен: {tz_name}. Можно поправить вручную.", reply_markup=kb)
     except Exception:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('◀️ Назад', callback_data='menu_tz')]])
         return await emsg.reply_text("⚠️ Не удалось определить. Выберите вручную.", reply_markup=kb)

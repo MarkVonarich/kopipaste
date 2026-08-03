@@ -27,6 +27,7 @@ from services.activity import has_financial_activity_today
 from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
 from services.notification_preferences import get_notification_preferences
 from services.notification_engine import preferences_from_dict, should_send_now
+from services.user_time import resolve_user_timezone, user_local_date, user_local_now
 
 log = logging.getLogger("finbot.daily")
 
@@ -78,7 +79,7 @@ def build_user_reminder_message(reminder_id: int, event_date: date, notify_days_
     )
     if not rows:
         raise ValueError("reminder_not_found")
-    rid, _uid, title, _rem_type, category, amount, row_event_date, row_ndb, _repeat_rule, _repeat_days = rows[0]
+    rid, uid, title, _rem_type, category, amount, row_event_date, row_ndb, _repeat_rule, _repeat_days = rows[0]
     event_date = row_event_date or event_date
     notify_days_before = int(row_ndb if row_ndb is not None else notify_days_before)
     kb = InlineKeyboardMarkup([
@@ -87,19 +88,23 @@ def build_user_reminder_message(reminder_id: int, event_date: date, notify_days_
         [InlineKeyboardButton('⏸ Отключить', callback_data=f'rem_tog|{rid}')],
     ])
     due_date = event_date - timedelta(days=notify_days_before)
-    day_txt = 'Сегодня событие' if due_date == datetime.utcnow().date() else 'Скоро событие'
+    day_txt = 'Сегодня событие' if due_date == user_local_date(int(uid)) else 'Скоро событие'
     note = "\n\n⏰ Напоминание доставлено после окончания тихих часов." if delayed else ""
     text = f"🔔 {day_txt}\n\n{title} — {int(float(amount))} ₽\n\nКатегория: {category}\nДата: {event_date.strftime('%d.%m')}{note}"
     return text, kb
 
 
 async def user_reminders_job(context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     scanned = due = sent = skipped = 0
     try:
-        rows = _rem_due_rows(today)
+        rows = _rem_due_rows(today + timedelta(days=1))
         scanned = len(rows)
         for rid, uid, title, rem_type, category, amount, event_date, ndb, repeat_rule, repeat_days in rows:
+            local_today = user_local_date(int(uid))
+            due_on = event_date - timedelta(days=int(ndb or 0))
+            if not (local_today - timedelta(days=3) <= due_on <= local_today):
+                continue
             due += 1
             if _event_sent(rid, event_date, ndb):
                 skipped += 1
@@ -240,45 +245,22 @@ def _ensure_tables():
 def _user_tz_and_hour(user_id: int) -> tuple[int, int]:
     conn = get_conn(); cur = conn.cursor()
     cur.execute("""
-        SELECT COALESCE(tz_offset_min,180), COALESCE(reminder_hour,20)
+        SELECT 0, COALESCE(reminder_hour,20)
           FROM public.users WHERE user_id=%s LIMIT 1
     """,(user_id,))
-    row = cur.fetchone() or (180,20)
+    row = cur.fetchone() or (0,20)
     conn.close()
     return int(row[0]), int(row[1])
 
 def _local_now(user_id: int) -> datetime:
-    off_min, _ = _user_tz_and_hour(user_id)
-    return datetime.now(timezone.utc) + timedelta(minutes=off_min)
+    return user_local_now(user_id)
 
 def _local_today(user_id: int):
     return _local_now(user_id).date()
 
 
 def _user_timezone_name(user_id: int) -> str:
-    try:
-        rows = pg_fetchall(
-            """
-            SELECT COALESCE(np.timezone, uws.timezone, 'Europe/Moscow')
-              FROM public.users u
-              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
-              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
-             WHERE u.user_id=%s
-             LIMIT 1
-            """,
-            (user_id,),
-        )
-        if rows and rows[0][0]:
-            return str(rows[0][0])
-    except Exception:
-        pass
-    off_min, _ = _user_tz_and_hour(user_id)
-    return {
-        0: "UTC",
-        60: "Europe/Berlin",
-        120: "Europe/Helsinki",
-        180: "Europe/Moscow",
-    }.get(off_min, "UTC")
+    return resolve_user_timezone(user_id).timezone_name
 
 
 def _period_from_local_date(user_id: int) -> date:
@@ -478,7 +460,7 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
         log.exception("day_nudge_job error: %s", e)
 
 async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
-    """Окно: reminder_hour..reminder_hour+2 локально. 1 раз/день. Пропуск, если были операции."""
+    """Окно: ровно reminder_hour:00-reminder_hour:59 локально. 1 раз/день. Пропуск, если были операции."""
     try:
         _ensure_tables()
         conn = get_conn(); cur = conn.cursor()
@@ -490,11 +472,11 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
             prefs = get_notification_preferences(uid)
             if not prefs.get("evening_enabled", True):
                 continue
-            off_min, r_hour = _user_tz_and_hour(uid)
-            now_loc = datetime.now(timezone.utc) + timedelta(minutes=off_min)
+            _off_min, r_hour = _user_tz_and_hour(uid)
+            now_loc = _local_now(uid)
             if not should_send_now(now_loc, preferences_from_dict(prefs)):
                 continue
-            if not (r_hour <= now_loc.hour <= r_hour + 2):
+            if now_loc.hour != r_hour:
                 continue
             if _already_sent_today(uid, "evening"):
                 continue

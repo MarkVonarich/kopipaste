@@ -5,6 +5,7 @@ from datetime import time
 from psycopg2 import errors
 
 from db.database import get_conn, pg_fetchall
+from services.user_time import DEFAULT_TIMEZONE, is_valid_timezone_name
 
 TOGGLE_FIELDS = {
     "morning": "morning_enabled",
@@ -33,12 +34,13 @@ def get_notification_preferences(user_id: int) -> dict:
                    COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
                    COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
                    to_char(quiet_hours_start, 'HH24:MI'),
-                   to_char(quiet_hours_end, 'HH24:MI')
+                   to_char(quiet_hours_end, 'HH24:MI'),
+                   COALESCE(NULLIF(timezone, ''), %s)
               FROM public.notification_preferences
              WHERE user_id=%s
              LIMIT 1
             """,
-            (user_id,),
+            (DEFAULT_TIMEZONE, user_id),
         )
     except (errors.UndefinedTable, errors.UndefinedColumn):
         rows = []
@@ -59,6 +61,7 @@ def get_notification_preferences(user_id: int) -> dict:
             "quiet_hours_enabled": False,
             "quiet_hours_start": None,
             "quiet_hours_end": None,
+            "timezone": DEFAULT_TIMEZONE,
         }
     r = rows[0]
     return {
@@ -77,6 +80,7 @@ def get_notification_preferences(user_id: int) -> dict:
         "quiet_hours_enabled": bool(r[12] and r[13]),
         "quiet_hours_start": r[12],
         "quiet_hours_end": r[13],
+        "timezone": r[14] or DEFAULT_TIMEZONE,
     }
 
 
@@ -172,6 +176,32 @@ def set_quiet_hours_time(user_id: int, field: str, value: str) -> dict:
                        {other}=COALESCE(public.notification_preferences.{other}, EXCLUDED.{other})
                 """,
                 (user_id, parsed, default_other),
+            )
+        conn.commit()
+        return get_notification_preferences(user_id)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def set_notification_timezone(user_id: int, timezone_name: str) -> dict:
+    name = str(timezone_name or "").strip()
+    if not is_valid_timezone_name(name):
+        raise ValueError("invalid_timezone")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.notification_preferences (user_id, timezone)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET timezone=EXCLUDED.timezone,
+                       updated_at=now()
+                """,
+                (user_id, name),
             )
         conn.commit()
         return get_notification_preferences(user_id)

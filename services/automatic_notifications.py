@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from enum import StrEnum
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from psycopg2 import errors
 from psycopg2.extras import Json
@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 from db.database import get_conn, pg_fetchall
 from services.analytics_privacy import safe_error_code
 from services.product_events import ProductEvent, track_product_event
+from services.user_time import is_local_time_in_window, resolve_user_timezone, user_timezone_name
 
 log = logging.getLogger(__name__)
 
@@ -56,48 +57,10 @@ def parse_hhmm(value: str | None) -> time | None:
     return time(int(hour_s), int(minute_s))
 
 
-def _offset_tz_name(offset_min: int) -> str:
-    return {
-        0: "UTC",
-        60: "Europe/Berlin",
-        120: "Europe/Helsinki",
-        180: "Europe/Moscow",
-    }.get(int(offset_min), "Europe/Moscow")
-
-
-def user_timezone_name(user_id: int) -> tuple[str, str | None]:
-    try:
-        rows = pg_fetchall(
-            """
-            SELECT COALESCE(np.timezone, uws.timezone, w.timezone),
-                   COALESCE(u.tz_offset_min, 180)
-              FROM public.users u
-              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
-              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
-              LEFT JOIN public.workspaces w ON w.id=uws.active_workspace_id
-             WHERE u.user_id=%s
-             LIMIT 1
-            """,
-            (user_id,),
-        )
-        if rows:
-            name = rows[0][0] or _offset_tz_name(int(rows[0][1] or 180))
-            try:
-                ZoneInfo(str(name))
-                return str(name), None
-            except ZoneInfoNotFoundError:
-                fallback = _offset_tz_name(int(rows[0][1] or 180))
-                log.info("notification_timezone_fallback reason=invalid_iana")
-                return fallback, "invalid_iana"
-    except (errors.UndefinedTable, errors.UndefinedColumn):
-        pass
-    except Exception:
-        log.info("notification_timezone_fallback reason=lookup_failed")
-    return "Europe/Moscow", "missing_timezone"
-
-
 def quiet_hours_window(user_id: int) -> QuietHoursWindow:
-    tz_name, fallback_reason = user_timezone_name(user_id)
+    resolved = resolve_user_timezone(user_id)
+    tz_name = resolved.timezone_name
+    fallback_reason = resolved.fallback_reason
     try:
         rows = pg_fetchall(
             """
@@ -117,12 +80,7 @@ def quiet_hours_window(user_id: int) -> QuietHoursWindow:
 
 
 def is_quiet_local(local_dt: datetime, start: time, end: time) -> bool:
-    current = local_dt.time().replace(second=0, microsecond=0)
-    if start == end:
-        return False
-    if start < end:
-        return start <= current < end
-    return current >= start or current < end
+    return is_local_time_in_window(local_dt, start, end)
 
 
 def next_quiet_end_utc(now_utc: datetime, window: QuietHoursWindow) -> datetime:
@@ -149,6 +107,46 @@ def quiet_context(user_id: int, *, now_utc: datetime | None = None) -> tuple[Qui
         return window, now, False
     local_now = now.astimezone(ZoneInfo(window.timezone_name))
     return window, now, is_quiet_local(local_now, window.start, window.end)
+
+
+def suppress_stale_timezone_sensitive_notifications(user_id: int, *, reason: str = "timezone_changed_stale_notification") -> int:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.automatic_notifications
+                   SET status='skipped',
+                       skip_reason=%s,
+                       locked_at=NULL,
+                       locked_by=NULL,
+                       updated_at=now()
+                 WHERE user_id=%s
+                   AND status IN ('pending','claimed')
+                   AND notification_type IN (
+                       'day_nudge',
+                       'evening_reminder',
+                       'smart_morning_limit',
+                       'weekly_report',
+                       'monthly_report',
+                       'user_reminder',
+                       'challenge_prompt',
+                       'goal_planned_contribution'
+                   )
+                """,
+                (reason, int(user_id)),
+            )
+            changed = int(cur.rowcount or 0)
+        conn.commit()
+        return changed
+    except (errors.UndefinedTable, errors.UndefinedColumn):
+        conn.rollback()
+        return 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _insert_deferred(
@@ -649,7 +647,8 @@ async def process_due_notifications(context: ContextTypes.DEFAULT_TYPE, *, limit
     for row in rows:
         try:
             text, markup = render_deferred_notification(row)
-            await context.bot.send_message(chat_id=row["user_id"], text=text, reply_markup=markup)
+            parse_mode = (row.get("payload") or {}).get("parse_mode")
+            await context.bot.send_message(chat_id=row["user_id"], text=text, reply_markup=markup, parse_mode=parse_mode)
             mark_notification_sent(row["id"])
             counts["sent"] += 1
             track_product_event(ProductEvent(
