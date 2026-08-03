@@ -3,11 +3,6 @@
 __version__ = "2025.08.26-batch-05"
 
 import re
-import os
-import shutil
-import subprocess
-import tempfile
-import time as monotonic_time
 from datetime import datetime, timedelta, date
 from decimal import Decimal, InvalidOperation
 from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
@@ -23,13 +18,12 @@ from services.categories import (
     normalized_category_key,
 )
 from services.operations import category_options, commit_operation_draft, create_operation_draft, load_operation_draft, record_financial_operation
-from services.records import get_user_alias, record_operation
+from services.records import get_user_alias, record_operation, send_operation_limit_alert
 from services.workspaces import resolve_workspace
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
 from utils.parsing import FRACTIONAL_AMOUNT_ERROR, parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
-from utils.spoken_numbers import normalize_spoken_money
 from db.database import pg_fetchall
 from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation, get_user_tz
 from db.queries import update_last_operation_fields, update_operation_fields_by_id, get_last_operation, reminder_insert, reminder_update
@@ -44,6 +38,7 @@ from services.personal_data_deletion import preview_delete_financial_history
 from services.api_usage import ApiUsageEvent, track_api_usage
 from services.product_events import ProductEvent, track_product_event
 from services.user_time import is_valid_timezone_name, user_local_date
+from services.voice_transcription import transcribe_telegram_voice, user_message_for_voice_reason
 from services.goals import (
     GoalError,
     add_goal_movement,
@@ -58,7 +53,7 @@ from services.goals import (
     update_goal_plan,
 )
 from ui.keyboards import category_budget_picker_kb
-from settings import VOICE_INPUT_ENABLED, VOICE_TRANSCRIBE_PROVIDER, VOICE_TRANSCRIBE_MODEL, VOICE_MAX_SECONDS
+from settings import VOICE_TRANSCRIBE_MODEL, VOICE_TRANSCRIBE_PROVIDER
 import logging
 from time import time as unix_time
 from secrets import token_urlsafe
@@ -722,85 +717,68 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
     emsg = update.effective_message
-    if not VOICE_INPUT_ENABLED:
-        return await emsg.reply_text('Голосовой ввод сейчас выключен.')
-    if VOICE_TRANSCRIBE_PROVIDER != 'openai':
-        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
-    api_key = (os.getenv('OPENAI_API_KEY') or os.getenv('RECEIPT_OCR_API_KEY') or '').strip()
-    if not api_key:
-        return await emsg.reply_text('Голос получил, но обработка аудио пока не настроена на сервере.')
     msg = update.message
-    media = msg.voice or msg.audio
-    if not media:
-        return await emsg.reply_text('Не удалось прочитать аудио. Попробуй ещё раз.')
-    if (media.duration or 0) > VOICE_MAX_SECONDS:
-        return await emsg.reply_text(f'Слишком длинное аудио. Максимум {VOICE_MAX_SECONDS} сек.')
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key, timeout=30)
-        started = monotonic_time.monotonic()
-        with tempfile.TemporaryDirectory(prefix='fin_voice_') as td:
-            src = os.path.join(td, 'in.oga')
-            dst = os.path.join(td, 'out.mp3')
-            f = await media.get_file()
-            await f.download_to_drive(custom_path=src)
-            audio_path = src
-            if shutil.which('ffmpeg'):
-                proc = subprocess.run(['ffmpeg', '-y', '-i', src, '-ac', '1', '-ar', '16000', dst], capture_output=True)
-                if proc.returncode == 0:
-                    audio_path = dst
-                else:
-                    log.warning('voice transcode failed user=%s', update.effective_chat.id)
-            else:
-                log.warning('voice: ffmpeg missing user=%s', update.effective_chat.id)
-            with open(audio_path, 'rb') as af:
-                tr = client.audio.transcriptions.create(model=VOICE_TRANSCRIBE_MODEL, file=af)
-            text = (getattr(tr, 'text', None) or '').strip()
+    media = getattr(msg, "voice", None) or getattr(msg, "audio", None)
+    result = await transcribe_telegram_voice(media)
+    uid = update.effective_user.id if update.effective_user else update.effective_chat.id
+    if not result.ok:
         track_api_usage(ApiUsageEvent(
-            provider="openai",
-            model=VOICE_TRANSCRIBE_MODEL,
-            feature="voice_transcription",
-            status="success" if text else "empty",
-            user_id=update.effective_user.id if update.effective_user else update.effective_chat.id,
-            latency_ms=int((monotonic_time.monotonic() - started) * 1000),
-            metadata={"duration_seconds": int(media.duration or 0)},
-        ))
-        if not text:
-            return await emsg.reply_text('Не расслышал. Попробуй сказать короче: кофе 250')
-        log.info('voice_transcribe: ok user=%s', update.effective_chat.id)
-        await emsg.reply_text(f'Распознал: {text[:180]}')
-        normalized_text, changed, lang = normalize_spoken_money(text)
-        log.info('voice_normalized_text: changed=%s lang=%s user=%s', changed, lang, update.effective_chat.id)
-        try:
-            parse_user_input(normalized_text)
-            parse_ok = True
-            parse_error = None
-        except ValueError as e:
-            parse_ok = False
-            parse_error = str(e)
-        if not parse_ok:
-            if parse_error == FRACTIONAL_AMOUNT_ERROR:
-                return await emsg.reply_text(
-                    f'Распознал текст, но дробные суммы с копейками пока не поддерживаются: {normalized_text[:120]}\n'
-                    'Скажи или напиши целую сумму, например: coffee 12 dollars'
-                )
-            log.info('voice_to_text_flow: amount_not_found lang=%s user=%s', lang, update.effective_chat.id)
-            return await emsg.reply_text(f'Распознал текст, но не нашёл сумму: {normalized_text[:120]}\nПример: coffee 2 dollars')
-        context.user_data['operation_source'] = 'voice'
-        await _process_free_text(update, context, normalized_text)
-        log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
-        return
-    except Exception as e:
-        log.warning('voice transcribe failed user=%s reason=%s', update.effective_chat.id, type(e).__name__)
-        track_api_usage(ApiUsageEvent(
-            provider="openai",
+            provider=VOICE_TRANSCRIBE_PROVIDER,
             model=VOICE_TRANSCRIBE_MODEL,
             feature="voice_transcription",
             status="failed",
-            user_id=update.effective_user.id if update.effective_user else update.effective_chat.id,
-            error_code=type(e).__name__.lower(),
+            user_id=uid,
+            latency_ms=result.latency_ms,
+            error_code=result.reason,
+            metadata={"duration_seconds": int(getattr(media, "duration", 0) or 0)},
         ))
-        return await emsg.reply_text('Не смог распознать голос. Попробуй ещё раз или напиши текстом.')
+        log.info("voice_pipeline_failed user=%s reason=%s", update.effective_chat.id, result.reason)
+        return await emsg.reply_text(user_message_for_voice_reason(result.reason or "voice_provider_request_failed"))
+
+    track_api_usage(ApiUsageEvent(
+        provider=result.provider,
+        model=result.model,
+        feature="voice_transcription",
+        status="success",
+        user_id=uid,
+        latency_ms=result.latency_ms,
+        metadata={
+            "duration_seconds": int(getattr(media, "duration", 0) or 0),
+            "normalized": bool(result.normalized_changed),
+            "language": result.language,
+        },
+    ))
+    log.info("voice_transcribe_ok user=%s normalized=%s lang=%s", update.effective_chat.id, result.normalized_changed, result.language)
+    normalized_text = result.normalized_text
+    try:
+        parse_user_input(normalized_text)
+    except ValueError as exc:
+        reason = str(exc)
+        track_api_usage(ApiUsageEvent(
+            provider=result.provider,
+            model=result.model,
+            feature="voice_transcription",
+            status="failed",
+            user_id=uid,
+            error_code="voice_parse_failed",
+            metadata={"parse_reason": reason, "language": result.language},
+        ))
+        heard = normalized_text[:120]
+        if reason == FRACTIONAL_AMOUNT_ERROR:
+            return await emsg.reply_text(
+                f"Я услышал: «{heard}»\n\n"
+                "Дробные суммы с копейками пока не поддерживаются.\n"
+                "Попробуйте сказать, например:\n«Продукты 500»."
+            )
+        return await emsg.reply_text(
+            f"Я услышал: «{heard}»\n\n"
+            "Не удалось определить сумму или категорию.\n"
+            "Попробуйте сказать, например:\n«Продукты 500»."
+        )
+    context.user_data['operation_source'] = 'voice'
+    await _process_free_text(update, context, normalized_text)
+    log.info('voice_to_text_flow: ok user=%s', update.effective_chat.id)
+    return
 
 
 # ─────────────────────────────────────────────
@@ -1165,10 +1143,11 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         )
         recorded = result['recorded']
         name = getattr(update.effective_user, 'full_name', None) or getattr(update.effective_user, 'username', None) or str(update.effective_user.id)
-        return await emsg.reply_text(
+        await emsg.reply_text(
             f"✅ Операция записана\n\n{cat.name} — {recorded.amount} {recorded.currency}\n"
             f"Пространство: {workspace.name}\nДобавил(а): {name}"
         )
+        return await send_operation_limit_alert(recorded, context)
 
     if context.user_data.get('lim_edit_amount'):
         st = context.user_data.get('lim_edit_amount') or {}
