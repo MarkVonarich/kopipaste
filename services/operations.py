@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 
 from psycopg2 import errors
@@ -14,6 +15,7 @@ from services.activity import record_financial_activity
 from services.product_events import ProductEvent, track_product_event
 from services.security_events import SecurityEvent, track_security_event
 from services.workspaces import WorkspaceContext, can_add_operation, resolve_workspace
+from utils.money import to_decimal_money
 
 OperationSource = Literal["text", "voice", "ocr", "reminder", "import", "miniapp", "api"]
 log = logging.getLogger(__name__)
@@ -26,7 +28,7 @@ class RecordedOperation:
     actor_user_id: int
     user_id: int
     chat_id: int
-    amount: int
+    amount: Decimal
     currency: str
     type: str
     category: str
@@ -51,7 +53,7 @@ def category_options(categories: list[str]) -> dict[str, str]:
 def create_operation_draft(
     *,
     workspace: WorkspaceContext,
-    amount: int,
+    amount: Decimal | int | str,
     op_type: str,
     merchant: str,
     op_date: date | datetime,
@@ -62,7 +64,7 @@ def create_operation_draft(
 ) -> str:
     dt = op_date.date() if isinstance(op_date, datetime) else op_date
     payload = {
-        "amount": int(amount),
+        "amount": str(to_decimal_money(amount, positive=True)),
         "type": op_type,
         "merchant": merchant,
         "op_date": dt.isoformat(),
@@ -267,7 +269,7 @@ def commit_operation_draft(
             iso = dt.isocalendar()
             week_start = dt.fromordinal(dt.toordinal() - (dt.isoweekday() - 1))
             op_type = payload.get("type") or "Расходы"
-            amount = int(payload.get("amount") or 0)
+            amount = to_decimal_money(payload.get("amount") or 0, positive=True)
             comment = payload.get("merchant") or "From group"
             source = payload.get("source") or row[4] or "text"
             raw_text = payload.get("raw_text")
@@ -429,7 +431,7 @@ def record_financial_operation(
     op_date: date | datetime,
     op_type: str,
     category: str,
-    amount: int,
+    amount: Decimal | int | str,
     comment: str = "",
     source: OperationSource = "text",
     chat_type: str = "private",
@@ -451,8 +453,9 @@ def record_financial_operation(
         raise PermissionError("workspace is not configured or actor cannot add operations")
 
     dt = op_date.date() if isinstance(op_date, datetime) else op_date
+    amount_dec = to_decimal_money(amount, positive=True)
     compatibility_user_id = actor_user_id if chat_type in {"group", "supergroup"} else chat_id
-    operation_id = insert_operation(chat_id, dt, op_type, category, amount, comment)
+    operation_id = insert_operation(chat_id, dt, op_type, category, amount_dec, comment)
     currency = get_user_currency(compatibility_user_id)
 
     conn = get_conn()
@@ -506,7 +509,7 @@ def record_financial_operation(
         actor_user_id=actor_user_id,
         user_id=compatibility_user_id,
         chat_id=chat_id,
-        amount=int(amount),
+        amount=amount_dec,
         currency=currency,
         type=op_type,
         category=category,

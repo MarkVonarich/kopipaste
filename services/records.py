@@ -29,6 +29,7 @@ from services.operations import RecordedOperation, record_financial_operation
 from services.goals import build_salary_suggestion_text, format_money, salary_suggestion_goals
 from services.product_events import ProductEvent, track_product_event
 from services.user_time import user_local_date
+from utils.money import format_money as format_money_value
 
 log = logging.getLogger("finbot.records")
 
@@ -298,7 +299,7 @@ async def send_operation_limit_alert(recorded: RecordedOperation | None, context
     )
 
 
-async def record_operation(cat: str, amt: int, dt,
+async def record_operation(cat: str, amt, dt,
                            typ: str, update: Update,
                            context: ContextTypes.DEFAULT_TYPE,
                            note: Optional[str] = None):
@@ -419,7 +420,8 @@ async def record_operation(cat: str, amt: int, dt,
         verb = "потратил(а)"
 
     cur_symbol = get_user_currency(cid)
-    line1 = f"{_md_escape(name)} {verb} *{amt} {cur_symbol}* на *{_md_escape(cat)}*"
+    amount_text = format_money_value(amt, cur_symbol)
+    line1 = f"{_md_escape(name)} {verb} *{amount_text}* на *{_md_escape(cat)}*"
     line2 = format_date_ru_with_weekday(dt.date())
 
     parts = [line1, line2]
@@ -441,7 +443,7 @@ async def record_operation(cat: str, amt: int, dt,
     except Exception as e:
         log.warning("final confirmation send failed (markdown), fallback plain text: %s", e)
         plain_parts = [
-            f"{name} {verb} {amt} {cur_symbol} на {cat}",
+            f"{name} {verb} {amount_text} на {cat}",
             line2,
         ]
         if batch_piece:

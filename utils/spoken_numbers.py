@@ -20,6 +20,7 @@ _HUNDREDS = {
 }
 _THOUSANDS = {'тысяча', 'тысячи', 'тысяч'}
 _CURRENCY = {'рубль', 'рубля', 'рублей', 'руб', 'р', '₽'}
+_MINOR_CURRENCY = {'копейка', 'копейки', 'копеек', 'коп'}
 _NUM_WORDS = set(_UNITS) | set(_TEENS) | set(_TENS) | set(_HUNDREDS) | _THOUSANDS
 
 _EN_UNITS = {
@@ -113,12 +114,32 @@ def normalize_spoken_money_ru(text: str) -> tuple[str, bool]:
                 seq.append(tokens[j]); j += 1
             val = _parse_number_words(seq)
             if val is not None and 0 <= val <= 999_999:
+                if j < len(tokens) and tokens[j] in _CURRENCY:
+                    k = j + 1
+                    cents = None
+                    if k < len(tokens) and tokens[k] in _NUM_WORDS:
+                        cseq = []
+                        while k < len(tokens) and tokens[k] in _NUM_WORDS:
+                            cseq.append(tokens[k]); k += 1
+                        cval = _parse_number_words(cseq)
+                        if cval is not None and 0 <= cval <= 99 and k < len(tokens) and tokens[k] in _MINOR_CURRENCY:
+                            cents = cval
+                            k += 1
+                    out.append(f"{val}.{cents:02d}" if cents is not None else str(val))
+                    changed = True
+                    i = k
+                    continue
+                if j < len(tokens) and tokens[j] in _MINOR_CURRENCY:
+                    out.append(f"0.{val:02d}")
+                    changed = True
+                    i = j + 1
+                    continue
                 out.append(str(val))
                 changed = True
                 i = j
                 continue
         tok = tokens[i]
-        if tok in _CURRENCY:
+        if tok in _CURRENCY or tok in _MINOR_CURRENCY:
             changed = True
             i += 1
             continue

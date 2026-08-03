@@ -26,8 +26,10 @@ TECHNICAL_REASONS = {
     "voice_conversion_failed",
     "voice_provider_timeout",
     "voice_provider_auth_failed",
+    "voice_provider_insufficient_quota",
+    "voice_provider_rate_limited",
+    "voice_provider_unsupported_format",
     "voice_provider_request_failed",
-    "voice_unsupported_format",
 }
 
 
@@ -57,9 +59,23 @@ class VoiceTranscriptionResult:
 
 
 class VoicePipelineError(Exception):
-    def __init__(self, reason: str):
+    def __init__(
+        self,
+        reason: str,
+        *,
+        status_code: int | None = None,
+        provider_code: str | None = None,
+        request_id: str | None = None,
+        file_suffix: str | None = None,
+        fallback_attempted: bool = False,
+    ):
         super().__init__(reason)
         self.reason = reason
+        self.status_code = status_code
+        self.provider_code = provider_code
+        self.request_id = request_id
+        self.file_suffix = file_suffix
+        self.fallback_attempted = fallback_attempted
 
 
 def provider_api_key() -> str:
@@ -151,14 +167,26 @@ def convert_audio_to_wav(src: Path, dst: Path, *, timeout: int = FFMPEG_TIMEOUT_
 def classify_provider_exception(exc: Exception) -> str:
     name = type(exc).__name__.lower()
     status_code = getattr(exc, "status_code", None)
+    code = getattr(exc, "code", None) or getattr(getattr(exc, "body", None), "code", None)
+    msg = str(exc).lower()
     if "timeout" in name:
         return "voice_provider_timeout"
     if status_code in {401, 403} or "auth" in name or "permission" in name:
         return "voice_provider_auth_failed"
+    if status_code == 429 and (code == "insufficient_quota" or "quota" in msg):
+        return "voice_provider_insufficient_quota"
+    if status_code == 429 or "rate limit" in msg or "rate_limited" in str(code).lower():
+        return "voice_provider_rate_limited"
+    if status_code == 400 and (
+        "unsupported" in msg
+        or "format" in msg
+        or str(code).lower() in {"unsupported_value", "unsupported_format", "invalid_file_format"}
+    ):
+        return "voice_provider_unsupported_format"
     return "voice_provider_request_failed"
 
 
-def transcribe_with_openai(audio_path: Path, *, api_key: str, model: str) -> str:
+def transcribe_with_openai(audio_path: Path, *, api_key: str, model: str, language: str | None = "ru") -> str:
     try:
         from openai import OpenAI
     except Exception as exc:
@@ -166,12 +194,21 @@ def transcribe_with_openai(audio_path: Path, *, api_key: str, model: str) -> str
     try:
         client = OpenAI(api_key=api_key, timeout=30)
         with audio_path.open("rb") as audio_file:
-            result = client.audio.transcriptions.create(model=model, file=audio_file)
+            kwargs = {"model": model, "file": audio_file}
+            if language:
+                kwargs["language"] = language
+            result = client.audio.transcriptions.create(**kwargs)
         return (getattr(result, "text", None) or "").strip()
     except VoicePipelineError:
         raise
     except Exception as exc:
-        raise VoicePipelineError(classify_provider_exception(exc)) from exc
+        raise VoicePipelineError(
+            classify_provider_exception(exc),
+            status_code=getattr(exc, "status_code", None),
+            provider_code=getattr(exc, "code", None) or getattr(getattr(exc, "body", None), "code", None),
+            request_id=getattr(exc, "request_id", None),
+            file_suffix=audio_path.suffix,
+        ) from exc
 
 
 async def transcribe_telegram_voice(media: Any, *, force_wav_conversion: bool = False) -> VoiceTranscriptionResult:
@@ -185,14 +222,46 @@ async def transcribe_telegram_voice(media: Any, *, force_wav_conversion: bool = 
 
     try:
         with tempfile.TemporaryDirectory(prefix="fin_voice_") as tmpdir:
-            src = Path(tmpdir) / "voice.oga"
+            src = Path(tmpdir) / "voice.ogg"
             wav = Path(tmpdir) / "voice.wav"
             await download_telegram_voice(media, src)
             audio_path = src
             if force_wav_conversion or not provider_supports_ogg(VOICE_TRANSCRIBE_PROVIDER):
                 convert_audio_to_wav(src, wav)
                 audio_path = wav
-            transcript = transcribe_with_openai(audio_path, api_key=provider_api_key(), model=VOICE_TRANSCRIBE_MODEL)
+            try:
+                transcript = transcribe_with_openai(audio_path, api_key=provider_api_key(), model=VOICE_TRANSCRIBE_MODEL, language="ru")
+            except VoicePipelineError as exc:
+                fallback_allowed = (
+                    exc.reason == "voice_provider_unsupported_format"
+                    and audio_path == src
+                    and not force_wav_conversion
+                )
+                log.info(
+                    "voice_provider_failed reason=%s status=%s code=%s request_id_present=%s suffix=%s fallback_allowed=%s",
+                    exc.reason,
+                    exc.status_code,
+                    exc.provider_code,
+                    bool(exc.request_id),
+                    audio_path.suffix,
+                    fallback_allowed,
+                )
+                if not fallback_allowed:
+                    raise
+                convert_audio_to_wav(src, wav)
+                try:
+                    transcript = transcribe_with_openai(wav, api_key=provider_api_key(), model=VOICE_TRANSCRIBE_MODEL, language="ru")
+                except VoicePipelineError as retry_exc:
+                    log.info(
+                        "voice_provider_failed reason=%s status=%s code=%s request_id_present=%s suffix=%s fallback_attempted=%s",
+                        retry_exc.reason,
+                        retry_exc.status_code,
+                        retry_exc.provider_code,
+                        bool(retry_exc.request_id),
+                        wav.suffix,
+                        True,
+                    )
+                    raise retry_exc
     except VoicePipelineError as exc:
         return VoiceTranscriptionResult(False, exc.reason, latency_ms=int((monotonic() - started) * 1000))
 

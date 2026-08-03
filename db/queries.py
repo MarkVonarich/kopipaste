@@ -3,12 +3,14 @@ __version__ = "2025.08.30-limits"
 
 from typing import Optional, Tuple, List
 from datetime import date, timedelta
+from decimal import Decimal
 from psycopg2.extras import Json
 from .database import get_conn, pg_exec, pg_fetchall
 from settings import WEEK_DEFAULT, MONTH_DEFAULT
 from services.ml_prep import normalize_alias_text
 from services.product_events import ProductEvent, track_product_event
 import math
+from utils.money import to_decimal_money
 
 
 def set_smart_morning_limits_enabled(user_id: int, enabled: bool):
@@ -130,7 +132,7 @@ def has_ops_today(cur, chat_id: int, local_date) -> bool:
     """, (chat_id, local_date, local_date))
     return cur.fetchone() is not None
 
-def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int, comment: str = ''):
+def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: Decimal | int | str, comment: str = ''):
     if not isinstance(op_date, date):
         op_date = op_date.date()
     iso = op_date.isocalendar()
@@ -145,7 +147,7 @@ def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: int
               VALUES
                 (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
               RETURNING id
-            """, (chat_id, chat_id, op_date, typ, category, amount, comment, week_start, int(iso.year), int(iso.week), int(weekday)))
+            """, (chat_id, chat_id, op_date, typ, category, to_decimal_money(amount, positive=True), comment, week_start, int(iso.year), int(iso.week), int(weekday)))
             row = cur.fetchone()
         conn.commit()
         return int(row[0]) if row else None
@@ -166,12 +168,12 @@ def delete_last_operation(chat_id: int):
          )
     """, (chat_id,))
 
-def sum_amount(chat_id: int, typ: str, start_date, end_date) -> int:
+def sum_amount(chat_id: int, typ: str, start_date, end_date) -> Decimal:
     rows = pg_fetchall("""
         SELECT COALESCE(SUM(amount),0) FROM public.operations
          WHERE chat_id=%s AND type=%s AND op_date BETWEEN %s AND %s
     """, (chat_id, typ, start_date, end_date))
-    return int(rows[0][0] if rows else 0)
+    return to_decimal_money(rows[0][0] if rows else 0)
 
 def list_user_aliases(user_id: int):
     return pg_fetchall("""
@@ -385,7 +387,7 @@ def update_last_operation_category(user_id: int, new_category: str) -> bool:
         conn.close()
 
 
-def update_last_operation_fields(user_id: int, *, amount: int | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
+def update_last_operation_fields(user_id: int, *, amount: Decimal | int | str | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -397,7 +399,7 @@ def update_last_operation_fields(user_id: int, *, amount: int | None = None, cat
             sets = []
             vals = []
             if amount is not None:
-                sets.append("amount=%s"); vals.append(int(amount))
+                sets.append("amount=%s"); vals.append(to_decimal_money(amount, positive=True))
             if category is not None:
                 sets.append("category=%s"); vals.append(category)
             if op_date is not None:
@@ -411,7 +413,7 @@ def update_last_operation_fields(user_id: int, *, amount: int | None = None, cat
                 cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
             cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (op_id,))
             r = cur.fetchone()
-            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
+            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": to_decimal_money(r[4]), "comment": r[5]}
         conn.commit()
         track_product_event(ProductEvent(
             event_name="operation_edited",
@@ -429,7 +431,7 @@ def update_last_operation_fields(user_id: int, *, amount: int | None = None, cat
         conn.close()
 
 
-def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: int | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
+def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: Decimal | int | str | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -439,7 +441,7 @@ def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: in
             sets = []
             vals = []
             if amount is not None:
-                sets.append("amount=%s"); vals.append(int(amount))
+                sets.append("amount=%s"); vals.append(to_decimal_money(amount, positive=True))
             if category is not None:
                 sets.append("category=%s"); vals.append(category)
             if op_date is not None:
@@ -454,7 +456,7 @@ def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: in
                 cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
             cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (operation_id,))
             r = cur.fetchone()
-            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": int(r[4]), "comment": r[5]}
+            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": to_decimal_money(r[4]), "comment": r[5]}
         conn.commit()
         track_product_event(ProductEvent(
             event_name="operation_edited",
@@ -480,7 +482,7 @@ def reminders_list(user_id: int, active_only: bool = True):
         sql += " AND is_active=TRUE"
     sql += " ORDER BY event_date, id"
     rows = pg_fetchall(sql, tuple(params))
-    return [dict(id=r[0], title=r[1], rem_type=r[2], category=r[3], amount=float(r[4]), currency=r[5], event_date=r[6], repeat_rule=r[7], repeat_interval_days=r[8], notify_days_before=int(r[9]), is_active=bool(r[10])) for r in rows]
+    return [dict(id=r[0], title=r[1], rem_type=r[2], category=r[3], amount=to_decimal_money(r[4]), currency=r[5], event_date=r[6], repeat_rule=r[7], repeat_interval_days=r[8], notify_days_before=int(r[9]), is_active=bool(r[10])) for r in rows]
 
 
 def reminder_get(user_id: int, rid: int):
@@ -489,7 +491,7 @@ def reminder_get(user_id: int, rid: int):
     if not rows:
         return None
     r = rows[0]
-    return dict(id=r[0], title=r[1], rem_type=r[2], category=r[3], amount=float(r[4]), currency=r[5], event_date=r[6], repeat_rule=r[7], repeat_interval_days=r[8], notify_days_before=int(r[9]), is_active=bool(r[10]))
+    return dict(id=r[0], title=r[1], rem_type=r[2], category=r[3], amount=to_decimal_money(r[4]), currency=r[5], event_date=r[6], repeat_rule=r[7], repeat_interval_days=r[8], notify_days_before=int(r[9]), is_active=bool(r[10]))
 
 
 def reminder_insert(user_id: int, payload: dict) -> int:
@@ -539,7 +541,7 @@ def reminder_delete(user_id: int, rid: int):
 # Лимиты по категориям
 # ─────────────────────────────
 
-def set_category_limit(user_id: int, period: str, category: str, amount: int, currency: Optional[str] = None):
+def set_category_limit(user_id: int, period: str, category: str, amount: Decimal | int | str, currency: Optional[str] = None):
     if currency is None:
         currency = get_user_currency(user_id)
     pg_exec("""
@@ -549,7 +551,7 @@ def set_category_limit(user_id: int, period: str, category: str, amount: int, cu
            SET amount=EXCLUDED.amount,
                currency=EXCLUDED.currency,
                updated_at=now()
-    """, (user_id, period, category, amount, currency))
+    """, (user_id, period, category, to_decimal_money(amount, positive=True), currency))
     track_product_event(ProductEvent(
         event_name="limit_created",
         user_id=user_id,
@@ -558,16 +560,16 @@ def set_category_limit(user_id: int, period: str, category: str, amount: int, cu
         properties={"period": period},
     ))
 
-def get_category_limit(user_id: int, period: str, category: str) -> Optional[Tuple[int, str]]:
+def get_category_limit(user_id: int, period: str, category: str) -> Optional[Tuple[Decimal, str]]:
     rows = pg_fetchall("""
         SELECT amount, currency
           FROM public.category_limits
          WHERE user_id=%s AND period=%s AND category=%s
          LIMIT 1
     """, (user_id, period, category))
-    return (int(rows[0][0]), rows[0][1]) if rows else None
+    return (to_decimal_money(rows[0][0]), rows[0][1]) if rows else None
 
-def list_category_limits(user_id: int, period: Optional[str] = None) -> List[Tuple[str,int,str,str]]:
+def list_category_limits(user_id: int, period: Optional[str] = None) -> List[Tuple[str, Decimal, str, str]]:
     """
     Возвращает список кортежей: (period, amount, currency, category), отсортированный по period, category.
     """
@@ -585,7 +587,7 @@ def list_category_limits(user_id: int, period: Optional[str] = None) -> List[Tup
              WHERE user_id=%s
              ORDER BY period, category
         """, (user_id,))
-    return [(r[0], int(r[1]), r[2], r[3]) for r in rows]
+    return [(r[0], to_decimal_money(r[1]), r[2], r[3]) for r in rows]
 
 def delete_category_limit(user_id: int, period: str, category: str):
     pg_exec("""
@@ -606,7 +608,7 @@ def list_user_limits(user_id: int):
         {
             'period': r[0],
             'category': r[1],
-            'amount': int(r[2]),
+            'amount': to_decimal_money(r[2]),
             'currency': r[3],
         }
         for r in rows
@@ -623,19 +625,19 @@ def get_limit_by_key(user_id: int, period: str, category: str):
     if not row:
         return None
     r = row[0]
-    return {'period': r[0], 'category': r[1], 'amount': int(r[2]), 'currency': r[3]}
+    return {'period': r[0], 'category': r[1], 'amount': to_decimal_money(r[2]), 'currency': r[3]}
 
 
-def update_limit_amount(user_id: int, period: str, category: str, amount: int):
+def update_limit_amount(user_id: int, period: str, category: str, amount: Decimal | int | str):
     pg_exec("""
         UPDATE public.category_limits
            SET amount=%s, updated_at=now()
          WHERE user_id=%s AND period=%s AND category=%s
-    """, (int(amount), user_id, period, category))
+    """, (to_decimal_money(amount, positive=True), user_id, period, category))
     return get_limit_by_key(user_id, period, category)
 
 
-def get_limit_spent(user_id: int, period: str, category: str, today: Optional[date] = None) -> int:
+def get_limit_spent(user_id: int, period: str, category: str, today: Optional[date] = None) -> Decimal:
     today = today or date.today()
     if period == 'week':
         start = today - timedelta(days=today.weekday())
@@ -654,15 +656,15 @@ def get_limit_spent(user_id: int, period: str, category: str, today: Optional[da
           AND COALESCE(type,'') <> 'noop'
           AND COALESCE(category,'') <> 'Без операций'
     """, (user_id, category, start, end))
-    return int(rows[0][0] if rows else 0)
+    return to_decimal_money(rows[0][0] if rows else 0)
 
 
-def adjust_limit_amount(user_id: int, period: str, category: str, delta: int):
+def adjust_limit_amount(user_id: int, period: str, category: str, delta: Decimal | int | str):
     row = get_limit_by_key(user_id, period, category)
     if not row:
         return {'status': 'not_found'}
-    old_amount = int(row['amount'])
-    new_amount = old_amount + int(delta)
+    old_amount = to_decimal_money(row['amount'])
+    new_amount = old_amount + to_decimal_money(delta)
     if new_amount <= 0:
         return {'status': 'too_small', 'old_amount': old_amount, 'new_amount': new_amount}
     if new_amount >= 1_000_000_000:

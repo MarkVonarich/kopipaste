@@ -3,7 +3,9 @@ __version__ = "2025.08.26-01"
 
 import re
 from datetime import datetime, timedelta
+from decimal import Decimal
 import dateparser
+from utils.money import MoneyParseError, parse_decimal_amount_token
 
 DATE_TOKENS = {"вчера", "сегодня"}
 FRACTIONAL_AMOUNT_ERROR = "fractional_amount"
@@ -104,9 +106,10 @@ def parse_user_input(text: str):
     if not no_date:
         raise ValueError("empty")
 
-    # число: целое/десятичное, с пробелами/точками как разделителями тысяч
+    # Сумма: целое или до двух знаков после запятой/точки; пробелы только как
+    # разделители тысяч. Точку в хвостовой дате split_wo_date уже снял.
     matches = list(re.finditer(
-        r"(?<!\d)(\d{1,3}(?:[ \.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)",
+        r"(?<!\d)(\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(?!\d)",
         no_date
     ))
     if not matches:
@@ -114,21 +117,11 @@ def parse_user_input(text: str):
 
     m = matches[-1]
     raw_match = m.group(0)
-    raw = raw_match.replace(" ", "")
-    decimal = re.fullmatch(r"\d+(?:[.,]\d{3})*[.,]\d{1,2}", raw)
-    if decimal:
-        integer_part, cents = re.split(r"[.,](?=\d{1,2}$)", raw, maxsplit=1)
-        cents = cents.ljust(2, "0")
-        if int(cents) != 0:
-            raise ValueError(FRACTIONAL_AMOUNT_ERROR)
-        raw = re.sub(r"[.,]", "", integer_part)
-    else:
-        raw = re.sub(r"[ \.,]", "", raw)
     try:
-        amt = int(raw)
-    except ValueError:
-        raise ValueError("bad_amount")
-    if amt <= 0:
+        amt = parse_decimal_amount_token(raw_match)
+    except MoneyParseError as exc:
+        raise ValueError(str(exc) or "bad_amount") from exc
+    if amt <= Decimal("0"):
         raise ValueError("bad_amount")
 
     merch = (no_date[:m.start()] + no_date[m.end():]).strip()

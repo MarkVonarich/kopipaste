@@ -15,6 +15,12 @@ Voice input is optional. Bot startup must not fail solely because voice recognit
 
 ## Safe Production Checks
 
+Telegram voice notes are downloaded as `.ogg` OGG/Opus files and sent directly
+to OpenAI with `language="ru"`. If OpenAI returns a format-specific 400 error,
+the bot converts that same temporary `.ogg` to mono 16 kHz `.wav` with `ffmpeg`
+and retries once. Authentication, quota, rate-limit, model and generic provider
+failures do not trigger conversion retry.
+
 List loaded systemd environment variable names without values:
 
 ```bash
@@ -55,6 +61,11 @@ Run the local mocked voice pipeline tests:
 ```bash
 .venv/bin/python -m pytest -q tests/test_voice_pipeline.py
 ```
+
+Decimal spoken amounts are normalized before the ordinary text parser runs:
+
+- `Магнит пятьсот семьдесят` -> `магнит 570`
+- `Чижик двести шестнадцать рублей тридцать четыре копейки` -> `чижик 216.34`
 
 Check recent aggregate voice API failure reason codes without transcripts:
 

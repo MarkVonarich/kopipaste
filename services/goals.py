@@ -34,6 +34,7 @@ from services.goal_planning import (
     remaining_amount,
     status_for_goal,
 )
+from utils.money import format_money as _format_money
 from services.product_events import ProductEvent, track_product_event
 from services.user_time import local_date_time_to_utc, user_local_date
 
@@ -832,10 +833,7 @@ def build_salary_suggestion_text(goals: list[Goal]) -> str:
 
 
 def format_money(value: Decimal | int | str, currency: str = "RUB") -> str:
-    amount = Decimal(str(value))
-    major = int(amount) if amount == amount.to_integral_value() else amount.quantize(Decimal("0.01"))
-    symbol = {"RUB": "₽", "USD": "$", "EUR": "€"}.get((currency or "RUB").upper(), currency or "")
-    return f"{major:,}".replace(",", " ") + (f" {symbol}" if symbol else "")
+    return _format_money(value, currency, locale="ru", symbol=True)
 
 
 def format_date_ru(value: date | None) -> str:

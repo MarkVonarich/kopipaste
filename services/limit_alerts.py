@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_FLOOR
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from utils.money import format_money
 
 
 HALF_USED_BAND = 50
@@ -25,12 +26,7 @@ class LimitAlert:
 
 
 def _money(value: Decimal | int | float | str, currency: str | None = None) -> str:
-    amount = Decimal(str(value or 0)).quantize(Decimal("0.01"))
-    if amount == amount.to_integral_value():
-        rendered = f"{int(amount):,}".replace(",", " ")
-    else:
-        rendered = f"{amount:,.2f}".replace(",", " ").replace(".", ",")
-    return f"{rendered} {html.escape(currency or 'RUB')}"
+    return html.escape(format_money(value, currency or "RUB", locale="ru", symbol=False))
 
 
 def threshold_band(spent: Decimal | int | float | str, limit: Decimal | int | float | str) -> int | None:

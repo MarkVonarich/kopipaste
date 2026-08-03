@@ -1,37 +1,40 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal, ROUND_HALF_UP
 
 from services.i18n import format_money, t
+from utils.money import to_decimal_money
 
-AVERAGE_DAYS_PER_MONTH = 30.4375
+AVERAGE_DAYS_PER_MONTH = Decimal("30.4375")
 
 
-def monthly_equivalent(amount: float, repeat_rule: str | None, repeat_interval_days: int | None = None) -> float | None:
+def monthly_equivalent(amount, repeat_rule: str | None, repeat_interval_days: int | None = None) -> Decimal | None:
+    amount_dec = to_decimal_money(amount)
     rule = repeat_rule or 'none'
     if rule == 'weekly':
-        return amount * 52 / 12
+        return (amount_dec * Decimal(52) / Decimal(12)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if rule == 'monthly':
-        return amount
+        return amount_dec
     if rule == 'yearly':
-        return amount / 12
+        return (amount_dec / Decimal(12)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if rule == 'custom_days':
         days = int(repeat_interval_days or 0)
         if days <= 0:
             return None
-        return amount * AVERAGE_DAYS_PER_MONTH / days
+        return (amount_dec * AVERAGE_DAYS_PER_MONTH / Decimal(days)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return None
 
 
 def reminder_totals(rows: list[dict]) -> dict:
     totals = {
-        'recurring_expenses_monthly': defaultdict(float),
-        'recurring_income_monthly': defaultdict(float),
-        'one_time_expenses': defaultdict(float),
-        'one_time_income': defaultdict(float),
+        'recurring_expenses_monthly': defaultdict(lambda: Decimal("0.00")),
+        'recurring_income_monthly': defaultdict(lambda: Decimal("0.00")),
+        'one_time_expenses': defaultdict(lambda: Decimal("0.00")),
+        'one_time_income': defaultdict(lambda: Decimal("0.00")),
     }
     for row in rows:
-        amount = float(row.get('amount') or 0)
+        amount = to_decimal_money(row.get('amount') or 0)
         currency = row.get('currency') or 'RUB'
         rem_type = row.get('rem_type') or 'Расходы'
         repeat_rule = row.get('repeat_rule') or 'none'
@@ -52,7 +55,7 @@ def render_reminder_totals(rows: list[dict], locale: str = 'ru') -> str:
         values = totals.get(key) or {}
         if not values:
             return ['—']
-        return [format_money(round(amount), currency, locale) for currency, amount in sorted(values.items())]
+        return [format_money(amount, currency, locale) for currency, amount in sorted(values.items())]
 
     return (
         f"{t('reminders.recurring_per_month', locale)}:\n"

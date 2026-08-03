@@ -4,7 +4,7 @@ __version__ = "2025.08.26-batch-05"
 
 import re
 from datetime import datetime, timedelta, date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from telegram import ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.currency import detect_currency_token, convert_amount_if_needed
@@ -22,10 +22,10 @@ from services.records import get_user_alias, record_operation, send_operation_li
 from services.workspaces import resolve_workspace
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
-from utils.parsing import FRACTIONAL_AMOUNT_ERROR, parse_user_input, split_wo_date, parse_day_list
+from utils.parsing import parse_user_input, split_wo_date, parse_day_list
 from utils.text import norm_text
 from db.database import pg_fetchall
-from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation, get_user_tz
+from db.queries import update_user_field, insert_ml_observation, update_limit_amount, get_limit_by_key, record_category_confirmation, get_user_tz, get_user_currency
 from db.queries import update_last_operation_fields, update_operation_fields_by_id, get_last_operation, reminder_insert, reminder_update
 from services.ml_prep import normalize_for_ml, normalize_alias_text
 from services.ml_suggest import get_top2_suggestions
@@ -54,6 +54,7 @@ from services.goals import (
 )
 from ui.keyboards import category_budget_picker_kb
 from settings import VOICE_TRANSCRIBE_MODEL, VOICE_TRANSCRIBE_PROVIDER
+from utils.money import MoneyParseError, format_money as format_money_value, parse_decimal_amount_token, to_decimal_money
 import logging
 from time import time as unix_time
 from secrets import token_urlsafe
@@ -89,37 +90,33 @@ def _history_period_label(start_date: date | None, end_date: date | None, locale
     return f"{start_date.strftime(fmt)} — {end_date.strftime(fmt)}"
 
 
-def _integer_major_amount(value) -> int | None:
+def _integer_major_amount(value) -> Decimal | None:
     try:
-        amount = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+        amount = to_decimal_money(value, positive=True)
+    except (MoneyParseError, ValueError):
         return None
-    if amount <= 0 or amount != amount.to_integral_value():
-        return None
-    return int(amount)
+    return amount
 
 
 
 
-def _parse_amount_input(text: str) -> int | None:
-    t = (text or '').strip().replace(' ', '').replace(',', '.')
-    m = re.search(r"\d+(?:\.\d+)?", t)
+def _parse_amount_input(text: str) -> Decimal | None:
+    t = (text or '').strip()
+    m = list(re.finditer(r"(?<!\d)(\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(?!\d)", t))
     if not m:
         return None
     try:
-        amount = Decimal(m.group(0))
-    except InvalidOperation:
+        amount = parse_decimal_amount_token(m[-1].group(0))
+    except (MoneyParseError, ValueError):
         return None
-    if amount <= 0 or amount != amount.to_integral_value():
-        return None
-    return int(amount)
+    return amount
 
 
-def _parse_budget_amount(text: str) -> int | None:
-    t = (text or '').strip().replace(' ', '').replace(',', '')
-    if not t.isdigit():
+def _parse_budget_amount(text: str) -> Decimal | None:
+    try:
+        return parse_decimal_amount_token(text or "")
+    except (MoneyParseError, ValueError):
         return None
-    return int(t)
 
 
 def _cbg_picker_markup(user_id: int, workspace_id: int | None, selected_tokens: set[str], page: int = 0):
@@ -127,7 +124,7 @@ def _cbg_picker_markup(user_id: int, workspace_id: int | None, selected_tokens: 
     return options, category_budget_picker_kb(options, selected_tokens, page=page)
 
 
-def _parse_reminder_title_amount(text: str) -> tuple[str, int] | None:
+def _parse_reminder_title_amount(text: str) -> tuple[str, Decimal] | None:
     src = (text or '').strip()
     if not src:
         return None
@@ -137,18 +134,15 @@ def _parse_reminder_title_amount(text: str) -> tuple[str, int] | None:
     last = m[-1]
     amt_raw = last.group(1).replace(' ', '').replace(',', '.')
     try:
-        amount = Decimal(amt_raw)
-    except InvalidOperation:
+        amount = parse_decimal_amount_token(last.group(1))
+    except (MoneyParseError, ValueError):
         return None
-    if amount <= 0 or amount != amount.to_integral_value():
-        return None
-    amt = int(amount)
     title = (src[:last.start()] + src[last.end():]).strip()
     if not title:
         return None
-    if amt <= 0 or amt >= 1_000_000_000:
+    if amount <= 0 or amount >= Decimal("1000000000"):
         return None
-    return norm_text(title), amt
+    return norm_text(title), amount
 
 
 def _parse_flexible_date(text: str):
@@ -210,8 +204,8 @@ def _parse_reminder_event_date(text: str, today):
     return None
 
 
-def _fmt_reminder_money(v: int) -> str:
-    return f"{int(v):,}".replace(',', ' ') + ' ₽'
+def _fmt_reminder_money(v) -> str:
+    return format_money_value(v, "RUB")
 
 
 def _goal_error_text(code: str) -> str:
@@ -363,7 +357,7 @@ def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
                         WHERE chat_id=%s AND op_date BETWEEN %s AND %s
                           AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
                         ORDER BY op_date, id""", (chat_id, dfrom, dto))
-    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
+    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': to_decimal_money(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
 
 
 def _ocr_warning_message(warning: str | None) -> str:
@@ -402,7 +396,7 @@ def _reminder_confirmation(d: dict) -> tuple[str, InlineKeyboardMarkup]:
     date_label = 'Первое списание' if rpt != 'none' else 'Дата'
     txt = (
         f"🔔 Напоминание\n\n"
-        f"{d.get('title','—')} — {_fmt_reminder_money(int(d.get('amount',0)))}\n"
+        f"{d.get('title','—')} — {_fmt_reminder_money(d.get('amount',0))}\n"
         f"Тип: {d.get('rem_type','Расходы')}\n"
         f"Категория: {d.get('category','Прочее')}\n"
         f"{date_label}: {ev.strftime('%d.%m.%Y')}\n"
@@ -481,8 +475,6 @@ async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_
     try:
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
     except ValueError as e:
-        if str(e) == FRACTIONAL_AMOUNT_ERROR:
-            return await emsg.reply_text('Дробные суммы с копейками пока не поддерживаются. Введите целую сумму, например: coffee 12')
         return await emsg.reply_text('Не понял сумму. Пример: coffee 200')
     merch = norm_text(merch_display)
     amt_final, note = convert_amount_if_needed(actor_user_id, amt_raw, src_curr or detect_currency_token(text))
@@ -505,7 +497,7 @@ async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_
     log.info('group_operation_draft_created chat_id=%s actor_user_id=%s workspace_id=%s draft_id=%s source=%s', chat_id, actor_user_id, workspace.workspace_id, draft_id, sugg_meta.get('source', 'baseline'))
     return await _safe_reply(
         emsg,
-        f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}\nПространство: {_md_escape(workspace.name)}",
+        f"Категория?\n➖ {format_money_value(amt_final, get_user_currency(actor_user_id))} • {_md_escape(merch)}\nПространство: {_md_escape(workspace.name)}",
         reply_markup=_group_category_kb(draft_id, cats),
     )
 
@@ -526,8 +518,6 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
     except ValueError as e:
         reason = str(e)
-        if reason == FRACTIONAL_AMOUNT_ERROR:
-            return await emsg.reply_text("⚠️ Дробные суммы с копейками пока не поддерживаются. Введите целую сумму, например: «кофе 250».")
         if reason == "no_amount":
             base, dt = split_wo_date(text)
             base = base.strip() or "операция"
@@ -613,7 +603,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
 
     msg = await _safe_reply(
         emsg,
-        f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
+        f"Категория?\n➖ {format_money_value(amt_final, get_user_currency(cid))} • {_md_escape(merch)}",
         reply_markup=ml_top2_kb(cat1, cat2),
     )
     context.user_data['suggest_msg_id'] = msg.message_id
@@ -676,14 +666,12 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
             return await emsg.reply_text(_ocr_warning_message(result.warning))
 
         prepared = []
-        skipped_fractional = 0
         for c in result.candidates:
             amount = _integer_major_amount(c.amount)
             if amount is None:
-                skipped_fractional += 1
                 continue
             prepared.append({
-                'amount': amount,
+                'amount': str(amount),
                 'category': c.category,
                 'type': c.op_type,
                 'date': c.op_date.isoformat(),
@@ -692,13 +680,13 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
                 'raw_text': c.raw_text,
             })
         if not prepared:
-            return await emsg.reply_text('Нашёл только дробные суммы, а запись копеек пока не поддерживается. Добавьте операции целыми суммами вручную.')
+            return await emsg.reply_text('Не нашёл операций с корректной суммой. Попробуй отправить фото крупнее.')
         context.user_data['receipt_candidates'] = prepared
-        context.user_data['receipt_warning'] = result.warning or ('fractional_amounts_skipped' if skipped_fractional else None)
+        context.user_data['receipt_warning'] = result.warning
         lines = ['🧾 Нашёл операции:', '']
         for i, c in enumerate(prepared[:20], start=1):
             major = c['category'] if c['type'] == 'Расходы' else 'Доходы'
-            lines.append(f"{i}. {major} — {int(c['amount']):,} ₽ — {c['merchant']}".replace(',', ' '))
+            lines.append(f"{i}. {major} — {format_money_value(c['amount'], 'RUB')} — {c['merchant']}")
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('✅ Записать всё', callback_data='receipt_confirm_all')],
@@ -707,8 +695,6 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
         ])
         if result.warning:
             lines.append('\n⚠️ Я не уверен в части строк, лучше проверь перед записью.')
-        if skipped_fractional:
-            lines.append('\n⚠️ Строки с дробными суммами пропущены: копейки пока не поддерживаются.')
         await emsg.reply_text('\n'.join(lines), reply_markup=kb)
     except Exception as e:
         log.exception('receipt parse failed user=%s err=%s', cid, e)
@@ -764,12 +750,6 @@ async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
             metadata={"parse_reason": reason, "language": result.language},
         ))
         heard = normalized_text[:120]
-        if reason == FRACTIONAL_AMOUNT_ERROR:
-            return await emsg.reply_text(
-                f"Я услышал: «{heard}»\n\n"
-                "Дробные суммы с копейками пока не поддерживаются.\n"
-                "Попробуйте сказать, например:\n«Продукты 500»."
-            )
         return await emsg.reply_text(
             f"Я услышал: «{heard}»\n\n"
             "Не удалось определить сумму или категорию.\n"
@@ -1168,7 +1148,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton('📌 Мои лимиты', callback_data='lim_list')]])
             return await emsg.reply_text('Лимит не найден или уже изменён.', reply_markup=kb)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ К карточке', callback_data='lim_list')]])
-        return await emsg.reply_text(f"✅ Сумма обновлена: {row['amount']} {row['currency']}", reply_markup=kb)
+        return await emsg.reply_text(f"✅ Сумма обновлена: {format_money_value(row['amount'], row['currency'])}", reply_markup=kb)
 
     if context.user_data.get('await_general_limit_amount'):
         amount = _parse_amount_input(text)
@@ -1183,7 +1163,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             period_type=st.get('period_type') or 'month',
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('💰 Лимиты и бюджеты', callback_data='lb_hub')]])
-        return await emsg.reply_text(f'✅ Общий лимит создан: {amount} ₽\nID: {limit_id}', reply_markup=kb)
+        return await emsg.reply_text(f'✅ Общий лимит создан: {format_money_value(amount, "RUB")}\nID: {limit_id}', reply_markup=kb)
 
     if context.user_data.pop('await_cbg_new_category', False):
         draft = context.user_data.get('cbg_draft') or {}
@@ -1252,7 +1232,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         draft = context.user_data.get('rem_draft') or {}
         rem_type = draft.get('rem_type') or 'Расходы'
         draft['title'] = merch
-        draft['amount'] = int(amt)
+        draft['amount'] = str(amt)
         draft['rem_type'] = rem_type
         draft['step'] = 'category'
         context.user_data['rem_draft'] = draft
@@ -1325,7 +1305,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 a = _parse_amount_input(text)
                 if a is None or a <= 0 or a >= 1_000_000_000:
                     raise ValueError('amount')
-                reminder_update(cid, rid, amount=int(a))
+                reminder_update(cid, rid, amount=a)
             elif field == 'category':
                 reminder_update(cid, rid, category=norm_text(text)[:64] or 'Прочее')
             elif field == 'date':
@@ -1360,7 +1340,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         if amount is None or amount <= 0 or amount >= 1_000_000_000:
             context.user_data['await_op_edit_amount'] = op_edit_amount_id
             return await emsg.reply_text('⚠️ Неверная сумма. Введите число >0 и <1 000 000 000')
-        row = update_operation_fields_by_id(cid, int(op_edit_amount_id), amount=int(amount)) if str(op_edit_amount_id).isdigit() else update_last_operation_fields(cid, amount=int(amount))
+        row = update_operation_fields_by_id(cid, int(op_edit_amount_id), amount=amount) if str(op_edit_amount_id).isdigit() else update_last_operation_fields(cid, amount=amount)
         if not row:
             return await emsg.reply_text('Не нашёл операцию для изменения.')
         return await emsg.reply_text('✅ Сумма обновлена.')
@@ -1409,14 +1389,14 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             msg = 'Дата конца не может быть раньше даты начала.' if error == 'end_before_start' else 'Период слишком большой. Выберите диапазон до 5 лет.'
             return await emsg.reply_text(f'⚠️ {msg}\n\nВведите конец периода ещё раз:', reply_markup=_export_end_kb())
         rows = _export_rows(cid, dfrom, dto)
-        exp = sum(int(r['amount']) for r in rows if r['type'] == 'Расходы')
-        inc = sum(int(r['amount']) for r in rows if r['type'] == 'Доходы')
+        exp = sum((to_decimal_money(r['amount']) for r in rows if r['type'] == 'Расходы'), Decimal("0.00"))
+        inc = sum((to_decimal_money(r['amount']) for r in rows if r['type'] == 'Доходы'), Decimal("0.00"))
         st['count'] = len(rows)
         st['preview_rows'] = rows
         st['step'] = 'confirm'
         return await emsg.reply_text(
             f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\n'
-            f'Операций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?',
+            f'Операций: {len(rows)}\nРасходы: {format_money_value(exp, "RUB")}\nДоходы: {format_money_value(inc, "RUB")}\nБаланс: {format_money_value(inc-exp, "RUB")}\n\nСформировать файл?',
             reply_markup=_export_confirm_kb(),
         )
 
@@ -1431,7 +1411,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 v = _parse_amount_input(text)
                 if v is None or v <= 0:
                     raise ValueError('amount')
-                cands[idx]['amount'] = int(v)
+                cands[idx]['amount'] = str(v)
             elif field == 'comment':
                 cands[idx]['merchant'] = norm_text(text.strip())[:64]
             elif field == 'date':
@@ -1441,7 +1421,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 cands[idx]['category'] = norm_text(text.strip())[:32] or 'Прочее'
             else:
                 merch_display, amt_raw, dt, _src_curr = parse_user_input(text)
-                cands[idx]['amount'] = int(amt_raw)
+                cands[idx]['amount'] = str(amt_raw)
                 cands[idx]['merchant'] = norm_text(merch_display)
                 cands[idx]['date'] = dt.date().isoformat()
                 if re.search(r'зарплат|доход|перевод|пополн', text.lower()):
@@ -1542,7 +1522,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton('✏️ Ввести другую сумму', callback_data='bud_add')],
                 [InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')],
             ])
-            return await emsg.reply_text(f"Бюджет на {'месяц' if period=='month' else 'неделю'} уже есть: {cur} ₽\n\nЗаменить его?", reply_markup=kb)
+            return await emsg.reply_text(f"Бюджет на {'месяц' if period=='month' else 'неделю'} уже есть: {format_money_value(cur, 'RUB')}\n\nЗаменить его?", reply_markup=kb)
         if period == 'month':
             set_budget(cid, month=amount)
         else:
@@ -1553,7 +1533,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('➕ Добавить ещё', callback_data='bud_add')],
             [InlineKeyboardButton('⬅️ В настройки', callback_data='menu_settings')],
         ])
-        return await emsg.reply_text(f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {amount} ₽", reply_markup=kb)
+        return await emsg.reply_text(f"✅ Бюджет добавлен\n\n{'Месяц' if period=='month' else 'Неделя'} — {format_money_value(amount, 'RUB')}", reply_markup=kb)
 
     if context.user_data.get('budget_manual_period'):
         period = context.user_data.get('budget_manual_period')
@@ -1571,7 +1551,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('✅ Сохранить', callback_data=f'bud_confirm|{token}')],
             [InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}'), InlineKeyboardButton('❌ Отмена', callback_data='settings_budgets')],
         ])
-        return await emsg.reply_text(f"Сохранить новый бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {amount} ₽", reply_markup=kb)
+        return await emsg.reply_text(f"Сохранить новый бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {format_money_value(amount, 'RUB')}", reply_markup=kb)
 
     if context.user_data.get('adding_category'):
         p = context.user_data.get('pending', {})
@@ -1602,11 +1582,10 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.pop('await_amount', False):
         src_curr = detect_currency_token(text or "")
-        m = list(re.finditer(r'\d+(?:[ \.,]\d{3})*', text or ""))
-        if not m:
+        amt_raw = _parse_amount_input(text)
+        if amt_raw is None:
             context.user_data['await_amount'] = True
             return await emsg.reply_text("⚠️ Введите сумму числом (например, 70 или 70 000)")
-        amt_raw = int(re.sub(r'[ \.,]', '', m[-1].group(0)))
         p   = context.user_data.get('pending', {})
         merch = p.get('merch', 'операция'); dt = p.get('time', datetime.now())
 
@@ -1668,7 +1647,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = await _safe_reply(
             emsg,
-            f"Категория?\n➖ {amt_final} ₽ • {_md_escape(merch)}",
+            f"Категория?\n➖ {format_money_value(amt_final, get_user_currency(cid))} • {_md_escape(merch)}",
             reply_markup=ml_top2_kb(cat1, cat2),
         )
         context.user_data['suggest_msg_id'] = msg.message_id

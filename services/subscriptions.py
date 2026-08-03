@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
+from utils.money import to_decimal_money
 
 
 SUBSCRIPTION_CATEGORIES = {"подписки", "subscriptions", "subscription"}
@@ -11,7 +13,7 @@ SUBSCRIPTION_CATEGORIES = {"подписки", "subscriptions", "subscription"}
 @dataclass(frozen=True)
 class SubscriptionPrediction:
     merchant: str
-    amount: int
+    amount: Decimal
     currency: str
     previous_date: date
     expected_date: date
@@ -63,7 +65,7 @@ def detect_upcoming_subscriptions(operations: list[dict], today: date, *, warn_d
         confidence = 0.85 if len(rows) >= 2 else 0.6
         predictions.append(SubscriptionPrediction(
             merchant=merchant,
-            amount=int(last.get("amount") or 0),
+            amount=to_decimal_money(last.get("amount") or 0),
             currency=currency,
             previous_date=last["op_date"],
             expected_date=expected,
