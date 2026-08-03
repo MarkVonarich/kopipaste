@@ -34,6 +34,7 @@ from time import time as unix_time
 from services.acquisition import capture_acquisition
 from services.product_events import ProductEvent, track_product_event
 from services.security_events import SecurityEvent, track_security_event
+from services.user_time import resolve_user_timezone, user_local_date
 from scripts.analytics_status import analytics_status_counts, render_status
 from services.posthog_exporter import export_status_counts
 
@@ -234,7 +235,7 @@ async def cmd_admin_weekly_report_preview(update, context: ContextTypes.DEFAULT_
         track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_weekly_report_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
-    today = datetime.utcnow().date()
+    today = user_local_date(uid)
     start, end = previous_week_period(today)
     txt = build_weekly_report_text(uid, start, end)
     await update.message.reply_text("[PREVIEW] Недельный отчёт\n\n" + txt)
@@ -245,7 +246,7 @@ async def cmd_admin_monthly_report_preview(update, context: ContextTypes.DEFAULT
         track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_monthly_report_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
-    today = datetime.utcnow().date()
+    today = user_local_date(uid)
     start, end = previous_month_period(today)
     txt = build_monthly_report_text(uid, start, end)
     await update.message.reply_text("[PREVIEW] Месячный отчёт\n\n" + txt)
@@ -256,7 +257,7 @@ async def cmd_admin_smart_morning_preview(update, context: ContextTypes.DEFAULT_
         track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_smart_morning_preview", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
-    today = datetime.utcnow().date()
+    today = user_local_date(uid)
     txt = _build_smart_morning_text(uid, today) or "Сигналов по лимитам сейчас нет."
     await update.message.reply_text("[PREVIEW] Утренний лимит-сигнал\n\n" + txt)
 
@@ -315,21 +316,7 @@ async def cmd_admin_activity_status(update, context: ContextTypes.DEFAULT_TYPE):
         track_security_event(SecurityEvent(event_name="admin_command_denied", user_id=update.effective_user.id if update.effective_user else None, rule_key="cmd_admin_activity_status", action_taken="denied"))
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = int(context.args[0]) if context.args else update.effective_user.id
-    try:
-        rows = pg_fetchall(
-            """
-            SELECT COALESCE(np.timezone, uws.timezone, 'Europe/Moscow')
-              FROM public.users u
-              LEFT JOIN public.notification_preferences np ON np.user_id=u.user_id
-              LEFT JOIN public.user_workspace_settings uws ON uws.user_id=u.user_id
-             WHERE u.user_id=%s
-             LIMIT 1
-            """,
-            (uid,),
-        )
-        tz_name = rows[0][0] if rows and rows[0][0] else 'Europe/Moscow'
-    except Exception:
-        tz_name = 'Europe/Moscow'
+    tz_name = resolve_user_timezone(uid).timezone_name
     active = has_financial_activity_today(uid, tz_name)
     try:
         event_count = pg_fetchall(
@@ -349,7 +336,7 @@ async def cmd_admin_reminders_preview(update, context: ContextTypes.DEFAULT_TYPE
         return await update.message.reply_text('⛔ Команда только для администратора.')
     uid = update.effective_user.id
     active = pg_fetchall("SELECT COUNT(*) FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE", (uid,))[0][0]
-    today = datetime.utcnow().date()
+    today = user_local_date(uid)
     due = pg_fetchall("SELECT COUNT(*) FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE AND (event_date-notify_days_before)=%s", (uid, today))[0][0]
     nxt = pg_fetchall("SELECT title, event_date FROM public.user_reminders WHERE user_id=%s AND is_active=TRUE ORDER BY event_date LIMIT 5", (uid,))
     lines = [f'active: {active}', f'due_today: {due}', 'next5:']

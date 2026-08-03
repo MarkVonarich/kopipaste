@@ -1,9 +1,9 @@
-from utils.text import fmt_limit_warn
 # services/records.py — v2025.08.30-limits
 __version__ = "2025.08.30-limits"
 
 from typing import List, Tuple, Optional, Dict
 import logging
+from decimal import Decimal
 from rapidfuzz import process
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
@@ -11,14 +11,22 @@ from telegram.ext import ContextTypes
 
 from db.queries import (
     list_user_aliases, upsert_user_alias, insert_operation,
-    get_user_budgets, get_user_currency, get_user_tz
+    get_user_budgets, get_user_currency
 )
 from cache.global_dict import bump_global_popularity, global_suggestions
 from utils.text import norm_text, format_date_ru_with_weekday
 from db.database import get_conn, pg_fetchall, pg_exec
 from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
+from services.limit_alerts import (
+    build_category_limit_dedupe_key,
+    category_limit_alert_markup,
+    render_category_limit_alert,
+    safe_limit_threshold_event_properties,
+)
 from services.operations import record_financial_operation
 from services.goals import build_salary_suggestion_text, format_money, salary_suggestion_goals
+from services.product_events import ProductEvent, track_product_event
+from services.user_time import user_local_date
 
 log = logging.getLogger("finbot.records")
 
@@ -91,11 +99,10 @@ def list_categories_for_type(user_id: int, typ: str) -> List[str]:
     return cats[:24]
 
 
-def _period_bounds(period: str, tz_min: int):
+def _period_bounds(period: str, user_id: int):
     """Вернёт (start_date, end_date_inclusive) в локальном времени пользователя."""
-    from datetime import datetime as _dt, timedelta as _td
-    now_local = _dt.utcnow() + _td(minutes=tz_min)
-    today = now_local.date()
+    from datetime import timedelta as _td
+    today = user_local_date(user_id)
     if period == 'week':
         start = today - _td(days=today.weekday())
         return start, today
@@ -104,12 +111,18 @@ def _period_bounds(period: str, tz_min: int):
     return first, today
 
 
-async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, context: ContextTypes.DEFAULT_TYPE):
+async def _check_category_limits_and_warn(
+    chat_id: int,
+    category: str,
+    at_dt,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    workspace_id: int | None = None,
+):
     """
-    Проверяем лимиты (week/month) для категории и шлём короткое предупреждение при переходе через 50/80/100%.
+    Проверяем лимиты (week/month) для категории и шлём предупреждение при переходе через 80/90/100/exceeded.
     Округление вниз: floor(spent*100/limit).
     """
-    tz = get_user_tz(chat_id)
     cur = get_user_currency(chat_id)
 
     for period in ('week', 'month'):
@@ -121,11 +134,11 @@ async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, co
         """, (chat_id, period, category))
         if not lim_rows:
             continue
-        limit_amt = int(lim_rows[0][0]) or 0
+        limit_amt = Decimal(str(lim_rows[0][0] or 0))
         if limit_amt <= 0:
             continue
 
-        start, end = _period_bounds(period, tz)
+        start, end = _period_bounds(period, chat_id)
         # считаем траты только по этой категории
         spent_rows = pg_fetchall("""
             SELECT COALESCE(SUM(amount),0)
@@ -133,10 +146,11 @@ async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, co
              WHERE chat_id=%s AND type='Расходы' AND category=%s
                AND op_date BETWEEN %s AND %s
         """, (chat_id, category, start, end))
-        spent = int(spent_rows[0][0]) if spent_rows else 0
-
-        pct = (spent * 100) // limit_amt  # округление вниз
-        new_band = 100 if pct >= 100 else 80 if pct >= 80 else 50 if pct >= 50 else 0
+        spent = Decimal(str(spent_rows[0][0] or 0)) if spent_rows else Decimal("0")
+        alert = render_category_limit_alert(category=category, period=period, spent=spent, limit=limit_amt, currency=cur)
+        if not alert:
+            continue
+        new_band = alert.threshold_band
 
         # читаем состояние
         st_rows = pg_fetchall("""
@@ -151,8 +165,7 @@ async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, co
         if st_date is not None and start > st_date:
             last_band = 0
 
-        if new_band > last_band and new_band in (50, 80, 100):
-            # апдейтим state и шлём предупреждение
+        if new_band > last_band:
             pg_exec("""
                 INSERT INTO public.category_limit_state (user_id, period, category, last_band, updated_at)
                 VALUES (%s,%s,%s,%s, now())
@@ -160,20 +173,48 @@ async def _check_category_limits_and_warn(chat_id: int, category: str, at_dt, co
                    SET last_band=EXCLUDED.last_band, updated_at=now()
             """, (chat_id, period, category, new_band))
             try:
-                label = "неделя" if period == 'week' else "месяц"
-                # короткая формулировка без цифр сумм
-                text = f"⚠️ ЛИМИТ_ПО_СТРОКА {_md_escape(category)}» ({label}): {new_band}%."
+                category_key = norm_text(category)
+                dedupe_key = build_category_limit_dedupe_key(
+                    user_id=chat_id,
+                    workspace_id=workspace_id,
+                    period=period,
+                    period_start=start,
+                    category_key=category_key,
+                    band=new_band,
+                )
                 await dispatch_automatic_notification(
                     context,
                     user_id=chat_id,
                     chat_id=chat_id,
+                    workspace_id=workspace_id,
                     notification_type="category_limit_warning",
-                    dedupe_key=f"category_limit_warning:{period}:{norm_text(category)}:{new_band}:{start.isoformat()}",
+                    dedupe_key=dedupe_key,
                     policy=DeliveryPolicy.DEFER,
-                    text=text,
+                    text=alert.text,
+                    reply_markup=category_limit_alert_markup(),
+                    parse_mode=alert.parse_mode,
                     template_key="category_limit_warning",
-                    payload={"text": text},
+                    payload={
+                        "text": alert.text,
+                        "parse_mode": alert.parse_mode,
+                        "buttons": [[{"label": "Открыть лимиты", "callback_data": "lim_list"}], [{"label": "Изменить лимит", "callback_data": "lim_list"}], [{"label": "Отключить уведомления", "callback_data": "menu_notifications"}]],
+                    },
+                    disable_web_page_preview=True,
                 )
+                track_product_event(ProductEvent(
+                    event_name="limit_threshold_reached",
+                    user_id=chat_id,
+                    workspace_id=workspace_id,
+                    status=alert.status,
+                    currency=cur,
+                    properties=safe_limit_threshold_event_properties(
+                        band=new_band,
+                        period=period,
+                        status=alert.status,
+                        currency=cur,
+                        source="operation_commit",
+                    ),
+                ))
             except Exception as e:
                 log.debug("warn send failed: %s", e)
 
@@ -376,7 +417,7 @@ async def record_operation(cat: str, amt: int, dt,
     # После записи — проверяем лимиты по категории (только для Расходов)
     try:
         if typ == 'Расходы':
-            await _check_category_limits_and_warn(cid, cat, dt, context)
+            await _check_category_limits_and_warn(cid, cat, dt, context, workspace_id=recorded.workspace_id)
     except Exception as e:
         log.debug("limit-check failed: %s", e)
 

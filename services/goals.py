@@ -12,7 +12,7 @@ from psycopg2.extras import Json
 
 from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency
-from services.automatic_notifications import DeliveryPolicy, queue_automatic_notification, user_timezone_name
+from services.automatic_notifications import DeliveryPolicy, queue_automatic_notification
 from services.analytics_privacy import safe_error_code
 from services.goal_planning import (
     FREQUENCY_MONTHLY,
@@ -35,6 +35,7 @@ from services.goal_planning import (
     status_for_goal,
 )
 from services.product_events import ProductEvent, track_product_event
+from services.user_time import local_date_time_to_utc, user_local_date
 
 log = logging.getLogger(__name__)
 
@@ -125,13 +126,7 @@ def parse_nonnegative_money(value: Any) -> Decimal:
 
 
 def _today_for_user(user_id: int, now_utc: datetime | None = None) -> date:
-    tz_name, _reason = user_timezone_name(user_id)
-    from zoneinfo import ZoneInfo
-
-    now = now_utc or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    return now.astimezone(ZoneInfo(tz_name)).date()
+    return user_local_date(user_id, now_utc=now_utc)
 
 
 def _schedule_from_row(row: Goal) -> ScheduleConfig:
@@ -745,7 +740,7 @@ def queue_goal_reminder(goal: Goal, occurrence: date) -> str:
             "occurrence": occurrence.isoformat(),
             "buttons": [[{"label": "🎯 Открыть цель", "callback_data": f"goal|o|{goal.id}"}]],
         },
-        original_scheduled_at=datetime.combine(occurrence, datetime.min.time(), tzinfo=timezone.utc),
+        original_scheduled_at=local_date_time_to_utc(goal.owner_user_id, occurrence, datetime.min.time(), goal.workspace_id),
     )
     if result.status in {"queued", "deferred"}:
         _safe_track("goal_reminder_sent", user_id=goal.owner_user_id, workspace_id=goal.workspace_id, currency=goal.currency, properties={"status": result.status, "frequency": goal.frequency, "source": "planned"})
@@ -768,7 +763,7 @@ def queue_goal_achieved_notification(goal: Goal) -> None:
 
 
 def enqueue_due_goal_reminders(*, today: date | None = None, limit: int = 500) -> dict[str, int]:
-    today = today or datetime.now(timezone.utc).date()
+    utc_today = today or datetime.now(timezone.utc).date()
     try:
         rows = pg_fetchall(
             """
@@ -783,7 +778,7 @@ def enqueue_due_goal_reminders(*, today: date | None = None, limit: int = 500) -
              ORDER BY g.next_contribution_date, g.id
              LIMIT %s
             """,
-            (today, int(limit)),
+            (utc_today + timedelta(days=1), int(limit)),
         )
     except (errors.UndefinedTable, errors.UndefinedColumn):
         return {"queued": 0, "deferred": 0, "duplicate": 0, "blocked": 0}
@@ -792,6 +787,9 @@ def enqueue_due_goal_reminders(*, today: date | None = None, limit: int = 500) -
         goal = get_goal(int(goal_id), int(user_id), int(workspace_id) if workspace_id is not None else None)
         if not goal or not goal.next_contribution_date:
             counts["blocked"] += 1
+            continue
+        effective_today = today or user_local_date(int(user_id), int(workspace_id) if workspace_id is not None else None)
+        if goal.next_contribution_date > effective_today:
             continue
         status = queue_goal_reminder(goal, goal.next_contribution_date)
         counts[status if status in counts else "blocked"] += 1

@@ -108,6 +108,21 @@ Run after deployment and restart.
 - Confirm duplicate notification thresholds are not sent.
 - Confirm an eligible achievement is awarded once.
 
+## Timezone Notifications and Limit Alerts
+
+- Open `Настройки -> Оповещения -> Часовой пояс` and confirm the current IANA timezone is shown.
+- Select Moscow, Kaliningrad, Ekaterinburg, Omsk, Krasnoyarsk, Irkutsk, Yakutsk, and Vladivostok in a staging account and confirm each saves as an IANA timezone.
+- Select `Другая IANA`, enter a valid timezone such as `Europe/Stockholm`, and confirm it saves.
+- Enter an invalid timezone and confirm the bot asks again without changing the saved timezone.
+- Confirm changing timezone marks stale pending automatic notifications as skipped with reason `timezone_changed_stale_notification`.
+- Set daily reminder hour to `20:00`; at a non-20 local hour, confirm the evening reminder job does not send or defer a stale evening reminder.
+- Enable quiet hours crossing midnight and confirm reminders, reports, limits, challenges and goals respect the saved timezone rather than server time.
+- Create or stage a category limit below 80% and confirm no limit alert is sent.
+- Cross 80%, 90%, 100%, and exceeded states in a new period and confirm each alert has readable Russian copy with percentage, spent, limit, and remaining or exceeded amount.
+- Confirm limit alert buttons open existing limit/settings screens and no dead callback appears.
+- Confirm repeated scans in the same period do not resend the same category-limit band.
+- Confirm safe analytics for `limit_threshold_reached` contain only threshold band, period, status, currency and source.
+
 ## Challenge Notifications Opt-In
 
 - Open `Настройки -> Оповещения`.
