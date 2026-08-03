@@ -2,12 +2,14 @@
 __version__ = "2025.08.18-01"
 
 from datetime import datetime, timedelta, date
+from decimal import Decimal
 from typing import Dict, Tuple
 from db.queries import get_user_budgets
 from db.database import pg_fetchall
 from settings import WEEK_DEFAULT
 from services.records import list_categories_for_type
 from db.queries import get_user_currency
+from utils.money import to_decimal_money
 
 
 def _iso(d) -> str | None:
@@ -43,13 +45,17 @@ def dashboard_summary(workspace_id: int | None, user_id: int, today: date | None
     )
     by_currency = []
     for currency, today_exp, week_exp, month_exp, month_inc, op_count in rows:
+        today_exp_dec = to_decimal_money(today_exp or 0)
+        week_exp_dec = to_decimal_money(week_exp or 0)
+        month_exp_dec = to_decimal_money(month_exp or 0)
+        month_inc_dec = to_decimal_money(month_inc or 0)
         by_currency.append({
             "currency": currency,
-            "expenses_today": int(today_exp or 0),
-            "expenses_week": int(week_exp or 0),
-            "expenses_month": int(month_exp or 0),
-            "income_month": int(month_inc or 0),
-            "net_cash_flow_month": int((month_inc or 0) - (month_exp or 0)),
+            "expenses_today": today_exp_dec,
+            "expenses_week": week_exp_dec,
+            "expenses_month": month_exp_dec,
+            "income_month": month_inc_dec,
+            "net_cash_flow_month": month_inc_dec - month_exp_dec,
             "operation_count": int(op_count or 0),
         })
     recent = pg_fetchall(
@@ -73,7 +79,7 @@ def dashboard_summary(workspace_id: int | None, user_id: int, today: date | None
                 "operation_date": _iso(r[1]),
                 "type": r[2],
                 "category": r[3],
-                "amount": int(r[4] or 0),
+                "amount": to_decimal_money(r[4] or 0),
                 "currency": r[5],
                 "comment": r[6],
                 "source": r[7],
@@ -133,9 +139,9 @@ def category_analytics(workspace_id: int | None, user_id: int, start: date, end:
         """,
         (get_user_currency(user_id), start, end, op_type, workspace_id, workspace_id, None if workspace_id else user_id, None if workspace_id else user_id, get_user_currency(user_id)),
     )
-    totals_by_currency: dict[str, int] = {}
+    totals_by_currency: dict[str, Decimal] = {}
     for _, currency, total, _ in rows:
-        totals_by_currency[currency] = totals_by_currency.get(currency, 0) + int(total or 0)
+        totals_by_currency[currency] = totals_by_currency.get(currency, Decimal("0.00")) + to_decimal_money(total or 0)
     return {
         "workspace_id": workspace_id,
         "start": start.isoformat(),
@@ -145,9 +151,9 @@ def category_analytics(workspace_id: int | None, user_id: int, start: date, end:
             {
                 "category": r[0],
                 "currency": r[1],
-                "total": int(r[2] or 0),
+                "total": to_decimal_money(r[2] or 0),
                 "count": int(r[3] or 0),
-                "percentage": round((int(r[2] or 0) * 100.0 / (totals_by_currency.get(r[1]) or 1)), 2),
+                "percentage": round(float(to_decimal_money(r[2] or 0) * Decimal("100") / (totals_by_currency.get(r[1]) or Decimal("1.00"))), 2),
             }
             for r in rows
         ],

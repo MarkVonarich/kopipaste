@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 from typing import Iterable
 
@@ -12,6 +13,7 @@ from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency
 from services.i18n import format_money, normalize_locale
 from utils.text import norm_text
+from utils.money import to_decimal_money
 
 EXPENSE_TYPE = "Расходы"
 DEFAULT_THRESHOLDS = (70, 90, 100, 125, 150, 175, 200)
@@ -47,19 +49,19 @@ class Period:
 @dataclass(frozen=True)
 class BudgetStatus:
     name: str
-    amount: int
-    spent: int
+    amount: Decimal
+    spent: Decimal
     currency: str
     period: Period
     categories: tuple[str, ...] = field(default_factory=tuple)
 
     @property
-    def remaining(self) -> int:
+    def remaining(self) -> Decimal:
         return self.amount - self.spent
 
     @property
-    def overage(self) -> int:
-        return max(0, self.spent - self.amount)
+    def overage(self) -> Decimal:
+        return max(Decimal("0.00"), self.spent - self.amount)
 
     @property
     def percentage(self) -> int:
@@ -71,16 +73,16 @@ class BudgetStatus:
         today = today or date.today()
         return max(0, (self.period.end - today).days + 1)
 
-    def average_daily_allowance_remaining(self, today: date | None = None) -> int:
+    def average_daily_allowance_remaining(self, today: date | None = None) -> Decimal:
         days = max(1, self.days_remaining(today))
-        return max(0, int(self.remaining / days))
+        return max(Decimal("0.00"), (self.remaining / Decimal(days)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
-    def projected_end_spending(self, today: date | None = None) -> int | None:
+    def projected_end_spending(self, today: date | None = None) -> Decimal | None:
         today = today or date.today()
         elapsed = (min(today, self.period.end) - self.period.start).days + 1
         if elapsed < 3 or self.spent <= 0:
             return None
-        return int(round(self.spent / elapsed * self.period.days))
+        return (self.spent / Decimal(elapsed) * Decimal(self.period.days)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def period_bounds(period_type: str, today: date | None = None, *, custom_start: date | None = None, custom_end: date | None = None, rolling_days: int | None = None) -> Period:
@@ -104,9 +106,9 @@ def period_bounds(period_type: str, today: date | None = None, *, custom_start: 
     raise ValueError(f"unknown period_type: {period_type}")
 
 
-def expense_total(operations: Iterable[dict], period: Period, categories: Iterable[str] | None = None) -> int:
+def expense_total(operations: Iterable[dict], period: Period, categories: Iterable[str] | None = None) -> Decimal:
     selected = set(categories or [])
-    total = 0
+    total = Decimal("0.00")
     for op in operations:
         op_date = op.get("op_date") or op.get("operation_date")
         if hasattr(op_date, "date"):
@@ -121,13 +123,13 @@ def expense_total(operations: Iterable[dict], period: Period, categories: Iterab
             continue
         if op.get("category") == "Без операций":
             continue
-        total += int(op.get("amount") or 0)
+        total += to_decimal_money(op.get("amount") or 0)
     return total
 
 
-def top_category_contribution(operations: Iterable[dict], period: Period, categories: Iterable[str]) -> tuple[str, int] | None:
+def top_category_contribution(operations: Iterable[dict], period: Period, categories: Iterable[str]) -> tuple[str, Decimal] | None:
     selected = set(categories)
-    totals: dict[str, int] = {}
+    totals: dict[str, Decimal] = {}
     for op in operations:
         if op.get("type") != EXPENSE_TYPE or op.get("category") not in selected:
             continue
@@ -138,16 +140,16 @@ def top_category_contribution(operations: Iterable[dict], period: Period, catego
             op_date = op_date.date()
         if period.start <= op_date <= period.end:
             cat = op.get("category") or ""
-            totals[cat] = totals.get(cat, 0) + int(op.get("amount") or 0)
+            totals[cat] = totals.get(cat, Decimal("0.00")) + to_decimal_money(op.get("amount") or 0)
     if not totals:
         return None
     return max(totals.items(), key=lambda item: item[1])
 
 
-def build_budget_status(name: str, amount: int, currency: str, period: Period, operations: Iterable[dict], categories: Iterable[str] | None = None) -> BudgetStatus:
+def build_budget_status(name: str, amount: Decimal | int | str, currency: str, period: Period, operations: Iterable[dict], categories: Iterable[str] | None = None) -> BudgetStatus:
     cats = tuple(dict.fromkeys(categories or ()))
     spent = expense_total(operations, period, cats or None)
-    return BudgetStatus(name=name, amount=int(amount), spent=spent, currency=currency, period=period, categories=cats)
+    return BudgetStatus(name=name, amount=to_decimal_money(amount, positive=True), spent=spent, currency=currency, period=period, categories=cats)
 
 
 def current_alert_milestone(percentage: int, thresholds: Iterable[int] = DEFAULT_THRESHOLDS) -> int | None:
@@ -227,7 +229,7 @@ def list_general_limits(user_id: int, workspace_id: int | None = None) -> list[d
             "workspace_id": r[1],
             "owner_user_id": int(r[2]),
             "name": r[3],
-            "amount": int(r[4]),
+            "amount": to_decimal_money(r[4]),
             "currency": r[5],
             "period_type": r[6],
             "period_start": r[7],
@@ -241,8 +243,9 @@ def list_general_limits(user_id: int, workspace_id: int | None = None) -> list[d
     ]
 
 
-def upsert_general_limit(*, user_id: int, workspace_id: int | None, name: str, amount: int, period_type: str = "month", currency: str | None = None, period_start: date | None = None, period_end: date | None = None, rolling_days: int | None = None, enabled: bool = True, alerts_enabled: bool = True, thresholds: Iterable[int] = DEFAULT_THRESHOLDS, limit_id: int | None = None) -> int:
+def upsert_general_limit(*, user_id: int, workspace_id: int | None, name: str, amount: Decimal | int | str, period_type: str = "month", currency: str | None = None, period_start: date | None = None, period_end: date | None = None, rolling_days: int | None = None, enabled: bool = True, alerts_enabled: bool = True, thresholds: Iterable[int] = DEFAULT_THRESHOLDS, limit_id: int | None = None) -> int:
     currency = currency or get_user_currency(user_id)
+    amount_dec = to_decimal_money(amount, positive=True)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -257,7 +260,7 @@ def upsert_general_limit(*, user_id: int, workspace_id: int | None, name: str, a
                      WHERE id=%s AND owner_user_id=%s
                      RETURNING id
                     """,
-                    (name, int(amount), currency, period_type, period_start, period_end, rolling_days, enabled, alerts_enabled, Json(list(thresholds)), limit_id, user_id),
+                    (name, amount_dec, currency, period_type, period_start, period_end, rolling_days, enabled, alerts_enabled, Json(list(thresholds)), limit_id, user_id),
                 )
             else:
                 cur.execute(
@@ -268,7 +271,7 @@ def upsert_general_limit(*, user_id: int, workspace_id: int | None, name: str, a
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
                     """,
-                    (workspace_id, user_id, name, int(amount), currency, period_type, period_start, period_end, rolling_days, enabled, alerts_enabled, Json(list(thresholds))),
+                    (workspace_id, user_id, name, amount_dec, currency, period_type, period_start, period_end, rolling_days, enabled, alerts_enabled, Json(list(thresholds))),
                 )
             row = cur.fetchone()
         conn.commit()
@@ -304,7 +307,7 @@ def list_category_budget_groups(user_id: int, workspace_id: int | None = None) -
             "workspace_id": r[1],
             "owner_user_id": int(r[2]),
             "name": r[3],
-            "amount": int(r[4]),
+            "amount": to_decimal_money(r[4]),
             "currency": r[5],
             "period_type": r[6],
             "enabled": bool(r[7]),
@@ -315,11 +318,12 @@ def list_category_budget_groups(user_id: int, workspace_id: int | None = None) -
     ]
 
 
-def create_category_budget_group(*, user_id: int, workspace_id: int | None, name: str, amount: int, categories: Iterable[str], currency: str | None = None, period_type: str = "month", enabled: bool = True, alerts_enabled: bool = True) -> int:
+def create_category_budget_group(*, user_id: int, workspace_id: int | None, name: str, amount: Decimal | int | str, categories: Iterable[str], currency: str | None = None, period_type: str = "month", enabled: bool = True, alerts_enabled: bool = True) -> int:
     unique_categories = list(dict.fromkeys(c.strip() for c in categories if c and c.strip()))
     if not unique_categories:
         raise ValueError("at least one category is required")
     currency = currency or get_user_currency(user_id)
+    amount_dec = to_decimal_money(amount, positive=True)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -330,7 +334,7 @@ def create_category_budget_group(*, user_id: int, workspace_id: int | None, name
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
                 """,
-                (workspace_id, user_id, name.strip()[:120], int(amount), currency, period_type, enabled, alerts_enabled),
+                (workspace_id, user_id, name.strip()[:120], amount_dec, currency, period_type, enabled, alerts_enabled),
             )
             group_id = int(cur.fetchone()[0])
             for category in unique_categories:

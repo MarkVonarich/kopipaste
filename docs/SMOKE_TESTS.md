@@ -23,6 +23,8 @@ Run after deployment and restart.
 - Confirm voice input is enabled.
 - Send `Магнит пятьсот семьдесят`.
 - Confirm the operation amount is `570`.
+- Send `Чижик двести шестнадцать рублей тридцать четыре копейки`.
+- Confirm the operation amount is `216,34 ₽`.
 - Send `Дикси тысяча`.
 - Confirm the operation amount is `1 000`.
 - Send unclear speech.
@@ -31,6 +33,9 @@ Run after deployment and restart.
 - Confirm the category-limit card appears immediately.
 - Confirm typed operations still work.
 - Send a receipt/screenshot.
+- For a banking screenshot containing `Чижик -216,34 ₽` and `Дринкит -285 ₽`, confirm two candidates appear and both save.
+- Confirm the receipt result says `✅ Готово: записано 2, пропущено 0. Сумма: 501,34 ₽`.
+- Confirm cashback, card labels, UI buttons and day totals are not recorded as operations.
 - Confirm selected operations save and evening inactivity reminder is suppressed.
 
 ## Group Operation
@@ -135,6 +140,7 @@ Run after deployment and restart.
 - Add another `200 RUB` expense and confirm the 100% card.
 - Add `130 RUB` expense and confirm an exceeded card showing `2 130 / 2 000` and `130`.
 - Add `150 RUB` expense and confirm another exceeded card showing `2 280 / 2 000` and `280`.
+- Add decimal expenses that take the final spent amount to `2 280,35 RUB` and confirm the exceeded amount is `280,35 RUB`.
 - Repeat the same update/callback and confirm no duplicate card appears for the same operation.
 - Confirm normal scheduler scans do not resend exceeded cards.
 - Confirm limit alert buttons open existing limit/settings screens and no dead callback appears.
@@ -167,6 +173,14 @@ Run after deployment and restart.
 - Confirm normal reminders and reports remain operational.
 
 ## Backward Compatibility
+
+## Decimal Money Migration
+
+- In staging only, apply:
+  `psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260803_015_decimal_operation_amounts.sql`
+- Confirm existing integer operations still render without `,00`.
+- Confirm new operation, category-limit and budget values with cents persist as `NUMERIC(18,2)`.
+- Do not print API keys, bot token, PostHog token, HMAC secret or database URL during verification.
 
 - Existing personal records remain visible.
 - Current OCR, voice, history, reports, budgets, limits, reminders, and Excel export still work.

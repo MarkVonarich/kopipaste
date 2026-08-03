@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 from psycopg2 import errors
 
@@ -11,6 +12,7 @@ from services.budgeting import build_budget_status, period_bounds, render_limit_
 from services.notification_engine import NotificationFact, fallback_fact
 from services.recurring_spend import detect_recurring_spend
 from services.subscriptions import detect_upcoming_subscriptions
+from utils.money import format_money, to_decimal_money
 
 
 @dataclass(frozen=True)
@@ -74,20 +76,20 @@ def build_preview(user_id: int, kind: str = "auto", today: date | None = None) -
     facts: list[tuple[NotificationFact, str]] = []
     if kind in {"auto", "subscription"}:
         for item in detect_upcoming_subscriptions(operations, today):
-            text = f"Скоро возможна подписка: {item.merchant} — {item.amount} {item.currency}, ожидается {item.expected_date.isoformat()}"
-            facts.append((NotificationFact("subscription_upcoming", item.dedupe_key, text, 10, item.workspace_id, "subscription", item.previous_operation_id, {"expected_date": item.expected_date.isoformat(), "amount": item.amount}), "upcoming subscription has highest priority"))
+            text = f"Скоро возможна подписка: {item.merchant} — {format_money(item.amount, item.currency)}, ожидается {item.expected_date.isoformat()}"
+            facts.append((NotificationFact("subscription_upcoming", item.dedupe_key, text, 10, item.workspace_id, "subscription", item.previous_operation_id, {"expected_date": item.expected_date.isoformat(), "amount_present": True}), "upcoming subscription has highest priority"))
     if kind in {"auto", "recurring-spend"}:
         for item in detect_recurring_spend(operations):
-            text = f"Повторяющаяся трата: {item.merchant} — примерно {item.monthly_estimate} {item.currency} в месяц"
-            facts.append((NotificationFact("recurring_spend_detected", item.dedupe_key, text, 50, None, "recurring_spend", None, {"count": item.count, "monthly_estimate": item.monthly_estimate}), "recurring spend pattern detected"))
+            text = f"Повторяющаяся трата: {item.merchant} — примерно {format_money(item.monthly_estimate, item.currency)} в месяц"
+            facts.append((NotificationFact("recurring_spend_detected", item.dedupe_key, text, 50, None, "recurring_spend", None, {"count": item.count, "monthly_estimate_present": True}), "recurring spend pattern detected"))
     if kind in {"auto", "limit"}:
         period = period_bounds("month", today)
         expenses = [op for op in operations if op.get("type") == "Расходы"]
         if expenses:
-            amount = max(1, sum(int(op.get("amount") or 0) for op in expenses[:10]))
+            amount = max(Decimal("1.00"), sum((to_decimal_money(op.get("amount") or 0) for op in expenses[:10]), Decimal("0.00")))
             status = build_budget_status("Расходы месяца", amount, get_user_currency(user_id), period, operations)
             text = render_limit_alert(status, locale=locale)
-            facts.append((NotificationFact("limit_near", f"preview:limit:{user_id}:{today.isoformat()}", text, 30, None, "general_limit", None, {"spent": status.spent, "limit": status.amount, "percentage": status.percentage}), "limit preview built from recent user spending"))
+            facts.append((NotificationFact("limit_near", f"preview:limit:{user_id}:{today.isoformat()}", text, 30, None, "general_limit", None, {"amounts_present": True, "percentage": status.percentage}), "limit preview built from recent user spending"))
     if not facts:
         fact = fallback_fact(user_id, today.isoformat(), locale)
         return NotificationPreview(user_id, kind, fact, "no stronger personalized fact available", fact.text)

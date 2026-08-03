@@ -8,16 +8,18 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import List
 
 from services.api_usage import ApiUsageEvent, track_api_usage
+from utils.money import to_decimal_money
 
 log = logging.getLogger("finbot.receipt")
 
 
 @dataclass
 class ParsedCandidate:
-    amount: float
+    amount: Decimal
     category: str
     op_type: str
     op_date: date
@@ -153,8 +155,8 @@ def candidates_from_provider_payload(data: dict) -> tuple[list[ParsedCandidate],
             dropped_by_filter += 1
             continue
         try:
-            amount = abs(float(op.get('amount') or 0))
-        except Exception:
+            amount = abs(to_decimal_money(str(op.get('amount') or 0)))
+        except ValueError:
             dropped_by_filter += 1
             continue
         if amount <= 0:
@@ -172,7 +174,7 @@ def candidates_from_provider_payload(data: dict) -> tuple[list[ParsedCandidate],
             continue
         op_type = _op_type(op.get('type'))
         op_date = _safe_date(op.get('op_date'))
-        key = (round(amount, 2), merchant.lower(), op_type, op_date.isoformat())
+        key = (amount, merchant.lower(), op_type, op_date.isoformat())
         if key in seen:
             continue
         seen.add(key)
@@ -218,10 +220,14 @@ def parse_receipt_image(image_bytes: bytes, user_id: int) -> ParseResult:
         'Поддерживай как одиночные чеки, так и списки банковских транзакций. '
         'Верни строго JSON без markdown и без пояснений. '
         'Извлекай только реальные строки транзакций. '
+        'Верни каждую визуально отдельную строку транзакции: мерчант и сумма должны быть из одной строки. '
+        'Поддерживай целые и дробные суммы с копейками, не выбрасывай строку только из-за копеек. '
         'Игнорируй агрегаты по дням и итоги: "20 мая −416,99", "Сегодня −2 496", "Итого", "Всего", "За день". '
         'Игнорируй также: баланс/остаток/доступно/кэшбэк/бонусы/номера карт/кнопки UI/вкладки/заголовки. '
         'Тип: Расходы/Доходы. Положительные операции (входящий перевод/зарплата/пополнение) — Доходы. '
         'Не подменяй сумму строки на соседний дневной итог: бери сумму, визуально связанную с конкретным мерчантом/строкой. '
+        'Не считай кэшбэк/бонусы суммой операции. '
+        'Например, если видно "Чижик -216,34 ₽" и "Дринкит -285 ₽", верни обе операции. '
         'Если не уверен — добавляй строку с низким confidence, но не выбрасывай расходы. '
         'Если receipt с товарами неуверенный — можно вернуть одну итоговую операцию по total.\n\n'
         'JSON schema:\n'

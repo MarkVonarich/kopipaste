@@ -4,7 +4,7 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.error import BadRequest
 from db.database import get_conn, pg_fetchall, pg_exec
 from datetime import datetime, timedelta, date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 from telegram.ext import ContextTypes
 from db.queries import (
@@ -78,6 +78,7 @@ from services.goals import (
     update_goal_details,
     update_goal_plan,
 )
+from utils.money import MoneyParseError, format_money as format_money_value, to_decimal_money
 from services.security_events import SecurityEvent, track_security_event
 from services.records import send_operation_limit_alert
 import tempfile
@@ -88,18 +89,12 @@ from secrets import token_urlsafe
 log = logging.getLogger(__name__)
 
 
-def _fmt_money(v: int) -> str:
-    return f"{int(v):,}".replace(',', ' ') + ' ₽'
-
-
-def _integer_major_amount(value) -> int | None:
+def _integer_major_amount(value) -> Decimal | None:
     try:
-        amount = Decimal(str(value))
-    except (InvalidOperation, ValueError):
+        amount = to_decimal_money(value, positive=True)
+    except (MoneyParseError, ValueError):
         return None
-    if amount <= 0 or amount != amount.to_integral_value():
-        return None
-    return int(amount)
+    return amount
 
 
 def _next_monthly_date(dt: date) -> date:
@@ -227,7 +222,7 @@ def _receipt_render_card(cands: list[dict], idx: int) -> tuple[str, InlineKeyboa
     text = (
         f"Операция {idx + 1} из {len(cands)}\n"
         f"Тип: {c.get('type') or 'Расходы'}\n"
-        f"Сумма: {_fmt_money(amount) if (amount := _integer_major_amount(c.get('amount'))) is not None else 'дробная сумма не поддерживается'}\n" +
+        f"Сумма: {_fmt_money(amount) if (amount := _integer_major_amount(c.get('amount'))) is not None else 'некорректная сумма'}\n" +
         f"Категория: {c.get('category') or 'Прочее'}\n"
         f"Комментарий: {c.get('merchant') or 'Из изображения'}\n"
         f"Дата: {dts}"
@@ -284,7 +279,7 @@ def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
                         WHERE chat_id=%s AND op_date BETWEEN %s AND %s
                           AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
                         ORDER BY op_date, id""", (chat_id, dfrom, dto))
-    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': int(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
+    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': to_decimal_money(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
 
 
 async def _export_preview(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -298,15 +293,15 @@ async def _export_preview(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         msg = 'Дата конца не может быть раньше даты начала.' if error == 'end_before_start' else 'Период слишком большой. Выберите диапазон до 5 лет.'
         return await _safe_edit_or_reply(q, f'⚠️ {msg}\n\nВыбери конец периода:', reply_markup=_export_end_kb())
     rows = _export_rows(chat_id, dfrom, dto)
-    exp = sum(int(r['amount']) for r in rows if r['type'] == 'Расходы')
-    inc = sum(int(r['amount']) for r in rows if r['type'] == 'Доходы')
+    exp = sum((to_decimal_money(r['amount']) for r in rows if r['type'] == 'Расходы'), Decimal("0.00"))
+    inc = sum((to_decimal_money(r['amount']) for r in rows if r['type'] == 'Доходы'), Decimal("0.00"))
     st['count'] = len(rows)
     st['preview_rows'] = rows
     log.info('export_preview period=%s..%s count=%s user_id=%s', dfrom, dto, len(rows), chat_id)
     return await _safe_edit_or_reply(
         q,
         f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\n'
-        f'Операций: {len(rows)}\nРасходы: {exp} ₽\nДоходы: {inc} ₽\nБаланс: {inc-exp} ₽\n\nСформировать файл?',
+        f'Операций: {len(rows)}\nРасходы: {_fmt_money(exp)}\nДоходы: {_fmt_money(inc)}\nБаланс: {_fmt_money(inc-exp)}\n\nСформировать файл?',
         reply_markup=_export_confirm_kb(),
     )
 
@@ -485,7 +480,7 @@ async def render_reminders_menu(q, chat_id: int, context: ContextTypes.DEFAULT_T
     lines = ['🔔 Напоминания', '', 'Активные:']
     btns = []
     for i, r in enumerate(rows[:5], start=1):
-        lines.append(f"{i}. {r['title']} — {_fmt_money(int(r['amount']))}, {r['event_date'].day} число")
+        lines.append(f"{i}. {r['title']} — {_fmt_money(r['amount'])}, {r['event_date'].day} число")
         btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
     lines.extend(['', render_reminder_totals(rows, get_user_locale(chat_id))])
     btns += _reminders_menu_kb(True).inline_keyboard
@@ -1398,8 +1393,8 @@ def _lim_card_kb(period: str, category: str):
     ])
 
 
-def _fmt_money(v: int) -> str:
-    return f"{int(v):,}".replace(',', ' ') + ' ₽'
+def _fmt_money(v) -> str:
+    return format_money_value(v, "RUB")
 
 
 async def _lim_show_list(q, user_id: int):
@@ -1445,13 +1440,13 @@ async def _lim_show_card(q, user_id: int, period: str, category: str, note: str 
 
     log.info('open_limit user=%s period=%s category=%s amount=%s', user_id, period, category, row['amount'])
     spent = get_limit_spent(user_id, row['period'], row['category'])
-    remaining = int(row['amount']) - int(spent)
+    remaining = to_decimal_money(row['amount']) - to_decimal_money(spent)
     text = (
         f"*{_md_escape(row['category'])}*\n"
         f"{_lim_period_label(row['period'])}\n"
-        f"Лимит: {_fmt_money(int(row['amount']))}\n"
-        f"Потрачено: {_fmt_money(int(spent))}\n"
-        f"Осталось: {_fmt_money(int(remaining))}"
+        f"Лимит: {_fmt_money(row['amount'])}\n"
+        f"Потрачено: {_fmt_money(spent)}\n"
+        f"Осталось: {_fmt_money(remaining)}"
     )
     if note:
         text += f"\n\n{note}"
@@ -2354,7 +2349,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 user_id=cid,
                 workspace_id=draft.get('workspace_id'),
                 name=draft.get('name') or 'Бюджет из категорий',
-                amount=int(draft.get('amount')),
+                amount=to_decimal_money(draft.get('amount')),
                 categories=categories,
                 period_type=draft.get('period_type') or 'month',
                 alerts_enabled=bool(draft.get('alerts_enabled', True)),
@@ -3058,7 +3053,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not r:
             return await _safe_edit_or_reply(q, 'Напоминание не найдено.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='rem_menu')]]))
         toggle_lbl = '⏸ Отключить' if r['is_active'] else '▶️ Включить'
-        txt = (f"🔔 {r['title']}\n\nСумма: {_fmt_money(int(r['amount']))}\nТип: {r['rem_type']}\nКатегория: {r['category']}\n"
+        txt = (f"🔔 {r['title']}\n\nСумма: {_fmt_money(r['amount'])}\nТип: {r['rem_type']}\nКатегория: {r['category']}\n"
                f"Дата: {r['event_date'].strftime('%d.%m.%Y')}\nПовтор: {r['repeat_rule']}\nНапомнить: за {r['notify_days_before']} дн.\nСтатус: {'включено' if r['is_active'] else 'выключено'}")
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('💰 Сумма', callback_data=f'rem_e_amt|{rid}'), InlineKeyboardButton('🏷 Категория', callback_data=f'rem_e_cat|{rid}')],
@@ -3157,7 +3152,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         elif rpt == 'custom_days': next_after = ev + timedelta(days=int(d.get('repeat_interval_days') or 1))
         log.info('reminder_repeat_semantics repeat_rule=%s event_date=%s next_after=%s user=%s', rpt, ev.isoformat(), (next_after.isoformat() if next_after else '-'), cid)
         date_label = 'Первое списание' if rpt != 'none' else 'Дата'
-        txt = (f"🔔 Напоминание\n\n{d.get('title','—')} — {_fmt_money(int(d.get('amount',0)))}\nТип: {d.get('rem_type','Расходы')}\n"
+        txt = (f"🔔 Напоминание\n\n{d.get('title','—')} — {_fmt_money(d.get('amount',0))}\nТип: {d.get('rem_type','Расходы')}\n"
                f"Категория: {d.get('category','Прочее')}\n{date_label}: {ev.strftime('%d.%m.%Y')}\nПовтор: {_repeat_label(rpt, d)}" +
                (f"\nСледующее после этого: {next_after.strftime('%d.%m.%Y')}" if next_after else '') +
                f"\nНапомнить: за {d.get('notify_days_before',1)} дня")
@@ -3230,11 +3225,11 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not amount:
             return await _safe_edit_or_reply(q, 'Бюджет не найден.', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Назад', callback_data='settings_budgets')]]))
         spent = _budget_spent(cid, period)
-        rem = int(amount) - int(spent)
+        rem = to_decimal_money(amount) - to_decimal_money(spent)
         text = (
             f"💰 Бюджет: {'месяц' if period=='month' else 'неделя'}\n\n"
-            f"Лимит: {_fmt_money(int(amount))}\n"
-            f"Потрачено: {_fmt_money(int(spent))}\n"
+            f"Лимит: {_fmt_money(amount)}\n"
+            f"Потрачено: {_fmt_money(spent)}\n"
             f"{'Осталось' if rem>=0 else 'Перерасход'}: {_fmt_money(abs(int(rem)))}"
         )
         kb = InlineKeyboardMarkup([
@@ -3284,7 +3279,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         st['used'] = True
         context.user_data['budget_pending_edit'] = st
         period = st['period']
-        amount = int(st['amount'])
+        amount = to_decimal_money(st['amount'])
         if period == 'month':
             set_budget(cid, month=amount)
         else:
@@ -3311,7 +3306,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('🗑 Да, удалить', callback_data=f'bud_del_yes|{period}')],
             [InlineKeyboardButton('⬅️ Назад', callback_data=f'bud_card|{period}'), InlineKeyboardButton('❌ Отмена', callback_data='settings_budgets')],
         ])
-        return await _safe_edit_or_reply(q, f"Удалить бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(int(amount or 0))}\n\nОперации, категории, напоминания и рабочие пространства не будут удалены.", reply_markup=kb)
+        return await _safe_edit_or_reply(q, f"Удалить бюджет?\n\n{'Месяц' if period=='month' else 'Неделя'} — {_fmt_money(amount or 0)}\n\nОперации, категории, напоминания и рабочие пространства не будут удалены.", reply_markup=kb)
 
     if data.startswith('bud_del_yes|'):
         period = data.split('|', 1)[1]
@@ -3328,7 +3323,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('bud_replace_confirm|'):
         period = data.split('|', 1)[1]
-        amount = int(context.user_data.get('budget_pending_amount', 0))
+        amount = to_decimal_money(context.user_data.get('budget_pending_amount', 0))
         if period == 'month':
             set_budget(cid, month=amount)
         else:
@@ -3545,7 +3540,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await _safe_edit_or_reply(q, 'Корректировка суммы', reply_markup=kb)
         if data.startswith('rcpt_amt_') and data != 'rcpt_amt_input':
             delta = {'rcpt_amt_m100': -100, 'rcpt_amt_m50': -50, 'rcpt_amt_p50': 50, 'rcpt_amt_p100': 100}.get(data, 0)
-            cur['amount'] = max(1, (_integer_major_amount(cur.get('amount')) or 1) + delta)
+            cur['amount'] = str(max(Decimal("1.00"), (_integer_major_amount(cur.get('amount')) or Decimal("1.00")) + Decimal(delta)))
             context.user_data['receipt_candidates'] = cands
             await q.answer('Сумма обновлена')
             text, kb = _receipt_render_card(cands, idx)
@@ -3613,7 +3608,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not cands:
             await q.answer('Нет данных для записи', show_alert=True)
             return await _safe_edit_or_reply(q, 'Нет подготовленных операций для записи.')
-        total = 0
+        total = Decimal("0.00")
         written = 0
         skipped = 0
         for c in cands:
@@ -3650,7 +3645,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton('📊 Отчёт', callback_data='menu_report')],
             [InlineKeyboardButton('⬅️ Меню', callback_data='start_main')],
         ])
-        return await _safe_edit_or_reply(q, f'✅ Готово: записано {written}, пропущено {skipped}. Сумма: {total} ₽', reply_markup=kb)
+        return await _safe_edit_or_reply(q, f'✅ Готово: записано {written}, пропущено {skipped}. Сумма: {_fmt_money(total)}', reply_markup=kb)
 
     if data == 'notif_morning_on':
         set_smart_morning_limits_enabled(cid, True)
@@ -3803,7 +3798,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             log.info('lim_adj not ok user=%s period=%s category=%s status=%s', cid, period, category, res.get('status'))
             return await _lim_show_list(q, cid)
         log.info('lim_adj ok user=%s period=%s category=%s delta=%s old=%s new=%s', cid, period, category, delta, res.get('old_amount'), res.get('new_amount'))
-        await q.answer(f"Готово: {_fmt_money(int(res.get('new_amount', 0)))}")
+        await q.answer(f"Готово: {_fmt_money(res.get('new_amount', 0))}")
         return await _lim_show_card(q, cid, period, category)
 
     if data.startswith('lim_edit_period|'):
@@ -3922,8 +3917,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('cl_adj|'):
         delta = int(data.split('|', 1)[1])
-        amt = int(context.user_data.get('cl_amount', 0)) + delta
-        amt = max(0, amt)
+        amt = max(Decimal("0.00"), to_decimal_money(context.user_data.get('cl_amount', 0)) + Decimal(delta))
         context.user_data['cl_amount'] = amt
         period = context.user_data.get('cl_period', 'week')
         category = context.user_data.get('cl_category', '')
@@ -3938,7 +3932,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'cl_save':
         period = context.user_data.get('cl_period', 'week')
         category = context.user_data.get('cl_category', '')
-        amount = int(context.user_data.get('cl_amount', 0))
+        amount = to_decimal_money(context.user_data.get('cl_amount', 0))
         set_category_limit(cid, period, category, amount, get_user_currency(cid))
         # очистим режим
         context.user_data.pop('cl_mode', None)
@@ -4005,7 +3999,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'ml_toggle_income':
         p = context.user_data.get('pending', {})
         merch = p.get('merch', 'операция')
-        amt = int(p.get('amt', 0) or 0)
+        amt = to_decimal_money(p.get('amt', 0))
         curr_type = p.get('type') or 'Расходы'
         new_type = 'Доходы' if curr_type == 'Расходы' else 'Расходы'
         sign = '➕' if new_type == 'Доходы' else '➖'
@@ -4032,7 +4026,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         kb = ml_top2_kb(cat1, cat2)
-        return await q.edit_message_text(f"Категория?\n{sign} {amt} ₽ • {merch}", parse_mode='Markdown', reply_markup=kb)
+        return await q.edit_message_text(f"Категория?\n{sign} {format_money_value(amt, get_user_currency(cid))} • {merch}", parse_mode='Markdown', reply_markup=kb)
 
     if data.startswith('ml_pick|'):
         cat = data.split('|', 1)[1]
@@ -4375,13 +4369,13 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             op_date=r['event_date'],
             op_type=r['rem_type'],
             category=r['category'],
-            amount=int(r['amount']),
+            amount=to_decimal_money(r['amount']),
             comment=r['title'],
             source='reminder',
             chat_type=getattr(update.effective_chat, 'type', 'private') or 'private',
             raw_text=r['title'],
         )
-        await _send_standard_op_confirmation(context, cid, update.effective_user, r['event_date'], r['rem_type'], r['category'], int(r['amount']), r['title'])
+        await _send_standard_op_confirmation(context, cid, update.effective_user, r['event_date'], r['rem_type'], r['category'], to_decimal_money(r['amount']), r['title'])
         await send_operation_limit_alert(recorded, context)
         if r['repeat_rule'] == 'none':
             reminder_update(cid, rid, is_active=False)

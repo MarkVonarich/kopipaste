@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from db.database import pg_fetchall
+from utils.money import format_money as format_money_value
 
 UTC = timezone.utc
 
@@ -39,7 +40,7 @@ def get_quick_buttons(user_id: int, chat_id: int | None = None) -> list[tuple[st
 
     buttons: list[tuple[str, str]] = []
     for category, amount, _c in rows:
-        amount_fmt = int(amount) if float(amount).is_integer() else amount
+        amount_fmt = format_money_value(amount, "RUB").replace(" ₽", "")
         label = f"{category} {amount_fmt}"
         payload = f"quick::{category}::{amount_fmt}"
         buttons.append((label, payload))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from utils.money import format_money as _format_money
 
 SUPPORTED_LOCALES = {"ru", "en"}
 DEFAULT_LOCALE = "en"
@@ -156,11 +156,4 @@ def t(key: str, locale: str | None = None, **kwargs) -> str:
 
 def format_money(amount, currency: str = "RUB", locale: str | None = None) -> str:
     lang = normalize_locale(locale)
-    value = Decimal(str(amount or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if value == value.to_integral():
-        raw = f"{int(value):,}"
-    else:
-        raw = f"{value:,.2f}"
-    if lang == "ru":
-        raw = raw.replace(",", " ").replace(".", ",")
-    return f"{raw} {currency}"
+    return _format_money(amount, currency, locale=lang, symbol=False)

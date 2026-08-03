@@ -1,11 +1,13 @@
+from decimal import Decimal
+
 from services.reminder_totals import monthly_equivalent, reminder_totals, render_reminder_totals
 
 
 def test_monthly_equivalent_rules():
-    assert round(monthly_equivalent(120, "weekly"), 2) == 520.0
-    assert monthly_equivalent(120, "monthly") == 120
-    assert monthly_equivalent(120, "yearly") == 10
-    assert round(monthly_equivalent(100, "custom_days", 10), 2) == 304.38
+    assert monthly_equivalent(120, "weekly") == Decimal("520.00")
+    assert monthly_equivalent(120, "monthly") == Decimal("120.00")
+    assert monthly_equivalent(120, "yearly") == Decimal("10.00")
+    assert monthly_equivalent(100, "custom_days", 10) == Decimal("304.38")
     assert monthly_equivalent(100, "none") is None
 
 
@@ -19,7 +21,7 @@ def test_reminder_totals_separate_type_and_currency():
     ])
     assert totals["recurring_expenses_monthly"]["RUB"] == 1200
     assert totals["recurring_expenses_monthly"]["USD"] == 250
-    assert round(totals["recurring_income_monthly"]["RUB"], 2) == 21666.67
+    assert totals["recurring_income_monthly"]["RUB"] == Decimal("21666.67")
     assert totals["one_time_expenses"]["RUB"] == 700
     assert totals["one_time_income"]["USD"] == 900
 

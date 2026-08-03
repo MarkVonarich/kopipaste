@@ -28,6 +28,7 @@ from services.i18n import resolve_locale, t
 from services.notification_preview import build_preview, render_admin_preview
 from services.personal_data_deletion import dry_run_delete_user_data, format_dry_run
 from db.database import pg_fetchall
+from utils.money import format_money as format_money_value
 from time import time as unix_time
 from services.acquisition import capture_acquisition
 from services.product_events import ProductEvent, track_product_event
@@ -151,7 +152,7 @@ async def cmd_reminders(update, context: ContextTypes.DEFAULT_TYPE):
     lines = ['🔔 Напоминания', '', 'Активные:']
     btns = []
     for i, r in enumerate(rows[:5], start=1):
-        lines.append(f"{i}. {r['title']} — {int(r['amount']):,} ₽, {r['event_date'].day} число".replace(',', ' '))
+        lines.append(f"{i}. {r['title']} — {format_money_value(r['amount'], r.get('currency') or 'RUB')}, {r['event_date'].day} число")
         btns.append([InlineKeyboardButton(f"Открыть: {r['title'][:20]}", callback_data=f"rem_o|{r['id']}")])
     lines.extend(['', render_reminder_totals(rows, get_user_locale(cid))])
     btns.extend(reminders_menu_kb(True).inline_keyboard)

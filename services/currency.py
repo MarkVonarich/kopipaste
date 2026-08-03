@@ -168,23 +168,24 @@ def detect_currency_token(text: str) -> Optional[str]:
     log.info("FX DETECT: none in=%r", s[:160])
     return None
 
-def convert_amount_if_needed(user_id: int, amt: int, src_curr: Optional[str], op_date: Optional[date] = None) -> Tuple[int, Optional[str]]:
+def convert_amount_if_needed(user_id: int, amt: Decimal | int | str, src_curr: Optional[str], op_date: Optional[date] = None) -> Tuple[Decimal, Optional[str]]:
+    amount = Decimal(str(amt)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     try:
         dst = (get_user_currency(user_id) or "RUB").upper()
     except Exception:
         dst = "RUB"
     src = (src_curr or "").upper() if src_curr else None
     if not src or src == dst:
-        log.info("FX CONVERT skip: user=%s amt=%s src=%s dst=%s (no-change)", user_id, amt, src, dst)
-        return amt, None
+        log.info("FX CONVERT skip: user=%s src=%s dst=%s (no-change)", user_id, src, dst)
+        return amount, None
 
     update_fx_rates(op_date or date.today())
     rate = get_rate(src, dst)
     if not rate or rate <= 0:
         log.warning("FX CONVERT rate-missing: user=%s src=%s dst=%s", user_id, src, dst)
-        return amt, None
+        return amount, None
 
-    converted = int(Decimal(amt * rate).quantize(0, rounding=ROUND_HALF_UP))
+    converted = (amount * Decimal(str(rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     note = f"{amt} {src} → {converted} {dst}"
-    log.info("FX CONVERT ok: user=%s src=%s dst=%s amt=%s rate=%.6f out=%s", user_id, src, dst, amt, rate, converted)
+    log.info("FX CONVERT ok: user=%s src=%s dst=%s rate=%.6f", user_id, src, dst, rate)
     return converted, note

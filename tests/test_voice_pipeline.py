@@ -57,12 +57,12 @@ def test_voice_config_classifies_disabled_and_missing_credentials(monkeypatch):
 def test_telegram_voice_download_success_and_empty_file(tmp_path):
     from services.voice_transcription import VoicePipelineError, download_telegram_voice
 
-    dest = tmp_path / "voice.oga"
+    dest = tmp_path / "voice.ogg"
     asyncio.run(download_telegram_voice(_Voice(b"abc"), dest))
     assert dest.read_bytes() == b"abc"
 
     try:
-        asyncio.run(download_telegram_voice(_Voice(b""), tmp_path / "empty.oga"))
+        asyncio.run(download_telegram_voice(_Voice(b""), tmp_path / "empty.ogg"))
     except VoicePipelineError as exc:
         assert exc.reason == "voice_empty_file"
     else:
@@ -79,10 +79,11 @@ def test_openai_ogg_path_is_used_directly(monkeypatch):
     monkeypatch.setattr(voice, "provider_api_key", lambda: "secret")
     monkeypatch.setattr(voice, "voice_config_status", lambda: SimpleNamespace(enabled=True, provider="openai", model="test-model", credential_present=True, dependency_available=True))
 
-    def _transcribe(path, *, api_key, model):
+    def _transcribe(path, *, api_key, model, language):
         seen["suffix"] = Path(path).suffix
         seen["api_key"] = api_key
         seen["model"] = model
+        seen["language"] = language
         return "Магнит пятьсот семьдесят"
 
     monkeypatch.setattr(voice, "transcribe_with_openai", _transcribe)
@@ -90,7 +91,7 @@ def test_openai_ogg_path_is_used_directly(monkeypatch):
     assert result.ok
     assert result.normalized_text == "магнит 570"
     assert result.language == "ru"
-    assert seen == {"suffix": ".oga", "api_key": "secret", "model": "test-model"}
+    assert seen == {"suffix": ".ogg", "api_key": "secret", "model": "test-model", "language": "ru"}
 
 
 def test_wav_conversion_path_and_ffmpeg_missing(monkeypatch):
@@ -108,7 +109,7 @@ def test_wav_conversion_path_and_ffmpeg_missing(monkeypatch):
     result = asyncio.run(voice.transcribe_telegram_voice(_Voice(), force_wav_conversion=True))
     assert result.ok
     assert result.normalized_text == "дикси 1000"
-    assert converted == [(".oga", ".wav")]
+    assert converted == [(".ogg", ".wav")]
 
     monkeypatch.setattr(voice.shutil, "which", lambda _name: None)
     try:
@@ -134,6 +135,49 @@ def test_provider_failures_are_classified(monkeypatch):
     result = asyncio.run(voice.transcribe_telegram_voice(_Voice()))
     assert not result.ok
     assert result.reason == "voice_provider_timeout"
+
+
+def test_unsupported_ogg_format_retries_once_as_wav(monkeypatch):
+    from services import voice_transcription as voice
+
+    calls = []
+    converted = []
+    monkeypatch.setattr(voice, "VOICE_INPUT_ENABLED", True)
+    monkeypatch.setattr(voice, "VOICE_TRANSCRIBE_PROVIDER", "openai")
+    monkeypatch.setattr(voice, "provider_api_key", lambda: "secret")
+    monkeypatch.setattr(voice, "voice_config_status", lambda: SimpleNamespace(enabled=True, provider="openai", model="test-model", credential_present=True, dependency_available=True))
+    monkeypatch.setattr(voice, "convert_audio_to_wav", lambda src, dst: converted.append((src.suffix, dst.suffix)) or dst.write_bytes(b"wav"))
+
+    def _transcribe(path, **_kwargs):
+        calls.append(Path(path).suffix)
+        if Path(path).suffix == ".ogg":
+            raise voice.VoicePipelineError("voice_provider_unsupported_format", status_code=400, provider_code="unsupported_value", file_suffix=".ogg")
+        return "Чижик двести шестнадцать рублей тридцать четыре копейки"
+
+    monkeypatch.setattr(voice, "transcribe_with_openai", _transcribe)
+    result = asyncio.run(voice.transcribe_telegram_voice(_Voice()))
+    assert result.ok
+    assert result.normalized_text == "чижик 216.34"
+    assert calls == [".ogg", ".wav"]
+    assert converted == [(".ogg", ".wav")]
+
+
+def test_auth_and_rate_limit_do_not_trigger_wav_fallback(monkeypatch):
+    from services import voice_transcription as voice
+
+    for reason in ("voice_provider_auth_failed", "voice_provider_rate_limited"):
+        converted = []
+        monkeypatch.setattr(voice, "VOICE_INPUT_ENABLED", True)
+        monkeypatch.setattr(voice, "VOICE_TRANSCRIBE_PROVIDER", "openai")
+        monkeypatch.setattr(voice, "provider_api_key", lambda: "secret")
+        monkeypatch.setattr(voice, "voice_config_status", lambda: SimpleNamespace(enabled=True, provider="openai", model="test-model", credential_present=True, dependency_available=True))
+        monkeypatch.setattr(voice, "convert_audio_to_wav", lambda src, dst: converted.append((src, dst)))
+        monkeypatch.setattr(voice, "transcribe_with_openai", lambda *_args, **_kwargs: (_ for _ in ()).throw(voice.VoicePipelineError(reason)))
+
+        result = asyncio.run(voice.transcribe_telegram_voice(_Voice()))
+        assert not result.ok
+        assert result.reason == reason
+        assert converted == []
 
 
 def test_handle_voice_uses_existing_text_parser_path(monkeypatch):
