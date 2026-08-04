@@ -53,11 +53,13 @@ Events: `workspace_created`, `workspace_joined`, `workspace_join_rejected`, `wor
 
 Purpose is group/personal workspace adoption. Allowed properties are `workspace_kind` and safe status only. Entity type is `workspace`. Retention follows delete/anonymize policy.
 
-## Mini App Reserved
+## Mini App
 
-Events: `miniapp_opened`, `screen_viewed`, `form_started`, `form_completed`, `form_abandoned`, `error_shown`.
+Events: `mini_app_opened`, `mini_app_tab_opened`, `mini_app_workspace_changed`, `mini_app_period_changed`, `mini_app_transaction_add_opened`, `mini_app_transaction_created`, `mini_app_transaction_edited`, `mini_app_transaction_deleted`, `mini_app_theme_changed`.
 
-Reserved for the Telegram Mini App. Allowed properties are safe screen/form/error codes. No user-entered text, form values or raw errors.
+Purpose is Telegram Mini App adoption, navigation and transaction funnel measurement. Allowed properties are coarse UI codes such as `surface`, `tab`, `period`, `scope`, `action`, `operation_type`, `changed_fields` and `theme`. No user-entered text, operation descriptions, raw Telegram `initData`, tokens, secrets, prompts, responses or database identifiers.
+
+Reserved compatibility events: `miniapp_opened`, `screen_viewed`, `form_started`, `form_completed`, `form_abandoned`, `error_shown`.
 
 ## Attribution
 

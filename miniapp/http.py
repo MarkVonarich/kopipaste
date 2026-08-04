@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import json
+import os
+from typing import Callable
+from urllib.parse import parse_qs
+from uuid import uuid4
+
+from settings import TELEGRAM_TOKEN
+
+from .api import MiniAppAPI, MiniAppError, error_envelope, serialize
+from .auth import MiniAppAuthError, verify_telegram_init_data
+
+api = MiniAppAPI()
+
+SAFE_HEADERS = [
+    ("Content-Type", "application/json; charset=utf-8"),
+    ("Cache-Control", "no-store"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    ("X-Frame-Options", "SAMEORIGIN"),
+    ("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"),
+]
+
+
+def _json_response(start_response: Callable, status: int, payload: dict):
+    body = json.dumps(serialize(payload), ensure_ascii=False).encode("utf-8")
+    start_response(f"{status} {'OK' if status < 400 else 'ERROR'}", [*SAFE_HEADERS, ("Content-Length", str(len(body)))])
+    return [body]
+
+
+def _read_body(environ) -> dict:
+    length = int(environ.get("CONTENT_LENGTH") or 0)
+    if length <= 0:
+        return {}
+    raw = environ["wsgi.input"].read(min(length, 64 * 1024))
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8"))
+
+
+def _params(environ) -> dict:
+    out = {}
+    for key, values in parse_qs(environ.get("QUERY_STRING") or "", keep_blank_values=True).items():
+        out[key] = values[-1] if values else ""
+    return out
+
+
+def _init_data(environ) -> str:
+    auth = environ.get("HTTP_AUTHORIZATION") or ""
+    if auth.lower().startswith("tma "):
+        return auth[4:]
+    return environ.get("HTTP_X_TELEGRAM_INIT_DATA") or ""
+
+
+def _request(environ, request_id: str):
+    max_age = int(os.getenv("MINIAPP_INITDATA_MAX_AGE_SECONDS", "86400") or "86400")
+    user = verify_telegram_init_data(_init_data(environ), bot_token=TELEGRAM_TOKEN, max_age_seconds=max_age)
+    return api.request(user.user_id, request_id=request_id, locale=user.language_code)
+
+
+def application(environ, start_response):
+    request_id = environ.get("HTTP_X_REQUEST_ID") or str(uuid4())
+    method = environ.get("REQUEST_METHOD", "GET").upper()
+    path = environ.get("PATH_INFO") or "/"
+    try:
+        if method == "OPTIONS":
+            return _json_response(start_response, 204, {})
+        if path == "/miniapp/health":
+            return _json_response(start_response, 200, {"ok": True, "request_id": request_id, "data": {"status": "ok"}})
+        req = _request(environ, request_id)
+        params = _params(environ)
+        body = _read_body(environ) if method in {"POST", "PATCH", "DELETE"} else {}
+        if method == "GET" and path == "/miniapp/api/bootstrap":
+            return _json_response(start_response, 200, api.bootstrap(req, params))
+        if method == "GET" and path == "/miniapp/api/workspaces":
+            return _json_response(start_response, 200, api.workspaces(req))
+        if method == "GET" and path == "/miniapp/api/overview":
+            return _json_response(start_response, 200, api.overview(req, params))
+        if method == "GET" and path == "/miniapp/api/operations":
+            return _json_response(start_response, 200, api.operations(req, params))
+        if method == "POST" and path == "/miniapp/api/operations":
+            return _json_response(start_response, 200, api.create_operation(req, body))
+        if path.startswith("/miniapp/api/operations/"):
+            op_id = int(path.rsplit("/", 1)[-1])
+            if method == "GET":
+                return _json_response(start_response, 200, api.operation_detail(req, op_id))
+            if method == "PATCH":
+                return _json_response(start_response, 200, api.update_operation(req, op_id, body))
+            if method == "DELETE":
+                return _json_response(start_response, 200, api.delete_operation(req, op_id, body))
+        if method == "GET" and path == "/miniapp/api/analytics":
+            return _json_response(start_response, 200, api.analytics(req, params))
+        if method == "GET" and path == "/miniapp/api/plans":
+            return _json_response(start_response, 200, api.plans(req, params))
+        if method == "GET" and path == "/miniapp/api/profile":
+            return _json_response(start_response, 200, api.profile(req))
+        if method == "POST" and path == "/miniapp/api/profile/theme":
+            return _json_response(start_response, 200, api.set_theme(req, body))
+        if method == "POST" and path == "/miniapp/api/analytics/event":
+            return _json_response(start_response, 200, api.track_ui_event(req, body))
+        raise MiniAppError(404, "not_found", "Endpoint was not found.")
+    except MiniAppAuthError:
+        exc = MiniAppError(401, "unauthorized", "Telegram authorization failed.")
+        return _json_response(start_response, exc.status, error_envelope(exc, request_id=request_id))
+    except MiniAppError as exc:
+        return _json_response(start_response, exc.status, error_envelope(exc, request_id=request_id))
+    except Exception:
+        exc = MiniAppError(500, "internal_error", "Request failed.")
+        return _json_response(start_response, exc.status, error_envelope(exc, request_id=request_id))

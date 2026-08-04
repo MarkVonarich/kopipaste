@@ -182,5 +182,35 @@ Run after deployment and restart.
 - Confirm new operation, category-limit and budget values with cents persist as `NUMERIC(18,2)`.
 - Do not print API keys, bot token, PostHog token, HMAC secret or database URL during verification.
 
+## Telegram Mini App PR 1
+
+- Open the Mini App from Telegram and confirm it reaches Home first.
+- Confirm the bottom navigation has exactly Operations, Analytics, Home, Plans and Profile.
+- Confirm Home is the centered tab.
+- Confirm every visible bottom tab opens a handled screen.
+- Confirm Telegram Back closes an operation sheet or detail sheet before leaving the Mini App.
+- Confirm Telegram light and dark themes apply without horizontal scrolling.
+- Confirm choosing Telegram, light and dark theme in Profile persists after reload.
+- Confirm bootstrap shows the authenticated user's currency and timezone.
+- Confirm workspace switcher includes accessible personal and group workspaces.
+- Confirm `Все пространства` is read-only.
+- Confirm creating an operation is disabled or rejected in `Все пространства`.
+- Confirm a writable concrete workspace allows a new expense.
+- Confirm a writable concrete workspace allows a new income.
+- Confirm Decimal amount `216,34` or `216.34` is saved and rendered as `216,34`.
+- Confirm double tapping save creates one operation through idempotency.
+- Confirm the Operations tab lists the new operation.
+- Confirm operation detail opens from the list.
+- Confirm editing amount, category, description and date updates the same operation.
+- Confirm deleting the operation removes it from the list.
+- Confirm a user cannot view a workspace they do not belong to.
+- Confirm a user cannot edit or delete an operation from a foreign workspace.
+- Confirm mixed-currency totals are shown separately, not added together.
+- Confirm Analytics opens as a read-only summary.
+- Confirm Plans opens as a read-only goals/limits summary.
+- Confirm Profile opens without exposing secrets or identifiers beyond the signed-in user context.
+- Confirm product events are present for Mini App open, tab, workspace, period and transaction actions.
+- Confirm product events do not include raw financial text, descriptions, Telegram initData, tokens or database identifiers.
+
 - Existing personal records remain visible.
 - Current OCR, voice, history, reports, budgets, limits, reminders, and Excel export still work.
