@@ -216,6 +216,7 @@ Run after deployment and restart.
 - Confirm delete requires a confirmation dialog and cancellation does not delete.
 - Confirm closing dirty create/edit sheets asks before discarding changes.
 - Confirm retry after a simulated timeout reuses the same idempotency key and does not duplicate the operation.
+- Confirm immediate double submit either replays the completed operation or returns `idempotency_pending`, and does not emit duplicate post-commit effects.
 - Confirm `/app` shows the Mini App button only when `MINIAPP_PUBLIC_URL` is configured.
 - Confirm `./scripts/miniapp_production_like_smoke.sh --dry-run` passes in staging before production wiring.
 

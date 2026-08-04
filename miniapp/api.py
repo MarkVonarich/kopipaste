@@ -18,7 +18,13 @@ from db.queries import get_user_currency, get_user_locale
 from services.categories import list_managed_categories, normalized_category_key
 from services.goal_planning import progress_percent
 from services.goals import list_goals
-from services.operations import RecordedOperation, delete_financial_operation, record_financial_operation, update_financial_operation
+from services.operations import (
+    RecordedOperation,
+    delete_financial_operation,
+    insert_financial_operation_tx,
+    record_financial_operation_post_commit,
+    update_financial_operation,
+)
 from services.product_events import ProductEvent, track_product_event
 from services.user_time import user_local_date, user_timezone_name
 from services.workspaces import WRITE_ROLES, WorkspaceContext, can_edit_operation, list_accessible_workspaces
@@ -33,6 +39,8 @@ ALLOWED_THEMES = {"telegram", "light", "dark"}
 OP_TYPES = {"expense": "Расходы", "income": "Доходы", "Расходы": "Расходы", "Доходы": "Доходы"}
 WRITE_RATE_WINDOW_SECONDS = 60
 WRITE_RATE_LIMIT = 30
+WRITE_RATE_RETENTION_BUCKETS = 24 * 60
+IDEMPOTENCY_LEASE_SECONDS = 5 * 60
 
 
 class MiniAppError(Exception):
@@ -123,6 +131,23 @@ class MiniAppAPI:
             conn.close()
         if count > WRITE_RATE_LIMIT:
             raise MiniAppError(429, "rate_limited", "Too many write requests.")
+        if bucket % 10 == 0:
+            self._cleanup_write_rate(bucket)
+
+    def _cleanup_write_rate(self, current_bucket: int) -> None:
+        cutoff = int(current_bucket) - WRITE_RATE_RETENTION_BUCKETS
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM public.miniapp_rate_limits WHERE bucket < %s", (cutoff,))
+            conn.commit()
+        except errors.UndefinedTable:
+            conn.rollback()
+        except Exception as exc:
+            conn.rollback()
+            log.info("miniapp_rate_limit_cleanup_failed reason=%s", type(exc).__name__)
+        finally:
+            conn.close()
 
     def _workspace_rows(self, user_id: int) -> list[dict]:
         rows = list_accessible_workspaces(user_id)
@@ -368,6 +393,23 @@ class MiniAppAPI:
             "workspace_name": row[10] if include_workspace else None,
         }
 
+    def _operation_dict_from_recorded(self, recorded: RecordedOperation, *, workspace_name: str | None = None) -> dict:
+        amount = to_decimal_money(recorded.amount)
+        return {
+            "id": recorded.operation_id,
+            "op_date": recorded.operation_date,
+            "type": recorded.type,
+            "category": recorded.category,
+            "amount": amount,
+            "amount_text": format_money(amount, recorded.currency),
+            "currency": recorded.currency,
+            "description": recorded.comment,
+            "workspace_id": recorded.workspace_id,
+            "actor_user_id": str(recorded.actor_user_id),
+            "created_at": None,
+            "workspace_name": workspace_name,
+        }
+
     def operation_detail(self, req: MiniAppRequest, operation_id: int) -> dict:
         row = self._operation_row(req, operation_id)
         return success(self._operation_dict(row), request_id=req.request_id)
@@ -411,34 +453,86 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_operation", "Description and category are required.")
         category = self._validate_category(req, ctx.workspace_id, op_type, category)
         request_hash = self._request_hash(body)
-        claim = self._idempotency_claim(req.user_id, idem, request_hash)
-        if claim["status"] == "completed":
-            return success(claim["response"], request_id=req.request_id)
-        if claim["status"] != "claimed":
-            raise MiniAppError(claim["http_status"], claim["status"], claim["message"])
-        try:
-            recorded = record_financial_operation(
-                chat_id=ctx.chat_id,
-                actor_user_id=req.user_id,
-                op_date=op_date,
-                op_type=op_type,
-                category=category,
-                amount=amount,
-                comment=description,
-                source="miniapp",
-                chat_type="group" if ctx.kind == "group" else "private",
-                workspace=ctx,
-                raw_text=None,
-                metadata={"source": "miniapp"},
-            )
-            operation = self._operation_dict(self._operation_row(req, recorded.operation_id)) if recorded.operation_id else recorded.to_dict()
-            payload = {"operation": operation}
-            self._idempotency_complete(req.user_id, idem, request_hash, payload, operation_id=recorded.operation_id)
-        except Exception:
-            self._idempotency_fail(req.user_id, idem, request_hash)
-            raise
-        self._track(req, "mini_app_transaction_created", workspace_id=ctx.workspace_id, properties={"operation_type": op_type})
+        payload, recorded, created = self._create_operation_atomically(
+            req=req,
+            ctx=ctx,
+            idempotency_key=idem,
+            request_hash=request_hash,
+            op_date=op_date,
+            op_type=op_type,
+            category=category,
+            amount=amount,
+            description=description,
+        )
+        if created and recorded:
+            try:
+                record_financial_operation_post_commit(
+                    recorded,
+                    workspace_kind=ctx.kind,
+                    metadata={"source": "miniapp"},
+                )
+            except Exception as exc:
+                log.info("miniapp_operation_post_commit_failed operation_id=%s reason=%s", recorded.operation_id, type(exc).__name__)
+            self._track(req, "mini_app_transaction_created", workspace_id=ctx.workspace_id, properties={"operation_type": op_type})
         return success(payload, request_id=req.request_id)
+
+    def _create_operation_atomically(
+        self,
+        *,
+        req: MiniAppRequest,
+        ctx: WorkspaceContext,
+        idempotency_key: str,
+        request_hash: str,
+        op_date: date,
+        op_type: str,
+        category: str,
+        amount: Decimal,
+        description: str,
+    ) -> tuple[dict, RecordedOperation | None, bool]:
+        conn = get_conn()
+        recorded: RecordedOperation | None = None
+        try:
+            with conn.cursor() as cur:
+                claim = self._claim_idempotency_tx(cur, req.user_id, idempotency_key, request_hash)
+                status = claim["status"]
+                if status == "completed":
+                    conn.commit()
+                    return claim["response"], None, False
+                if status == "reconcile_completed":
+                    payload = self._reconstruct_operation_payload_tx(cur, req, ctx, claim["operation_id"])
+                    self._complete_idempotency_tx(cur, req.user_id, idempotency_key, request_hash, payload, operation_id=claim["operation_id"])
+                    conn.commit()
+                    return payload, None, False
+                if status != "claimed":
+                    conn.rollback()
+                    raise MiniAppError(claim["http_status"], claim["status"], claim["message"])
+
+                recorded = insert_financial_operation_tx(
+                    cur,
+                    chat_id=ctx.chat_id,
+                    actor_user_id=req.user_id,
+                    op_date=op_date,
+                    op_type=op_type,
+                    category=category,
+                    amount=amount,
+                    comment=description,
+                    source="miniapp",
+                    chat_type="group" if ctx.kind == "group" else "private",
+                    workspace=ctx,
+                    raw_text=None,
+                )
+                payload = {"operation": self._operation_dict_from_recorded(recorded, workspace_name=ctx.name)}
+                self._complete_idempotency_tx(cur, req.user_id, idempotency_key, request_hash, payload, operation_id=recorded.operation_id)
+            conn.commit()
+            return payload, recorded, True
+        except errors.UndefinedTable as exc:
+            conn.rollback()
+            raise MiniAppError(503, "miniapp_not_configured", "Mini App storage is not configured.") from exc
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def update_operation(self, req: MiniAppRequest, operation_id: int, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
@@ -537,7 +631,26 @@ class MiniAppAPI:
             for goal in list_goals(req.user_id, workspace_id, statuses=("active", "achieved", "paused"), limit=20)
         ]
         limits = []
-        rows = pg_fetchall("SELECT period, category, amount, currency FROM public.category_limits WHERE user_id=%s ORDER BY period, category", (req.user_id,))
+        if workspace_id is None:
+            rows = pg_fetchall(
+                """
+                SELECT period, category, amount, currency
+                  FROM public.category_limits
+                 WHERE user_id=%s AND workspace_id IS NULL
+                 ORDER BY period, category
+                """,
+                (req.user_id,),
+            )
+        else:
+            rows = pg_fetchall(
+                """
+                SELECT period, category, amount, currency
+                  FROM public.category_limits
+                 WHERE user_id=%s AND workspace_id=%s
+                 ORDER BY period, category
+                """,
+                (req.user_id, workspace_id),
+            )
         for period, category, amount_raw, currency in rows:
             amount = to_decimal_money(amount_raw)
             spent = self._limit_spent(req.user_id, workspace_id, period, category)
@@ -646,102 +759,99 @@ class MiniAppAPI:
     def _request_hash(self, request_body: dict[str, Any]) -> str:
         return hashlib.sha256(json.dumps(serialize(request_body), sort_keys=True).encode("utf-8")).hexdigest()
 
-    def _idempotency_claim(self, user_id: int, key: str, request_hash: str) -> dict:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO public.miniapp_idempotency_keys
-                      (user_id, idempotency_key, request_hash, status, updated_at)
-                    VALUES (%s, %s, %s, 'pending', now())
-                    ON CONFLICT (user_id, idempotency_key) DO NOTHING
-                    RETURNING status
-                    """,
-                    (user_id, key, request_hash),
-                )
-                inserted = cur.fetchone()
-                if inserted:
-                    conn.commit()
-                    return {"status": "claimed"}
-                cur.execute(
-                    """
-                    SELECT request_hash, status, response_json
-                      FROM public.miniapp_idempotency_keys
-                     WHERE user_id=%s AND idempotency_key=%s
-                     LIMIT 1
-                    """,
-                    (user_id, key),
-                )
-                row = cur.fetchone()
-            conn.commit()
-        except errors.UndefinedTable as exc:
-            conn.rollback()
-            raise MiniAppError(503, "miniapp_not_configured", "Mini App storage is not configured.") from exc
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    def _claim_idempotency_tx(self, cur, user_id: int, key: str, request_hash: str) -> dict:
+        cur.execute(
+            """
+            INSERT INTO public.miniapp_idempotency_keys
+              (user_id, idempotency_key, request_hash, status, lease_expires_at, attempt_count, updated_at)
+            VALUES (%s, %s, %s, 'pending', now() + (%s || ' seconds')::interval, 1, now())
+            ON CONFLICT (user_id, idempotency_key) DO NOTHING
+            RETURNING status
+            """,
+            (user_id, key, request_hash, IDEMPOTENCY_LEASE_SECONDS),
+        )
+        if cur.fetchone():
+            return {"status": "claimed"}
+
+        cur.execute(
+            """
+            SELECT request_hash, status, response_json, operation_id,
+                   lease_expires_at, lease_expires_at IS NULL OR lease_expires_at <= now()
+              FROM public.miniapp_idempotency_keys
+             WHERE user_id=%s AND idempotency_key=%s
+             FOR UPDATE
+            """,
+            (user_id, key),
+        )
+        row = cur.fetchone()
         if not row:
             raise MiniAppError(503, "idempotency_unavailable", "Could not verify request status.")
-        existing_hash, status, response = row
+        existing_hash, status, response, operation_id, _lease_expires_at, lease_expired = row
         if existing_hash != request_hash:
             return {"status": "idempotency_conflict", "http_status": 409, "message": "This idempotency key was used for a different request."}
         if status == "completed":
-            return {"status": "completed", "response": response or {}}
-        if status == "failed":
-            return {"status": "idempotency_failed", "http_status": 503, "message": "Previous request failed. Open the form again and retry."}
-        return {"status": "idempotency_pending", "http_status": 409, "message": "Request is already being processed."}
+            if response:
+                return {"status": "completed", "response": response}
+            if operation_id is not None:
+                return {"status": "reconcile_completed", "operation_id": int(operation_id)}
+            return {"status": "completed", "response": {}}
+        if status == "pending" and operation_id is not None:
+            return {"status": "reconcile_completed", "operation_id": int(operation_id)}
+        if status == "pending" and not lease_expired:
+            return {"status": "idempotency_pending", "http_status": 409, "message": "Request is already being processed."}
 
-    def _idempotency_complete(self, user_id: int, key: str, request_hash: str, response: dict, *, operation_id: int | None) -> None:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE public.miniapp_idempotency_keys
-                       SET operation_id=%s,
-                           status='completed',
-                           response_json=%s,
-                           updated_at=now()
-                     WHERE user_id=%s
-                       AND idempotency_key=%s
-                       AND request_hash=%s
-                       AND status='pending'
-                    """,
-                    (operation_id, Json(serialize(response)), user_id, key, request_hash),
-                )
-                if cur.rowcount != 1:
-                    raise MiniAppError(503, "idempotency_unavailable", "Could not persist request status.")
-            conn.commit()
-        except errors.UndefinedTable:
-            conn.rollback()
-            raise MiniAppError(503, "miniapp_not_configured", "Mini App storage is not configured.")
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        cur.execute(
+            """
+            UPDATE public.miniapp_idempotency_keys
+               SET status='pending',
+                   lease_expires_at=now() + (%s || ' seconds')::interval,
+                   attempt_count=COALESCE(attempt_count, 0) + 1,
+                   last_error_code=NULL,
+                   updated_at=now()
+             WHERE user_id=%s AND idempotency_key=%s AND request_hash=%s
+            """,
+            (IDEMPOTENCY_LEASE_SECONDS, user_id, key, request_hash),
+        )
+        return {"status": "claimed"}
 
-    def _idempotency_fail(self, user_id: int, key: str, request_hash: str) -> None:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE public.miniapp_idempotency_keys
-                       SET status='failed', updated_at=now()
-                     WHERE user_id=%s
-                       AND idempotency_key=%s
-                       AND request_hash=%s
-                       AND status='pending'
-                    """,
-                    (user_id, key, request_hash),
-                )
-            conn.commit()
-        except Exception as exc:
-            conn.rollback()
-            log.info("miniapp_idempotency_fail_mark_failed user=%s reason=%s", user_id, type(exc).__name__)
-        finally:
-            conn.close()
+    def _complete_idempotency_tx(self, cur, user_id: int, key: str, request_hash: str, response: dict, *, operation_id: int | None) -> None:
+        cur.execute(
+            """
+            UPDATE public.miniapp_idempotency_keys
+               SET operation_id=%s,
+                   status='completed',
+                   response_json=%s,
+                   lease_expires_at=NULL,
+                   last_error_code=NULL,
+                   updated_at=now()
+             WHERE user_id=%s
+               AND idempotency_key=%s
+               AND request_hash=%s
+               AND status='pending'
+            """,
+            (operation_id, Json(serialize(response)), user_id, key, request_hash),
+        )
+        if cur.rowcount != 1:
+            raise MiniAppError(503, "idempotency_unavailable", "Could not persist request status.")
+
+    def _reconstruct_operation_payload_tx(self, cur, req: MiniAppRequest, ctx: WorkspaceContext, operation_id: int | None) -> dict:
+        if operation_id is None:
+            return {}
+        cur.execute(
+            """
+            SELECT o.id, o.op_date, o.type, o.category, o.amount, COALESCE(o.currency, %s),
+                   COALESCE(o.comment,''), o.workspace_id, o.actor_user_id, o.created_at,
+                   COALESCE(w.name, 'Личное')
+              FROM public.operations o
+              LEFT JOIN public.workspaces w ON w.id=o.workspace_id
+             WHERE o.id=%s
+               AND o.workspace_id IS NOT DISTINCT FROM %s
+               AND (o.workspace_id IS NOT NULL OR o.user_id=%s)
+             LIMIT 1
+            """,
+            (get_user_currency(req.user_id), int(operation_id), ctx.workspace_id, req.user_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise MiniAppError(503, "idempotency_unavailable", "Could not restore request status.")
+        return {"operation": self._operation_dict(row)}

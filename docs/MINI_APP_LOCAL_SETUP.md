@@ -50,4 +50,4 @@ The frontend proxies `/miniapp/api` and `/miniapp/health` to `http://127.0.0.1:8
 
 The Mini App requires signed Telegram WebApp `initData`. For manual browser testing, use a staging bot and open the Vite URL from Telegram, or inject a locally generated signed fixture only in a development harness. Do not disable signature verification in application code.
 
-Create-form retry behavior: the frontend generates one idempotency key when the form opens and reuses it until success or cancellation. Keep the same browser session open when testing retry after a simulated timeout.
+Create-form retry behavior: the frontend generates one idempotency key when the form opens and reuses it until success or cancellation. Keep the same browser session open when testing retry after a simulated timeout. A fast double submit should receive the original completed response or `idempotency_pending`; it must not create a second operation or duplicate post-commit hooks.

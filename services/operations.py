@@ -186,6 +186,100 @@ def _record_activity_safely(*, actor_user_id: int, workspace_id: int | None, ope
         )
 
 
+def insert_financial_operation_tx(
+    cur,
+    *,
+    chat_id: int,
+    actor_user_id: int,
+    op_date: date | datetime,
+    op_type: str,
+    category: str,
+    amount: Decimal | int | str,
+    comment: str = "",
+    source: OperationSource = "text",
+    chat_type: str = "private",
+    workspace: WorkspaceContext,
+    raw_text: str | None = None,
+) -> RecordedOperation:
+    if not can_add_operation(workspace):
+        track_security_event(SecurityEvent(
+            event_name="permission_denied",
+            user_id=actor_user_id,
+            workspace_id=workspace.workspace_id,
+            chat_type=chat_type,
+            rule_key="operation_create",
+            action_taken="denied",
+            metadata={"handler": "insert_financial_operation_tx"},
+        ))
+        raise PermissionError("workspace is not configured or actor cannot add operations")
+
+    dt = op_date.date() if isinstance(op_date, datetime) else op_date
+    amount_dec = to_decimal_money(amount, positive=True)
+    compatibility_user_id = actor_user_id if chat_type in {"group", "supergroup"} else chat_id
+    currency = get_user_currency(compatibility_user_id)
+    iso = dt.isocalendar()
+    week_start = dt.fromordinal(dt.toordinal() - (dt.isoweekday() - 1))
+
+    cur.execute(
+        """
+        INSERT INTO public.operations
+          (chat_id, user_id, op_date, type, category, amount, comment,
+           week_start, iso_year, iso_week, weekday,
+           workspace_id, actor_user_id, source, currency, raw_text)
+        VALUES
+          (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id
+        """,
+        (
+            chat_id, compatibility_user_id, dt, op_type, category, amount_dec, comment,
+            week_start, int(iso.year), int(iso.week), int(dt.isoweekday()),
+            workspace.workspace_id, actor_user_id, source, currency, raw_text,
+        ),
+    )
+    operation_id = int(cur.fetchone()[0])
+    return RecordedOperation(
+        operation_id=operation_id,
+        workspace_id=workspace.workspace_id,
+        actor_user_id=actor_user_id,
+        user_id=compatibility_user_id,
+        chat_id=chat_id,
+        amount=amount_dec,
+        currency=currency,
+        type=op_type,
+        category=category,
+        operation_date=dt,
+        source=source,
+        comment=comment,
+    )
+
+
+def record_financial_operation_post_commit(
+    recorded: RecordedOperation,
+    *,
+    workspace_kind: str,
+    metadata: dict | None = None,
+) -> None:
+    _record_activity_safely(
+        actor_user_id=recorded.actor_user_id,
+        workspace_id=recorded.workspace_id,
+        operation_id=recorded.operation_id,
+        source=recorded.source,
+        metadata=metadata or {"chat_id": recorded.chat_id},
+    )
+    track_product_event(ProductEvent(
+        event_name="operation_created",
+        user_id=recorded.actor_user_id,
+        workspace_id=recorded.workspace_id,
+        workspace_kind=workspace_kind,
+        source=recorded.source,
+        currency=recorded.currency,
+        status="success",
+        entity_type="operation",
+        entity_id=recorded.operation_id,
+        properties={"operation_type": recorded.type, "category": recorded.category},
+    ))
+
+
 def commit_operation_draft(
     *,
     draft_id: str,

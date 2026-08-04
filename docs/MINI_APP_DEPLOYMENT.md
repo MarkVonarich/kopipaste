@@ -9,6 +9,7 @@ Production command, when approved:
 ```bash
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_016_miniapp_foundation.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_017_miniapp_acceptance_hardening.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_018_miniapp_transactional_idempotency.sql
 ```
 
 Rollback for the new Mini App tables only:
@@ -19,7 +20,7 @@ DROP TABLE IF EXISTS public.miniapp_user_preferences;
 DROP TABLE IF EXISTS public.miniapp_rate_limits;
 ```
 
-The operation indexes created by the migration are additive and can be dropped separately if a database rollback plan requires it.
+The operation, idempotency lease and rate-limit cleanup indexes created by the migrations are additive and can be dropped separately if a database rollback plan requires it.
 
 ## Service Integration
 
