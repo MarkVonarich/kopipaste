@@ -24,3 +24,17 @@ export function formatMoneyString(value: string | number, currency = 'RUB'): str
   const symbol = CURRENCY_SYMBOLS[currency.toUpperCase()] ?? currency.toUpperCase();
   return `${negative ? '-' : ''}${grouped}${fraction} ${symbol}`.trim();
 }
+
+export function subtractMoneyStrings(income: string | number, expense: string | number): string {
+  const toCents = (value: string | number) => {
+    const normalized = normalizeMoneyText(value);
+    const negative = normalized.startsWith('-');
+    const [whole, fraction] = (negative ? normalized.slice(1) : normalized).split('.');
+    const cents = Number(whole) * 100 + Number(fraction);
+    return negative ? -cents : cents;
+  };
+  const cents = toCents(income) - toCents(expense);
+  const sign = cents < 0 ? '-' : '';
+  const abs = Math.abs(cents);
+  return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
+}

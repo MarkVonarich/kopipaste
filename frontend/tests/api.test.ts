@@ -30,12 +30,15 @@ describe('mini app api client', () => {
       amount: '216.34',
       category: 'Food',
       description: 'Lunch',
-      op_date: '2026-08-04'
+      op_date: '2026-08-04',
+      idempotency_key: 'key-1'
     });
 
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     const [, init] = call;
     expect((init.headers as Headers).get('Authorization')).toContain('tma query_id=1');
-    expect(JSON.parse(init.body as string)).not.toHaveProperty('user_id');
+    const body = JSON.parse(init.body as string);
+    expect(body).not.toHaveProperty('user_id');
+    expect(body.idempotency_key).toBe('key-1');
   });
 });

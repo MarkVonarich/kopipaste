@@ -517,3 +517,169 @@ def record_financial_operation(
         source=source,
         comment=comment,
     )
+
+
+def update_financial_operation(
+    *,
+    actor_user_id: int,
+    operation_id: int,
+    amount: Decimal | int | str | None = None,
+    category: str | None = None,
+    op_date: date | datetime | None = None,
+    op_type: str | None = None,
+    comment: str | None = None,
+    workspace_id: int | None = None,
+    require_user_id: bool = True,
+    source: OperationSource = "text",
+    track_event: bool = True,
+) -> dict | None:
+    sets: list[str] = []
+    vals: list = []
+    changed_fields: list[str] = []
+    if amount is not None:
+        sets.append("amount=%s")
+        vals.append(to_decimal_money(amount, positive=True))
+        changed_fields.append("amount")
+    if category is not None:
+        sets.append("category=%s")
+        vals.append(str(category).strip()[:64])
+        changed_fields.append("category")
+    if op_date is not None:
+        sets.append("op_date=%s")
+        vals.append(op_date.date() if isinstance(op_date, datetime) else op_date)
+        changed_fields.append("op_date")
+    if op_type is not None:
+        sets.append("type=%s")
+        vals.append(op_type)
+        changed_fields.append("op_type")
+    if comment is not None:
+        sets.append("comment=%s")
+        vals.append(str(comment)[:200])
+        changed_fields.append("comment")
+    if not sets:
+        return None
+
+    filters = ["id=%s"]
+    filter_vals: list = [int(operation_id)]
+    if require_user_id:
+        filters.append("user_id=%s")
+        filter_vals.append(int(actor_user_id))
+    if workspace_id is not None:
+        filters.append("workspace_id=%s")
+        filter_vals.append(int(workspace_id))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE public.operations
+                   SET {', '.join(sets)}, updated_at=now()
+                 WHERE {' AND '.join(filters)}
+                 RETURNING id, op_date, type, category, amount, COALESCE(currency,%s), COALESCE(comment,''), workspace_id, actor_user_id, created_at
+                """,
+                (*vals, *filter_vals, get_user_currency(actor_user_id)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    if not row:
+        return None
+    out = {
+        "id": int(row[0]),
+        "op_date": row[1],
+        "type": row[2],
+        "category": row[3],
+        "amount": to_decimal_money(row[4]),
+        "currency": row[5],
+        "comment": row[6],
+        "workspace_id": row[7],
+        "actor_user_id": row[8],
+        "created_at": row[9],
+    }
+    if track_event:
+        track_product_event(ProductEvent(
+            event_name="operation_edited",
+            user_id=actor_user_id,
+            workspace_id=out["workspace_id"],
+            source=source,
+            status="success",
+            entity_type="operation",
+            entity_id=operation_id,
+            properties={"changed_fields": changed_fields},
+        ))
+    return out
+
+
+def delete_financial_operation(
+    *,
+    actor_user_id: int,
+    operation_id: int | None = None,
+    chat_id: int | None = None,
+    workspace_id: int | None = None,
+    require_user_id: bool = True,
+    source: OperationSource = "text",
+    track_event: bool = True,
+) -> dict | None:
+    filters: list[str] = []
+    vals: list = []
+    if operation_id is not None:
+        filters.append("id=%s")
+        vals.append(int(operation_id))
+    elif chat_id is not None:
+        filters.append("id = (SELECT id FROM public.operations WHERE chat_id=%s ORDER BY id DESC LIMIT 1)")
+        vals.append(int(chat_id))
+    else:
+        raise ValueError("operation_id_or_chat_id_required")
+    if require_user_id:
+        filters.append("user_id=%s")
+        vals.append(int(actor_user_id))
+    if workspace_id is not None:
+        filters.append("workspace_id=%s")
+        vals.append(int(workspace_id))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                DELETE FROM public.operations
+                 WHERE {' AND '.join(filters)}
+                 RETURNING id, op_date, type, category, amount, COALESCE(currency,%s), COALESCE(comment,''), workspace_id, actor_user_id, created_at
+                """,
+                (*vals, get_user_currency(actor_user_id)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    if not row:
+        return None
+    out = {
+        "id": int(row[0]),
+        "op_date": row[1],
+        "type": row[2],
+        "category": row[3],
+        "amount": to_decimal_money(row[4]),
+        "currency": row[5],
+        "comment": row[6],
+        "workspace_id": row[7],
+        "actor_user_id": row[8],
+        "created_at": row[9],
+    }
+    if track_event:
+        track_product_event(ProductEvent(
+            event_name="operation_deleted",
+            user_id=actor_user_id,
+            workspace_id=out["workspace_id"],
+            source=source,
+            status="success",
+            entity_type="operation",
+            entity_id=out["id"],
+        ))
+    return out

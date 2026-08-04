@@ -75,6 +75,8 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.bootstrap(req, params))
         if method == "GET" and path == "/miniapp/api/workspaces":
             return _json_response(start_response, 200, api.workspaces(req))
+        if method == "GET" and path == "/miniapp/api/categories":
+            return _json_response(start_response, 200, api.categories(req, params))
         if method == "GET" and path == "/miniapp/api/overview":
             return _json_response(start_response, 200, api.overview(req, params))
         if method == "GET" and path == "/miniapp/api/operations":

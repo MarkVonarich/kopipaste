@@ -158,15 +158,15 @@ def insert_operation(chat_id: int, op_date, typ: str, category: str, amount: Dec
         conn.close()
 
 def delete_last_operation(chat_id: int):
-    pg_exec("""
-        DELETE FROM public.operations
-         WHERE id = (
-           SELECT id FROM public.operations
-            WHERE chat_id=%s
-            ORDER BY id DESC
-            LIMIT 1
-         )
-    """, (chat_id,))
+    from services.operations import delete_financial_operation
+
+    delete_financial_operation(
+        actor_user_id=chat_id,
+        chat_id=chat_id,
+        require_user_id=False,
+        source="text",
+        track_event=False,
+    )
 
 def sum_amount(chat_id: int, typ: str, start_date, end_date) -> Decimal:
     rows = pg_fetchall("""
@@ -388,90 +388,35 @@ def update_last_operation_category(user_id: int, new_category: str) -> bool:
 
 
 def update_last_operation_fields(user_id: int, *, amount: Decimal | int | str | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM operations WHERE user_id=%s ORDER BY id DESC LIMIT 1", (user_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            op_id = row[0]
-            sets = []
-            vals = []
-            if amount is not None:
-                sets.append("amount=%s"); vals.append(to_decimal_money(amount, positive=True))
-            if category is not None:
-                sets.append("category=%s"); vals.append(category)
-            if op_date is not None:
-                sets.append("op_date=%s"); vals.append(op_date)
-            if op_type is not None:
-                sets.append("type=%s"); vals.append(op_type)
-            if comment is not None:
-                sets.append("comment=%s"); vals.append(comment)
-            if sets:
-                vals.append(op_id)
-                cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
-            cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (op_id,))
-            r = cur.fetchone()
-            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": to_decimal_money(r[4]), "comment": r[5]}
-        conn.commit()
-        track_product_event(ProductEvent(
-            event_name="operation_edited",
-            user_id=user_id,
-            status="success",
-            entity_type="operation",
-            entity_id=op_id,
-            properties={"changed_fields": [name for name, val in {"amount": amount, "category": category, "op_date": op_date, "op_type": op_type, "comment": comment}.items() if val is not None]},
-        ))
-        return out
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    rows = pg_fetchall("SELECT id FROM operations WHERE user_id=%s ORDER BY id DESC LIMIT 1", (user_id,))
+    if not rows:
+        return None
+    return update_operation_fields_by_id(
+        user_id,
+        int(rows[0][0]),
+        amount=amount,
+        category=category,
+        op_date=op_date,
+        op_type=op_type,
+        comment=comment,
+    )
 
 
 def update_operation_fields_by_id(user_id: int, operation_id: int, *, amount: Decimal | int | str | None = None, category: str | None = None, op_date=None, op_type: str | None = None, comment: str | None = None) -> dict | None:
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM operations WHERE user_id=%s AND id=%s LIMIT 1", (user_id, operation_id))
-            if not cur.fetchone():
-                return None
-            sets = []
-            vals = []
-            if amount is not None:
-                sets.append("amount=%s"); vals.append(to_decimal_money(amount, positive=True))
-            if category is not None:
-                sets.append("category=%s"); vals.append(category)
-            if op_date is not None:
-                sets.append("op_date=%s"); vals.append(op_date)
-            if op_type is not None:
-                sets.append("type=%s"); vals.append(op_type)
-            if comment is not None:
-                sets.append("comment=%s"); vals.append(comment)
-            if sets:
-                sets.append("updated_at=now()")
-                vals.append(operation_id)
-                cur.execute(f"UPDATE operations SET {', '.join(sets)} WHERE id=%s", tuple(vals))
-            cur.execute("SELECT id, op_date, type, category, amount, COALESCE(comment,'') FROM operations WHERE id=%s", (operation_id,))
-            r = cur.fetchone()
-            out = {"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": to_decimal_money(r[4]), "comment": r[5]}
-        conn.commit()
-        track_product_event(ProductEvent(
-            event_name="operation_edited",
-            user_id=user_id,
-            status="success",
-            entity_type="operation",
-            entity_id=operation_id,
-            properties={"changed_fields": [name for name, val in {"amount": amount, "category": category, "op_date": op_date, "op_type": op_type, "comment": comment}.items() if val is not None]},
-        ))
-        return out
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    from services.operations import update_financial_operation
+
+    return update_financial_operation(
+        actor_user_id=user_id,
+        operation_id=operation_id,
+        amount=amount,
+        category=category,
+        op_date=op_date,
+        op_type=op_type,
+        comment=comment,
+        require_user_id=True,
+        source="text",
+        track_event=True,
+    )
 
 
 def reminders_list(user_id: int, active_only: bool = True):

@@ -19,6 +19,7 @@ from settings import TELEGRAM_TOKEN
 
 from routers.commands import (
     cmd_start, cmd_settings, cmd_help, cmd_budget, cmd_export, cmd_about, cmd_limits,
+    cmd_app,
     cmd_delete_my_data,
     cmd_mlstats, cmd_mltrain, on_startup,
     cmd_admin_weekly_report_preview, cmd_admin_monthly_report_preview, cmd_admin_smart_morning_preview,
@@ -74,6 +75,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("app", cmd_app))
     app.add_handler(CommandHandler("delete_my_data", cmd_delete_my_data))
     app.add_handler(CommandHandler("delete", cmd_delete_my_data))
     app.add_handler(CommandHandler("budget", cmd_budget))

@@ -1,0 +1,9 @@
+bind = "127.0.0.1:8080"
+workers = 2
+threads = 4
+timeout = 30
+graceful_timeout = 20
+accesslog = "/var/log/finuchet/miniapp-access.log"
+errorlog = "/var/log/finuchet/miniapp-error.log"
+loglevel = "info"
+wsgi_app = "miniapp.http:application"

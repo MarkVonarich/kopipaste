@@ -1,9 +1,19 @@
 import './styles.css';
-import { api, type OperationPayload, type OperationsResponse, type Overview } from './api';
+import { api, requestId, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse } from './api';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { getTelegramWebApp, initTelegramShell } from './telegram';
-import { initialState, periodLabel, persistState, pickInitialWorkspace, TAB_ORDER, tabLabel } from './state';
-import type { AppState, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
+import { initialState, persistState, pickInitialWorkspace } from './state';
+import type { AppState, CategoryOption, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
+import { AppShell } from './components/AppShell';
+import { BottomNavigation } from './components/BottomNavigation';
+import { BottomSheet } from './components/BottomSheet';
+import { ConfirmDialog } from './components/ConfirmDialog';
+import { HomeScreen } from './components/HomeScreen';
+import { OperationsScreen } from './components/OperationsScreen';
+import { PlansScreen } from './components/PlansScreen';
+import { ProfileScreen } from './components/ProfileScreen';
+import { LoadingState, ErrorState } from './components/States';
+import { TransactionForm } from './components/TransactionForm';
 
 const appRoot = document.querySelector<HTMLDivElement>('#app');
 if (!appRoot) throw new Error('Missing app root');
@@ -13,9 +23,10 @@ let state: AppState = initialState();
 let overview: Overview | null = null;
 let operations: OperationsResponse | null = null;
 let analytics: { top_expense_categories: Array<{ category: string; total: string; currency: string; count: number }> } | null = null;
-let plans: { goals: unknown[]; limits: unknown[] } | null = null;
-let profile: { theme: ThemeMode; currency: string; timezone: string; version: string } | null = null;
+let plans: PlansResponse | null = null;
+let profile: { theme: ThemeMode; currency: string; timezone: string; version: string; links?: { privacy?: string | null; terms?: string | null } } | null = null;
 let selectedOperation: Operation | null = null;
+let categoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 
 function esc(value: unknown): string {
@@ -50,15 +61,10 @@ function operationAmount(op: Operation): string {
   return op.amount_text || formatMoneyString(op.amount, op.currency);
 }
 
-function operationKind(op: Operation): 'income' | 'expense' {
-  return op.type === 'Доходы' ? 'income' : 'expense';
-}
-
 function moneyFromTotals(type: 'income' | 'expense'): string {
   const totals = overview?.totals_by_currency || {};
   const currencies = Object.keys(totals);
-  if (currencies.length === 0) return formatMoneyString('0.00', state.boot?.user.currency || 'RUB');
-  if (currencies.length === 1) return formatMoneyString(totals[currencies[0]][type], currencies[0]);
+  if (!currencies.length) return formatMoneyString('0.00', state.boot?.user.currency || 'RUB');
   return currencies.map((currency) => formatMoneyString(totals[currency][type], currency)).join(' · ');
 }
 
@@ -73,13 +79,6 @@ function renderTopbar(): string {
     ['custom', 'Период']
   ];
   return `
-    <header class="topbar">
-      <div class="brand">
-        <h1>КопиPaste</h1>
-        <p>${esc(tabLabel(state.tab))} · ${esc(periodLabel(state.period))}</p>
-      </div>
-      <button class="button" data-action="refresh" title="Обновить">↻</button>
-    </header>
     <div class="toolbar">
       <select class="select" data-action="workspace">${workspaceOptions}</select>
       <select class="select" data-action="period">
@@ -96,65 +95,15 @@ function renderTopbar(): string {
 }
 
 function renderNav(): string {
-  const icons: Record<string, string> = { operations: '≡', analytics: '⌁', home: '●', plans: '◇', profile: '☉' };
-  return `
-    <nav class="nav" aria-label="Основная навигация">
-      ${TAB_ORDER.map((tab) => `
-        <button data-tab="${tab}" class="${state.tab === tab ? 'active ' : ''}${tab === 'home' ? 'home-tab' : ''}" aria-label="${esc(tabLabel(tab))}">
-          <span class="nav-icon">${icons[tab]}</span>
-          ${esc(tabLabel(tab))}
-        </button>
-      `).join('')}
-    </nav>
-  `;
-}
-
-function renderOperationsList(items: Operation[], emptyText = 'Операций пока нет.'): string {
-  if (!items.length) return `<div class="empty">${esc(emptyText)}</div>`;
-  return `
-    <div class="operation-list">
-      ${items.map((op) => `
-        <button class="operation-row" data-action="operation-detail" data-id="${op.id}">
-          <span>
-            <span class="operation-title">${esc(op.category || op.description || 'Операция')}</span>
-            <span class="operation-meta">${esc(op.op_date)}${op.workspace_name ? ` · ${esc(op.workspace_name)}` : ''}${op.description ? ` · ${esc(op.description)}` : ''}</span>
-          </span>
-          <span class="operation-amount ${operationKind(op)}">${operationKind(op) === 'income' ? '+' : '-'}${esc(operationAmount(op))}</span>
-        </button>
-      `).join('')}
-    </div>
-  `;
+  return BottomNavigation(state.tab);
 }
 
 function renderHome(): string {
-  return `
-    <section class="screen">
-      <div class="metrics">
-        <div class="metric"><span>Расходы</span><strong>${esc(moneyFromTotals('expense'))}</strong></div>
-        <div class="metric"><span>Доходы</span><strong>${esc(moneyFromTotals('income'))}</strong></div>
-      </div>
-      ${overview?.info ? `<div class="panel">${esc(overview.info.text)}</div>` : ''}
-      <div class="actions">
-        <button class="button primary" data-action="open-add" data-kind="expense" ${canWrite() ? '' : 'disabled'}>− Расход</button>
-        <button class="button" data-action="open-add" data-kind="income" ${canWrite() ? '' : 'disabled'}>+ Доход</button>
-      </div>
-      ${renderOperationsList(overview?.recent_operations || [], 'За период операций нет.')}
-    </section>
-  `;
+  return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite());
 }
 
 function renderOperations(): string {
-  return `
-    <section class="screen">
-      <input class="input" type="search" data-action="search" placeholder="Поиск" value="${esc(state.search)}" />
-      <div class="actions">
-        <button class="button primary" data-action="open-add" data-kind="expense" ${canWrite() ? '' : 'disabled'}>− Расход</button>
-        <button class="button" data-action="open-add" data-kind="income" ${canWrite() ? '' : 'disabled'}>+ Доход</button>
-      </div>
-      ${renderOperationsList(operations?.items || [], 'Список пуст.')}
-      ${operations?.has_more ? '<button class="button" data-action="load-more">Ещё</button>' : ''}
-    </section>
-  `;
+  return OperationsScreen(operations, canWrite(), esc(state.search));
 }
 
 function renderAnalytics(): string {
@@ -174,91 +123,57 @@ function renderAnalytics(): string {
 }
 
 function renderPlans(): string {
-  return `
-    <section class="screen">
-      <div class="panel">
-        <strong>Цели</strong>
-        <p class="caption">${(plans?.goals || []).length} активных записей</p>
-      </div>
-      <div class="panel">
-        <strong>Лимиты категорий</strong>
-        <p class="caption">${(plans?.limits || []).length} настроек</p>
-      </div>
-    </section>
-  `;
+  return PlansScreen(plans);
 }
 
 function renderProfile(): string {
-  return `
-    <section class="screen">
-      <div class="panel detail-grid">
-        <div class="detail-row"><span>Валюта</span><strong>${esc(profile?.currency || state.boot?.user.currency || 'RUB')}</strong></div>
-        <div class="detail-row"><span>Часовой пояс</span><strong>${esc(profile?.timezone || state.boot?.user.timezone || '')}</strong></div>
-        <div class="detail-row"><span>Версия</span><strong>${esc(profile?.version || state.boot?.version || '')}</strong></div>
-      </div>
-      <div class="panel">
-        <strong>Тема</strong>
-        <div class="segmented" data-action="theme">
-          ${(['telegram', 'light', 'dark'] as ThemeMode[]).map((theme) => `<button data-theme="${theme}" class="${state.theme === theme ? 'active' : ''}">${theme === 'telegram' ? 'Telegram' : theme === 'light' ? 'Светлая' : 'Тёмная'}</button>`).join('')}
-        </div>
-      </div>
-    </section>
-  `;
+  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme);
 }
 
 function renderSheet(): string {
+  if (state.confirmDeleteId && selectedOperation) {
+    return ConfirmDialog(state.confirmDeleteId, `${selectedOperation.category} · ${operationAmount(selectedOperation)}`);
+  }
   if (!state.sheet && !selectedOperation) return '';
+  if (state.sheet === 'actions') {
+    return BottomSheet('Добавить операцию', `
+      <div class="form-grid">
+        <button class="button primary" data-action="open-add" data-kind="expense">Расход</button>
+        <button class="button" data-action="open-add" data-kind="income">Доход</button>
+      </div>
+    `);
+  }
   if (selectedOperation) {
     const op = selectedOperation;
-    return `
-      <div class="sheet-backdrop" data-action="close-sheet">
-        <div class="sheet" data-sheet>
-          <h2>${esc(op.category)}</h2>
+    return BottomSheet(esc(op.category), `
           <div class="detail-grid">
             <div class="detail-row"><span>Сумма</span><strong>${esc(operationAmount(op))}</strong></div>
             <div class="detail-row"><span>Тип</span><strong>${esc(op.type)}</strong></div>
             <div class="detail-row"><span>Дата</span><strong>${esc(op.op_date)}</strong></div>
+            <div class="detail-row"><span>Автор</span><strong>${esc(op.actor_user_id || '-')}</strong></div>
+            <div class="detail-row"><span>Пространство</span><strong>${esc(op.workspace_name || 'Личное')}</strong></div>
             <div class="detail-row"><span>Описание</span><strong>${esc(op.description || '-')}</strong></div>
           </div>
-          <form class="form-grid" data-action="edit-operation" data-id="${op.id}">
-            <label>Сумма<input class="input" name="amount" inputmode="decimal" value="${esc(op.amount)}" required /></label>
-            <label>Категория<input class="input" name="category" value="${esc(op.category)}" maxlength="64" required /></label>
-            <label>Описание<textarea class="textarea" name="description" maxlength="200">${esc(op.description || '')}</textarea></label>
-            <label>Дата<input class="input" name="op_date" type="date" value="${esc(op.op_date)}" required /></label>
-            <div class="actions">
-              <button class="button primary" type="submit">Сохранить</button>
-              <button class="button danger" type="button" data-action="delete-operation" data-id="${op.id}">Удалить</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    `;
+          ${TransactionForm(categoryOptions, { action: 'edit-operation', id: op.id, type: op.type, operation: op, saving: state.saving, error: state.saveError })}
+          <button class="button danger" type="button" data-action="delete-operation" data-id="${op.id}" ${state.saving ? 'disabled' : ''}>Удалить</button>
+    `);
   }
   const type: OperationType = state.sheet === 'add-income' ? 'Доходы' : 'Расходы';
-  const today = new Date().toISOString().slice(0, 10);
-  return `
-    <div class="sheet-backdrop" data-action="close-sheet">
-      <div class="sheet" data-sheet>
-        <h2>${type === 'Доходы' ? 'Новый доход' : 'Новый расход'}</h2>
-        <form class="form-grid" data-action="create-operation">
-          <input type="hidden" name="type" value="${type}" />
-          <label>Сумма<input class="input" name="amount" inputmode="decimal" placeholder="0,00" required /></label>
-          <label>Категория<input class="input" name="category" maxlength="64" required /></label>
-          <label>Описание<textarea class="textarea" name="description" maxlength="200" required></textarea></label>
-          <label>Дата<input class="input" name="op_date" type="date" value="${today}" required /></label>
-          <button class="button primary" type="submit">Сохранить</button>
-        </form>
-      </div>
-    </div>
-  `;
+  return BottomSheet(type === 'Доходы' ? 'Новый доход' : 'Новый расход', TransactionForm(categoryOptions, {
+    action: 'create-operation',
+    type,
+    operation: state.formDraft as Operation | undefined,
+    saving: state.saving,
+    error: state.saveError,
+  }));
 }
 
 function render(): void {
   applyTheme(state.theme);
   const screen = state.loading
-    ? '<div class="loading">Загрузка...</div>'
+    ? LoadingState()
     : state.error
-      ? `<div class="error">${esc(state.error)}</div>`
+      ? ErrorState(esc(state.error))
       : state.tab === 'operations'
         ? renderOperations()
         : state.tab === 'analytics'
@@ -268,13 +183,28 @@ function render(): void {
             : state.tab === 'profile'
               ? renderProfile()
               : renderHome();
-  app.innerHTML = `<main class="app">${renderTopbar()}${screen}</main>${renderNav()}${renderSheet()}`;
+  app.innerHTML = `${AppShell(state, renderTopbar(), screen)}${renderNav()}${renderSheet()}`;
   wireEvents();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
-    if (state.sheet || selectedOperation) tg.BackButton.show();
+    if (state.confirmDeleteId || state.sheet || selectedOperation) tg.BackButton.show();
     else tg.BackButton.hide();
   }
+}
+
+function safeError(error: unknown): string {
+  const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: string }).code) : '';
+  return {
+    unauthorized: 'Не удалось подтвердить Telegram-вход.',
+    workspace_access_denied: 'Нет доступа к этому пространству.',
+    workspace_read_only: 'Это пространство доступно только для чтения.',
+    concrete_workspace_required: 'Выберите одно пространство.',
+    category_not_available: 'Выберите категорию из списка.',
+    idempotency_conflict: 'Эта попытка сохранения уже использовалась для другой операции.',
+    idempotency_pending: 'Операция уже сохраняется. Подождите немного.',
+    rate_limited: 'Слишком много действий подряд. Попробуйте позже.',
+    miniapp_not_configured: 'Mini App ещё не настроен на сервере.',
+  }[code] || 'Не получилось выполнить действие. Попробуйте ещё раз.';
 }
 
 function showToast(text: string): void {
@@ -304,7 +234,7 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'plans') plans = await api.plans(state.workspaceId);
     if (state.tab === 'profile') profile = await api.profile();
   } catch (error) {
-    state.error = error instanceof Error ? error.message : 'Не удалось загрузить данные.';
+    state.error = safeError(error);
   } finally {
     state.loading = false;
     persistState(state);
@@ -325,14 +255,25 @@ async function bootstrap(): Promise<void> {
     await loadScreen();
   } catch (error) {
     state.loading = false;
-    state.error = error instanceof Error ? error.message : 'Mini App недоступен.';
+    state.error = safeError(error);
     render();
   }
 }
 
 function closeSheet(): void {
+  if (state.confirmDeleteId) {
+    state.confirmDeleteId = undefined;
+    render();
+    return;
+  }
+  if (state.dirty && !window.confirm('Закрыть без сохранения?')) return;
   state.sheet = null;
   selectedOperation = null;
+  state.saveError = undefined;
+  state.saving = false;
+  state.dirty = false;
+  state.addIdempotencyKey = undefined;
+  state.formDraft = undefined;
   render();
 }
 
@@ -348,8 +289,18 @@ function formPayload(form: HTMLFormElement): OperationPayload {
     amount: normalizeMoneyText(String(data.get('amount') || '0')),
     category: String(data.get('category') || '').trim(),
     description: String(data.get('description') || '').trim(),
-    op_date: String(data.get('op_date') || '')
+    op_date: String(data.get('op_date') || ''),
+    idempotency_key: state.addIdempotencyKey || requestId()
   };
+}
+
+async function loadCategoriesFor(type: 'expense' | 'income' | 'Расходы' | 'Доходы'): Promise<void> {
+  try {
+    const response = await api.categories(state.workspaceId, type);
+    categoryOptions = response.items;
+  } catch {
+    categoryOptions = [];
+  }
 }
 
 function wireEvents(): void {
@@ -364,7 +315,7 @@ function wireEvents(): void {
     });
   });
 
-  app.querySelector<HTMLButtonElement>('[data-action="refresh"]')?.addEventListener('click', () => void reloadActive());
+  app.querySelector<HTMLButtonElement>('[data-action="retry"]')?.addEventListener('click', () => void reloadActive());
   app.querySelector<HTMLSelectElement>('[data-action="workspace"]')?.addEventListener('change', async (event) => {
     const value = (event.currentTarget as HTMLSelectElement).value;
     state.workspaceId = value === 'all' ? 'all' : value === 'null' || value === '' ? null : Number(value);
@@ -405,16 +356,33 @@ function wireEvents(): void {
     button.addEventListener('click', async () => {
       state.sheet = button.dataset.kind === 'income' ? 'add-income' : 'add-expense';
       selectedOperation = null;
+      state.addIdempotencyKey = requestId();
+      state.saveError = undefined;
+      state.formDraft = undefined;
+      state.dirty = false;
+      await loadCategoriesFor(button.dataset.kind === 'income' ? 'income' : 'expense');
       await api.track('mini_app_transaction_add_opened', { action: button.dataset.kind || 'expense' });
       render();
     });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="open-actions"]')?.addEventListener('click', () => {
+    state.sheet = 'actions';
+    selectedOperation = null;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="go-operations"]')?.addEventListener('click', async () => {
+    state.tab = 'operations';
+    await loadScreen();
   });
 
   app.querySelectorAll<HTMLButtonElement>('[data-action="operation-detail"]').forEach((button) => {
     button.addEventListener('click', async () => {
       const id = Number(button.dataset.id);
       selectedOperation = await api.operationDetail(id);
+      await loadCategoriesFor(selectedOperation.type);
       state.sheet = null;
+      state.saveError = undefined;
+      state.dirty = false;
       render();
     });
   });
@@ -422,32 +390,107 @@ function wireEvents(): void {
   app.querySelector('[data-action="close-sheet"]')?.addEventListener('click', (event) => {
     if ((event.target as HTMLElement).dataset.action === 'close-sheet') closeSheet();
   });
+  app.querySelector('[data-action="close-confirm"]')?.addEventListener('click', (event) => {
+    if ((event.target as HTMLElement).dataset.action === 'close-confirm') closeSheet();
+  });
+  app.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('form input, form textarea, form select').forEach((input) => {
+    input.addEventListener('input', () => {
+      state.dirty = true;
+    });
+    input.addEventListener('change', () => {
+      state.dirty = true;
+    });
+  });
 
   app.querySelector<HTMLFormElement>('form[data-action="create-operation"]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (state.saving) return;
     const form = event.currentTarget as HTMLFormElement;
-    await api.createOperation(formPayload(form));
-    closeSheet();
-    showToast('Операция сохранена');
-    await reloadActive();
+    const payload = formPayload(form);
+    state.formDraft = {
+      amount: payload.amount,
+      category: payload.category,
+      description: payload.description,
+      op_date: payload.op_date,
+      type: payload.type === 'income' ? 'Доходы' : payload.type === 'expense' ? 'Расходы' : payload.type,
+    };
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.createOperation(payload);
+      state.addIdempotencyKey = undefined;
+      state.formDraft = undefined;
+      state.dirty = false;
+      closeSheet();
+      showToast('Операция сохранена');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
 
   app.querySelector<HTMLFormElement>('form[data-action="edit-operation"]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (state.saving) return;
     const form = event.currentTarget as HTMLFormElement;
     const id = Number(form.dataset.id);
-    await api.updateOperation(id, formPayload(form));
-    closeSheet();
-    showToast('Операция обновлена');
-    await reloadActive();
+    const payload = formPayload(form);
+    if (selectedOperation) {
+      selectedOperation = {
+        ...selectedOperation,
+        amount: payload.amount,
+        category: payload.category,
+        description: payload.description,
+        op_date: payload.op_date,
+        type: payload.type === 'income' ? 'Доходы' : payload.type === 'expense' ? 'Расходы' : payload.type,
+      };
+    }
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.updateOperation(id, payload);
+      state.dirty = false;
+      closeSheet();
+      showToast('Операция обновлена');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
 
   app.querySelector<HTMLButtonElement>('[data-action="delete-operation"]')?.addEventListener('click', async (event) => {
     const id = Number((event.currentTarget as HTMLButtonElement).dataset.id);
-    await api.deleteOperation(id);
-    closeSheet();
-    showToast('Операция удалена');
-    await reloadActive();
+    state.confirmDeleteId = id;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="cancel-delete"]')?.addEventListener('click', () => {
+    state.confirmDeleteId = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="confirm-delete"]')?.addEventListener('click', async (event) => {
+    if (state.saving) return;
+    const id = Number((event.currentTarget as HTMLButtonElement).dataset.id);
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.deleteOperation(id);
+      state.dirty = false;
+      state.confirmDeleteId = undefined;
+      closeSheet();
+      showToast('Операция удалена');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
 
   app.querySelector('[data-action="theme"]')?.addEventListener('click', async (event) => {

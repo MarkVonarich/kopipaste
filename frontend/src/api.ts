@@ -1,5 +1,5 @@
 import { initData } from './telegram';
-import type { Bootstrap, Operation, PeriodState, ThemeMode, Workspace } from './types';
+import type { Bootstrap, CategoryOption, Operation, PeriodState, ThemeMode, Workspace } from './types';
 
 type Envelope<T> = {
   ok: boolean;
@@ -25,6 +25,13 @@ export type OperationsResponse = {
   period: { key: string; start_date: string; end_date: string };
 };
 
+export type PlansResponse = {
+  read_only: boolean;
+  goals: Array<{ title: string; target: string; current: string; percent: number; currency: string; status: string; deadline?: string | null }>;
+  limits: Array<{ category: string; amount: string; spent: string; remaining: string; percent: number; period: string; status: string; currency: string }>;
+  all_scope_note?: string | null;
+};
+
 export type OperationPayload = {
   workspace_id: number | 'all' | null;
   type: 'expense' | 'income' | 'Расходы' | 'Доходы';
@@ -32,7 +39,7 @@ export type OperationPayload = {
   category: string;
   description: string;
   op_date: string;
-  idempotency_key?: string;
+  idempotency_key: string;
 };
 
 export class ApiError extends Error {
@@ -46,7 +53,7 @@ export class ApiError extends Error {
 
 const BASE = import.meta.env.VITE_MINIAPP_API_BASE || '';
 
-function requestId(): string {
+export function requestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `miniapp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -81,11 +88,13 @@ export const api = {
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...period })}`),
   operations: (workspaceId: number | 'all' | null, period: PeriodState, offset = 0, search = '') =>
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...period, offset, search })}`),
+  categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
+    apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),
   operationDetail: (id: number) => apiFetch<Operation>(`/miniapp/api/operations/${id}`),
   createOperation: (payload: OperationPayload) =>
     apiFetch<{ operation: Operation }>('/miniapp/api/operations', {
       method: 'POST',
-      body: JSON.stringify({ ...payload, idempotency_key: payload.idempotency_key || requestId() })
+      body: JSON.stringify(payload)
     }),
   updateOperation: (id: number, payload: Partial<OperationPayload>) =>
     apiFetch<{ operation: Operation }>(`/miniapp/api/operations/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
@@ -94,7 +103,7 @@ export const api = {
     apiFetch<{ overview: Overview; top_expense_categories: Array<{ category: string; total: string; currency: string; count: number }> }>(
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...period })}`
     ),
-  plans: (workspaceId: number | 'all' | null) => apiFetch<{ read_only: boolean; goals: unknown[]; limits: unknown[] }>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
+  plans: (workspaceId: number | 'all' | null) => apiFetch<PlansResponse>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
   profile: () => apiFetch<{ theme: ThemeMode; currency: string; timezone: string; workspaces: Workspace[]; version: string }>('/miniapp/api/profile'),
   setTheme: (theme: ThemeMode) => apiFetch<{ theme: ThemeMode }>('/miniapp/api/profile/theme', { method: 'POST', body: JSON.stringify({ theme }) }),
   track: (event: string, properties: Record<string, string>) =>

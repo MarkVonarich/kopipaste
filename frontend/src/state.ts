@@ -36,6 +36,8 @@ export function initialState(): AppState {
     period: persisted.period || { period: 'current_month' },
     loading: true,
     search: '',
+    saving: false,
+    dirty: false,
     sheet: null
   };
 }
