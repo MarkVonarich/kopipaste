@@ -33,6 +33,15 @@ export type Operation = {
   created_at?: string | null;
 };
 
+export type CategoryOption = {
+  name: string;
+  normalized_name: string;
+  type: OperationType;
+  source: string;
+  operation_count: number;
+  has_budget: boolean;
+};
+
 export type Bootstrap = {
   user: { id: string; locale: string; currency: string; timezone: string };
   workspaces: Workspace[];
@@ -51,5 +60,11 @@ export type AppState = {
   error?: string;
   detailOperationId?: number;
   search: string;
-  sheet: null | 'add-expense' | 'add-income';
+  saving: boolean;
+  saveError?: string;
+  addIdempotencyKey?: string;
+  formDraft?: Partial<Operation>;
+  confirmDeleteId?: number;
+  dirty: boolean;
+  sheet: null | 'add-expense' | 'add-income' | 'actions';
 };

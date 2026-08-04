@@ -159,6 +159,35 @@ button {
   overflow-wrap: anywhere;
 }
 
+.result-card {
+  display: grid;
+  gap: 8px;
+}
+
+.result-card strong {
+  font-size: 28px;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+}
+
+.icon-button {
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 24px;
+  line-height: 1;
+}
+
 .actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -300,6 +329,11 @@ button {
   border-radius: 8px 8px 0 0;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.sheet.confirm {
+  display: grid;
+  gap: 12px;
 }
 
 .form-grid {

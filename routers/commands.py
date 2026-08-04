@@ -7,6 +7,7 @@ from telegram import (
     BotCommandScopeDefault,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    WebAppInfo,
 )
 from telegram.ext import ContextTypes
 from datetime import datetime, date, timedelta
@@ -16,7 +17,7 @@ from db.queries import ensure_user, get_user_budgets, get_user_currency, get_use
 from services.ml_train import train_model
 from ui.keyboards import export_menu_kb, help_menu_kb, limits_budgets_hub_kb, main_menu_kb, reminders_menu_kb, settings_menu_kb
 from services.onboarding import onboarding_welcome
-from settings import ADMIN_USER_IDS
+from settings import ADMIN_USER_IDS, MINIAPP_PUBLIC_URL
 from jobs.daily import previous_week_period, previous_month_period, build_weekly_report_text, build_monthly_report_text, _build_smart_morning_text
 from services.ml_prep import normalize_alias_text, normalize_for_ml
 from services.ml_suggest import get_top2_suggestions
@@ -49,6 +50,8 @@ async def on_startup(app):
         BotCommand('settings', 'Настройки'),
         BotCommand('help', 'Помощь'),
     ]
+    if MINIAPP_PUBLIC_URL:
+        public_commands.append(BotCommand('app', 'Mini App'))
     await app.bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
 
     admin_commands = public_commands + [
@@ -91,6 +94,17 @@ async def cmd_settings(update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     locale = get_user_locale(uid)
     await update.message.reply_text(t('menu.settings', locale), reply_markup=settings_menu_kb(locale))
+
+
+async def cmd_app(update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    ensure_user(uid)
+    if not MINIAPP_PUBLIC_URL:
+        return await update.message.reply_text("Mini App пока недоступен.")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Открыть Mini App", web_app=WebAppInfo(url=MINIAPP_PUBLIC_URL)),
+    ]])
+    await update.message.reply_text("Откройте Mini App для работы с операциями.", reply_markup=kb)
 
 
 def _command_privacy_locale(update, user_id: int) -> str:

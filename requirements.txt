@@ -11,3 +11,4 @@ joblib
 openai
 openpyxl
 pytest
+gunicorn==23.0.0

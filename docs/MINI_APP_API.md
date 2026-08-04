@@ -35,6 +35,7 @@ Authorization: tma <initData>
 - `GET /miniapp/health`
 - `GET /miniapp/api/bootstrap`
 - `GET /miniapp/api/workspaces`
+- `GET /miniapp/api/categories`
 - `GET /miniapp/api/overview`
 - `GET /miniapp/api/operations`
 - `POST /miniapp/api/operations`
@@ -81,6 +82,12 @@ Required fields:
 - `op_date`: `YYYY-MM-DD`
 
 The server derives actor identity from signed Telegram auth, not from the request body.
+
+The `idempotency_key` must be generated when the form opens and reused for retrying the same create attempt. A completed request can be replayed. Reusing the key with a different request body returns HTTP 409 `idempotency_conflict`; an in-flight duplicate returns HTTP 409 `idempotency_pending`.
+
+## Categories
+
+`GET /miniapp/api/categories` accepts `workspace_id` and `type`. It returns existing managed categories available to the authenticated user for the selected workspace and operation type. PR 1 create/edit uses this picker and does not create new categories directly.
 
 ## Analytics Events
 

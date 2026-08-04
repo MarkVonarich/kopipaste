@@ -30,6 +30,10 @@ Do not log:
 - user-provided raw financial text;
 - operation descriptions or category free text in product analytics.
 
+## Public Links
+
+Privacy and terms links are returned only from public configuration values such as `MINIAPP_PRIVACY_URL` and `MINIAPP_TERMS_URL`. Repository paths are not user-facing URLs.
+
 ## Expiration
 
 The default maximum age is 24 hours and can be adjusted with:

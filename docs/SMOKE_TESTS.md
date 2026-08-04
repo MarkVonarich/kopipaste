@@ -211,6 +211,13 @@ Run after deployment and restart.
 - Confirm Profile opens without exposing secrets or identifiers beyond the signed-in user context.
 - Confirm product events are present for Mini App open, tab, workspace, period and transaction actions.
 - Confirm product events do not include raw financial text, descriptions, Telegram initData, tokens or database identifiers.
+- Confirm the Home card shows `Доходы − Расходы`, not a bank balance.
+- Confirm the Home `+` opens one sheet with only supported actions: `Расход` and `Доход`.
+- Confirm delete requires a confirmation dialog and cancellation does not delete.
+- Confirm closing dirty create/edit sheets asks before discarding changes.
+- Confirm retry after a simulated timeout reuses the same idempotency key and does not duplicate the operation.
+- Confirm `/app` shows the Mini App button only when `MINIAPP_PUBLIC_URL` is configured.
+- Confirm `./scripts/miniapp_production_like_smoke.sh --dry-run` passes in staging before production wiring.
 
 - Existing personal records remain visible.
 - Current OCR, voice, history, reports, budgets, limits, reminders, and Excel export still work.
