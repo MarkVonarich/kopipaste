@@ -1,0 +1,44 @@
+# Mini App Local Setup
+
+## Backend Checks
+
+From the repository root:
+
+```bash
+env TELEGRAM_TOKEN=test DATABASE_URL=postgresql://test:test@localhost/test \
+  .venv/bin/python -m compileall main.py routers db services jobs ui utils ai scripts miniapp
+```
+
+```bash
+env TELEGRAM_TOKEN=test DATABASE_URL=postgresql://test:test@localhost/test \
+  .venv/bin/python - <<'PY'
+import miniapp.auth
+import miniapp.api
+import miniapp.http
+print("miniapp imports ok")
+PY
+```
+
+## Frontend
+
+```bash
+cd frontend
+npm install
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+Start the local Vite server:
+
+```bash
+cd frontend
+npm run dev
+```
+
+The frontend proxies `/miniapp/api` and `/miniapp/health` to `http://127.0.0.1:8080`.
+
+## Local Auth Note
+
+The Mini App requires signed Telegram WebApp `initData`. For manual browser testing, use a staging bot and open the Vite URL from Telegram, or inject a locally generated signed fixture only in a development harness. Do not disable signature verification in application code.
