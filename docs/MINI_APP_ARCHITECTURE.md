@@ -60,4 +60,6 @@ PR 1 does not include advanced charts, full budget editing, full goal editing, e
 
 ## Idempotency
 
-Create requests must include a stable `idempotency_key`. The server hashes the request body and atomically claims `(user_id, idempotency_key)` before creating the operation. Same key and same hash replays the completed response; same key and different hash returns `idempotency_conflict`; pending and failed states do not create a second operation.
+Create requests must include a stable `idempotency_key`. The server hashes the request body and stores the idempotency row and financial operation in one database transaction. Same key and same hash replays the completed response without creating activity/product events again; same key and different hash returns `idempotency_conflict`; an active pending request returns `idempotency_pending`.
+
+Pending requests carry a short server lease. If a worker stops before inserting an operation, the same key and payload can reclaim the stale pending row and retry. If recovery finds a completed operation id but no cached response, the API reconstructs the response from that operation and marks the idempotency row completed. A failure before response persistence rolls back the operation insert with the idempotency update.

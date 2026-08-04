@@ -83,7 +83,7 @@ Required fields:
 
 The server derives actor identity from signed Telegram auth, not from the request body.
 
-The `idempotency_key` must be generated when the form opens and reused for retrying the same create attempt. A completed request can be replayed. Reusing the key with a different request body returns HTTP 409 `idempotency_conflict`; an in-flight duplicate returns HTTP 409 `idempotency_pending`.
+The `idempotency_key` must be generated when the form opens and reused for retrying the same create attempt. A completed request can be replayed without duplicating the operation or analytics/activity hooks. Reusing the key with a different request body returns HTTP 409 `idempotency_conflict`; an active in-flight duplicate returns HTTP 409 `idempotency_pending`. Stale pending rows are recovered by lease: retry creates the operation only if no operation was committed, or reconstructs the original operation response if an operation id already exists.
 
 ## Categories
 

@@ -38,22 +38,17 @@ def test_create_operation_uses_authenticated_actor_and_decimal_amount(monkeypatc
     api = _api(monkeypatch)
     ctx = WorkspaceContext(10, -100, 42, "group", "member", "Family", True)
     captured = {}
-    completed = []
+    post_commit = []
 
     monkeypatch.setattr(api, "_write_workspace", lambda _req, workspace_id: ctx if workspace_id == 10 else pytest.fail("bad workspace"))
     monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
-    monkeypatch.setattr(api, "_idempotency_claim", lambda *_args: {"status": "claimed"})
-    monkeypatch.setattr(api, "_idempotency_complete", lambda *args, **kwargs: completed.append((args, kwargs)))
-    monkeypatch.setattr(api, "_operation_row", lambda _req, _operation_id: (
-        777, date(2026, 8, 4), "Расходы", "Food", Decimal("216.34"), "RUB", "Lunch", 10, 42, None, "Family"
-    ))
 
-    def _record(**kwargs):
+    def _create(**kwargs):
         captured.update(kwargs)
-        return RecordedOperation(
+        recorded = RecordedOperation(
             operation_id=777,
             workspace_id=10,
-            actor_user_id=kwargs["actor_user_id"],
+            actor_user_id=kwargs["req"].user_id,
             user_id=42,
             chat_id=-100,
             amount=kwargs["amount"],
@@ -62,10 +57,12 @@ def test_create_operation_uses_authenticated_actor_and_decimal_amount(monkeypatc
             category=kwargs["category"],
             operation_date=kwargs["op_date"],
             source="miniapp",
-            comment=kwargs["comment"],
+            comment=kwargs["description"],
         )
+        return {"operation": {"id": 777}}, recorded, True
 
-    monkeypatch.setattr("miniapp.api.record_financial_operation", _record)
+    monkeypatch.setattr(api, "_create_operation_atomically", _create)
+    monkeypatch.setattr("miniapp.api.record_financial_operation_post_commit", lambda *args, **kwargs: post_commit.append((args, kwargs)))
 
     response = api.create_operation(api.request(42), {
         "user_id": 999,
@@ -78,18 +75,55 @@ def test_create_operation_uses_authenticated_actor_and_decimal_amount(monkeypatc
         "op_date": "2026-08-04",
     })
 
-    assert captured["actor_user_id"] == 42
+    assert captured["req"].user_id == 42
     assert captured["amount"] == Decimal("216.34")
     assert response["data"]["operation"]["id"] == 777
-    assert completed
+    assert post_commit
 
 
 def test_duplicate_create_returns_idempotent_response_without_insert(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "_write_workspace", lambda *_args: WorkspaceContext(10, -100, 42, "group", "member", "Family", True))
     monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
-    monkeypatch.setattr(api, "_idempotency_claim", lambda *_args: {"status": "completed", "response": {"operation": {"id": 777}}})
-    monkeypatch.setattr("miniapp.api.record_financial_operation", lambda **_kwargs: pytest.fail("duplicate must not insert"))
+    monkeypatch.setattr(api, "_create_operation_atomically", lambda **_kwargs: ({"operation": {"id": 777}}, None, False))
+    monkeypatch.setattr("miniapp.api.record_financial_operation_post_commit", lambda *_args, **_kwargs: pytest.fail("replay must not emit side effects"))
+
+    response = api.create_operation(api.request(42), {
+        "workspace_id": 10,
+        "idempotency_key": "k1",
+        "type": "expense",
+        "amount": "216.34",
+        "category": "Food",
+        "description": "Lunch",
+        "op_date": "2026-08-04",
+    })
+
+    assert response["data"]["operation"]["id"] == 777
+
+
+def test_create_operation_post_commit_hook_failure_does_not_fail_saved_operation(monkeypatch):
+    api = _api(monkeypatch)
+    recorded = RecordedOperation(
+        operation_id=777,
+        workspace_id=10,
+        actor_user_id=42,
+        user_id=42,
+        chat_id=-100,
+        amount=Decimal("216.34"),
+        currency="RUB",
+        type="Расходы",
+        category="Food",
+        operation_date=date(2026, 8, 4),
+        source="miniapp",
+        comment="Lunch",
+    )
+    monkeypatch.setattr(api, "_write_workspace", lambda *_args: WorkspaceContext(10, -100, 42, "group", "member", "Family", True))
+    monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
+    monkeypatch.setattr(api, "_create_operation_atomically", lambda **_kwargs: ({"operation": {"id": 777}}, recorded, True))
+    monkeypatch.setattr(
+        "miniapp.api.record_financial_operation_post_commit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("activity unavailable")),
+    )
 
     response = api.create_operation(api.request(42), {
         "workspace_id": 10,
@@ -165,7 +199,11 @@ def test_idempotency_conflict_returns_409(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "_write_workspace", lambda *_args: WorkspaceContext(10, -100, 42, "group", "member", "Family", True))
     monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
-    monkeypatch.setattr(api, "_idempotency_claim", lambda *_args: {"status": "idempotency_conflict", "http_status": 409, "message": "conflict"})
+
+    def _create(**_kwargs):
+        raise MiniAppError(409, "idempotency_conflict", "conflict")
+
+    monkeypatch.setattr(api, "_create_operation_atomically", _create)
 
     with pytest.raises(MiniAppError) as exc:
         api.create_operation(api.request(42), {
@@ -186,8 +224,11 @@ def test_pending_idempotency_does_not_create_second_operation(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "_write_workspace", lambda *_args: WorkspaceContext(10, -100, 42, "group", "member", "Family", True))
     monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
-    monkeypatch.setattr(api, "_idempotency_claim", lambda *_args: {"status": "idempotency_pending", "http_status": 409, "message": "pending"})
-    monkeypatch.setattr("miniapp.api.record_financial_operation", lambda **_kwargs: pytest.fail("pending request must not insert"))
+
+    def _create(**_kwargs):
+        raise MiniAppError(409, "idempotency_pending", "pending")
+
+    monkeypatch.setattr(api, "_create_operation_atomically", _create)
 
     with pytest.raises(MiniAppError) as exc:
         api.create_operation(api.request(42), {
@@ -236,6 +277,8 @@ def test_plans_limit_spent_is_workspace_scoped(monkeypatch):
 
     def _fetch(sql, _params=()):
         if "FROM public.category_limits" in sql:
+            assert "workspace_id=%s" in sql
+            assert _params == (42, 10)
             return [("month", "Food", Decimal("1000.00"), "RUB")]
         if "FROM public.operations" in sql:
             assert "workspace_id = ANY" in sql
