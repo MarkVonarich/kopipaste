@@ -206,11 +206,32 @@ Run after deployment and restart.
 - Confirm a user cannot view a workspace they do not belong to.
 - Confirm a user cannot edit or delete an operation from a foreign workspace.
 - Confirm mixed-currency totals are shown separately, not added together.
-- Confirm Analytics opens as a read-only summary.
-- Confirm Plans opens as a read-only goals/limits summary.
+- Confirm Analytics income, expense and result match operations for the selected period.
+- Confirm Analytics workspace and period switches update all charts.
+- Confirm category structure and dynamics charts render at 320 px and in dark/light themes.
+- Confirm Radar compares the selected period with the previous period and explains normalized values.
+- Confirm Radar shows an explanation, not a polygon, when data is insufficient.
+- Confirm each chart menu changes only that chart's local filter.
+- Confirm different currencies are not silently added together.
+- Confirm Plans switches between Goals and Budgets/Limits.
+- Confirm creating a goal saves Decimal target/current values.
+- Confirm deadline mode returns a recommended contribution.
+- Confirm comfortable amount mode returns a projected completion date.
+- Confirm goal contribution uses one idempotency key and double submit does not create two movements.
+- Confirm pause/resume/archive goal actions work only in a writable workspace.
+- Confirm goal reminders are opt-in and quiet-hours aware through the central notification system.
+- Confirm creating, editing and deleting a limit works for week/month periods.
+- Confirm limit usage/status reflects server policy for 50/80/90/100 and exceeded states.
+- Confirm disabling limit notifications does not delete the limit.
 - Confirm Profile opens without exposing secrets or identifiers beyond the signed-in user context.
+- Confirm Profile shows theme, spaces, categories, notifications, Premium, export/data, help, privacy, terms and version.
+- Confirm notification toggles save one setting without changing adjacent settings.
+- Confirm Premium is information-only and has no payment/paywall.
+- Confirm export entry uses the existing export flow and does not change deletion policy.
+- Confirm the additional menu hides unsupported add-to-home and includes share/help/report/privacy/terms/version.
 - Confirm product events are present for Mini App open, tab, workspace, period and transaction actions.
-- Confirm product events do not include raw financial text, descriptions, Telegram initData, tokens or database identifiers.
+- Confirm product events are present for chart filter, goal, limit, Premium, notification setting and export actions after backend confirmation.
+- Confirm product events do not include raw financial text, descriptions, category names, goal names, limit names, exact dates, Telegram initData, tokens or database identifiers.
 - Confirm the Home card shows `Доходы − Расходы`, not a bank balance.
 - Confirm the Home `+` opens one sheet with only supported actions: `Расход` and `Доход`.
 - Confirm delete requires a confirmation dialog and cancellation does not delete.

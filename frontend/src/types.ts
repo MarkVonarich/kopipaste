@@ -33,6 +33,119 @@ export type Operation = {
   created_at?: string | null;
 };
 
+export type MoneyTotal = { income: string; expense: string; count: number };
+
+export type ChartCategoryItem = {
+  category: string;
+  currency: string;
+  total: string;
+  count: number;
+  share: number;
+};
+
+export type TimeDynamicsItem = {
+  date: string;
+  currency: string;
+  income: string;
+  expense: string;
+  count: number;
+};
+
+export type RadarAxis = {
+  category: string;
+  current: number;
+  previous: number;
+};
+
+export type Goal = {
+  id: number;
+  title: string;
+  target: string;
+  current: string;
+  remaining: string;
+  percent: number;
+  currency: string;
+  status: string;
+  deadline?: string | null;
+  strategy: string;
+  frequency: string;
+  comfortable_amount?: string | null;
+  planned_contribution_amount?: string | null;
+  projected_completion_date?: string | null;
+  next_contribution_date?: string | null;
+  reminders_enabled: boolean;
+  next_action: string;
+  movement_count: number;
+};
+
+export type GoalMovement = {
+  id: number;
+  goal_id: number;
+  movement_type: string;
+  amount: string;
+  balance_after: string;
+  occurred_at: string;
+  source: string;
+};
+
+export type GoalPlanPreview = {
+  strategy: string;
+  frequency: string;
+  remaining_amount: string;
+  occurrence_count: number;
+  recommended_amount?: string | null;
+  comfortable_amount?: string | null;
+  next_occurrence?: string | null;
+  projected_completion_date?: string | null;
+  required_contributions?: number | null;
+  feasible: boolean;
+  reason?: string | null;
+  schedule_config: Record<string, unknown>;
+};
+
+export type BudgetLimit = {
+  id: string;
+  kind: string;
+  title: string;
+  category?: string | null;
+  scope: 'category' | 'all_expenses';
+  amount: string;
+  currency: string;
+  spent: string;
+  remaining: string;
+  percent: number;
+  period: string;
+  status: string;
+  alerts_enabled: boolean;
+  workspace_id: number | null;
+  icon: string;
+};
+
+export type NotificationPreferences = {
+  morning_enabled: boolean;
+  evening_enabled: boolean;
+  limit_alerts_enabled: boolean;
+  budget_alerts_enabled: boolean;
+  weekly_reports_enabled: boolean;
+  monthly_reports_enabled: boolean;
+  challenge_notifications_enabled: boolean;
+  goal_notifications_enabled: boolean;
+  morning_time: string;
+  evening_time: string;
+  quiet_hours_enabled: boolean;
+  quiet_hours_start?: string | null;
+  quiet_hours_end?: string | null;
+  timezone: string;
+};
+
+export type PremiumInfo = {
+  available: boolean;
+  title: string;
+  status: string;
+  description: string;
+  features: string[];
+};
+
 export type CategoryOption = {
   name: string;
   normalized_name: string;
@@ -63,8 +176,17 @@ export type AppState = {
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;
+  goalIdempotencyKey?: string;
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'premium' | 'export' | 'menu';
+  plansMode?: 'goals' | 'limits';
+  analyticsFilters?: {
+    categoryType: 'expense' | 'income';
+    dynamicsType: 'expense' | 'income' | 'both';
+    radarType: 'expense' | 'income';
+  };
+  selectedGoalId?: number;
+  selectedLimitId?: string;
 };

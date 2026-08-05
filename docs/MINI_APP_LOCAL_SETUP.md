@@ -23,12 +23,14 @@ PY
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run typecheck
 npm run lint
 npm test
 npm run build
 ```
+
+PR 2 charts use the pinned `chart.js` package from `package-lock.json`. Do not use CDN scripts in local or production builds.
 
 Production-like dry run:
 
@@ -51,3 +53,5 @@ The frontend proxies `/miniapp/api` and `/miniapp/health` to `http://127.0.0.1:8
 The Mini App requires signed Telegram WebApp `initData`. For manual browser testing, use a staging bot and open the Vite URL from Telegram, or inject a locally generated signed fixture only in a development harness. Do not disable signature verification in application code.
 
 Create-form retry behavior: the frontend generates one idempotency key when the form opens and reuses it until success or cancellation. Keep the same browser session open when testing retry after a simulated timeout. A fast double submit should receive the original completed response or `idempotency_pending`; it must not create a second operation or duplicate post-commit hooks.
+
+Goal contribution retry behavior is similar: the contribution sheet generates one idempotency key and reuses it until the movement is confirmed or the sheet is closed.

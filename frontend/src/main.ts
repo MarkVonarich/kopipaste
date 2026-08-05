@@ -1,17 +1,19 @@
 import './styles.css';
-import { api, requestId, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse } from './api';
+import Chart from 'chart.js/auto';
+import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { getTelegramWebApp, initTelegramShell } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { AppState, CategoryOption, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
+import type { AppState, BudgetLimit, CategoryOption, Goal, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { HomeScreen } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
-import { PlansScreen } from './components/PlansScreen';
-import { ProfileScreen } from './components/ProfileScreen';
+import { AnalyticsScreen } from './components/AnalyticsScreen';
+import { GoalContributionForm, GoalForm, LimitForm, PlansScreen } from './components/PlansScreen';
+import { AdditionalMenu, InfoPanel, ProfileScreen } from './components/ProfileScreen';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
 
@@ -22,12 +24,15 @@ const app: HTMLDivElement = appRoot;
 let state: AppState = initialState();
 let overview: Overview | null = null;
 let operations: OperationsResponse | null = null;
-let analytics: { top_expense_categories: Array<{ category: string; total: string; currency: string; count: number }> } | null = null;
+let analytics: AnalyticsResponse | null = null;
 let plans: PlansResponse | null = null;
-let profile: { theme: ThemeMode; currency: string; timezone: string; version: string; links?: { privacy?: string | null; terms?: string | null } } | null = null;
+let profile: Awaited<ReturnType<typeof api.profile>> | null = null;
 let selectedOperation: Operation | null = null;
+let selectedGoal: Goal | null = null;
+let selectedLimit: BudgetLimit | null = null;
 let categoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
+let chartInstances: Chart[] = [];
 
 function esc(value: unknown): string {
   return String(value ?? '')
@@ -59,13 +64,6 @@ function canWrite(): boolean {
 
 function operationAmount(op: Operation): string {
   return op.amount_text || formatMoneyString(op.amount, op.currency);
-}
-
-function moneyFromTotals(type: 'income' | 'expense'): string {
-  const totals = overview?.totals_by_currency || {};
-  const currencies = Object.keys(totals);
-  if (!currencies.length) return formatMoneyString('0.00', state.boot?.user.currency || 'RUB');
-  return currencies.map((currency) => formatMoneyString(totals[currency][type], currency)).join(' · ');
 }
 
 function renderTopbar(): string {
@@ -107,23 +105,11 @@ function renderOperations(): string {
 }
 
 function renderAnalytics(): string {
-  const rows = analytics?.top_expense_categories || [];
-  return `
-    <section class="screen">
-      <div class="metrics">
-        <div class="metric"><span>Расходы</span><strong>${esc(moneyFromTotals('expense'))}</strong></div>
-        <div class="metric"><span>Доходы</span><strong>${esc(moneyFromTotals('income'))}</strong></div>
-      </div>
-      <div class="panel">
-        <strong>Категории</strong>
-        ${rows.length ? rows.map((row) => `<div class="detail-row"><span>${esc(row.category)}</span><strong>${esc(formatMoneyString(row.total, row.currency))}</strong></div>`).join('') : '<p class="caption">Нет данных за период.</p>'}
-      </div>
-    </section>
-  `;
+  return AnalyticsScreen(analytics, state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' });
 }
 
 function renderPlans(): string {
-  return PlansScreen(plans);
+  return PlansScreen(plans, state.plansMode || 'goals', canWrite());
 }
 
 function renderProfile(): string {
@@ -135,6 +121,32 @@ function renderSheet(): string {
     return ConfirmDialog(state.confirmDeleteId, `${selectedOperation.category} · ${operationAmount(selectedOperation)}`);
   }
   if (!state.sheet && !selectedOperation) return '';
+  if (state.sheet === 'goal-create') {
+    return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError));
+  }
+  if (state.sheet === 'goal-edit' && selectedGoal) {
+    return BottomSheet('Изменить цель', GoalForm(selectedGoal, state.saving, state.saveError));
+  }
+  if (state.sheet === 'goal-contribution' && selectedGoal) {
+    return BottomSheet('Пополнить цель', GoalContributionForm(selectedGoal, state.goalIdempotencyKey || requestId(), state.saving, state.saveError));
+  }
+  if (state.sheet === 'limit-create') {
+    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'limit-edit' && selectedLimit) {
+    return BottomSheet('Изменить лимит', LimitForm(selectedLimit, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'premium') {
+    return BottomSheet('Premium', InfoPanel('Premium', profile?.premium?.description || 'Premium-раздел пока информационный.'));
+  }
+  if (state.sheet === 'export') {
+    return BottomSheet('Экспорт и данные', InfoPanel('Экспорт', profile?.export?.privacy_note || 'Экспорт использует существующий Telegram flow.'));
+  }
+  if (state.sheet === 'menu') {
+    const nav = navigator as Navigator & { standalone?: boolean };
+    const canAdd = 'standalone' in nav || 'BeforeInstallPromptEvent' in window;
+    return BottomSheet('Меню', AdditionalMenu(profile, canAdd));
+  }
   if (state.sheet === 'actions') {
     return BottomSheet('Добавить операцию', `
       <div class="form-grid">
@@ -170,6 +182,8 @@ function renderSheet(): string {
 
 function render(): void {
   applyTheme(state.theme);
+  chartInstances.forEach((chart) => chart.destroy());
+  chartInstances = [];
   const screen = state.loading
     ? LoadingState()
     : state.error
@@ -185,6 +199,7 @@ function render(): void {
               : renderHome();
   app.innerHTML = `${AppShell(state, renderTopbar(), screen)}${renderNav()}${renderSheet()}`;
   wireEvents();
+  renderCharts();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
     if (state.confirmDeleteId || state.sheet || selectedOperation) tg.BackButton.show();
@@ -227,9 +242,13 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'home') overview = await api.overview(state.workspaceId, state.period);
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, state.period, 0, state.search);
     if (state.tab === 'analytics') {
-      const response = await api.analytics(state.workspaceId, state.period);
+      const response = await api.analytics(state.workspaceId, {
+        ...state.period,
+        category_type: state.analyticsFilters?.categoryType,
+        radar_type: state.analyticsFilters?.radarType
+      } as typeof state.period);
       overview = response.overview;
-      analytics = { top_expense_categories: response.top_expense_categories };
+      analytics = response;
     }
     if (state.tab === 'plans') plans = await api.plans(state.workspaceId);
     if (state.tab === 'profile') profile = await api.profile();
@@ -269,12 +288,43 @@ function closeSheet(): void {
   if (state.dirty && !window.confirm('Закрыть без сохранения?')) return;
   state.sheet = null;
   selectedOperation = null;
+  selectedGoal = null;
+  selectedLimit = null;
   state.saveError = undefined;
   state.saving = false;
   state.dirty = false;
   state.addIdempotencyKey = undefined;
+  state.goalIdempotencyKey = undefined;
   state.formDraft = undefined;
   render();
+}
+
+function renderCharts(): void {
+  if (state.tab !== 'analytics' || !analytics) return;
+  const categoryCanvas = document.querySelector<HTMLCanvasElement>('#categoryChart');
+  if (categoryCanvas && analytics.category_structure.items.length) {
+    chartInstances.push(new Chart(categoryCanvas, {
+      type: 'bar',
+      data: {
+        labels: analytics.category_structure.items.map((item) => item.category),
+        datasets: [{ label: 'Доля', data: analytics.category_structure.items.map((item) => item.share), backgroundColor: '#0a7a75' }]
+      },
+      options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, max: 100 } } }
+    }));
+  }
+  const dynamicsCanvas = document.querySelector<HTMLCanvasElement>('#dynamicsChart');
+  if (dynamicsCanvas && analytics.time_dynamics.items.length) {
+    const labels = analytics.time_dynamics.items.map((item) => item.date);
+    const mode = state.analyticsFilters?.dynamicsType || 'both';
+    const datasets = [];
+    if (mode !== 'income') datasets.push({ label: 'Расходы', data: analytics.time_dynamics.items.map((item) => Number(item.expense)), borderColor: '#b83242', backgroundColor: 'rgba(184,50,66,.18)' });
+    if (mode !== 'expense') datasets.push({ label: 'Доходы', data: analytics.time_dynamics.items.map((item) => Number(item.income)), borderColor: '#147a43', backgroundColor: 'rgba(20,122,67,.18)' });
+    chartInstances.push(new Chart(dynamicsCanvas, {
+      type: 'line',
+      data: { labels, datasets },
+      options: { responsive: true, plugins: { legend: { display: true } }, scales: { y: { beginAtZero: true } } }
+    }));
+  }
 }
 
 async function reloadActive(): Promise<void> {
@@ -291,6 +341,46 @@ function formPayload(form: HTMLFormElement): OperationPayload {
     description: String(data.get('description') || '').trim(),
     op_date: String(data.get('op_date') || ''),
     idempotency_key: state.addIdempotencyKey || requestId()
+  };
+}
+
+function goalPayload(form: HTMLFormElement): GoalPayload {
+  const data = new FormData(form);
+  const frequency = String(data.get('frequency') || 'none') as GoalPayload['frequency'];
+  return {
+    workspace_id: state.workspaceId,
+    title: String(data.get('title') || '').trim(),
+    target_amount: normalizeMoneyText(String(data.get('target_amount') || '0')),
+    current_amount: normalizeMoneyText(String(data.get('current_amount') || '0')),
+    deadline: String(data.get('deadline') || ''),
+    strategy: String(data.get('strategy') || 'none') as GoalPayload['strategy'],
+    frequency,
+    comfortable_amount: String(data.get('comfortable_amount') || '').trim() ? normalizeMoneyText(String(data.get('comfortable_amount'))) : '',
+    reminders_enabled: data.get('reminders_enabled') === 'on',
+  };
+}
+
+function goalMovementPayload(form: HTMLFormElement): GoalMovementPayload {
+  const data = new FormData(form);
+  return {
+    workspace_id: state.workspaceId,
+    movement_type: String(data.get('movement_type') || 'contribution') as GoalMovementPayload['movement_type'],
+    amount: String(data.get('amount') || '').trim() ? normalizeMoneyText(String(data.get('amount'))) : undefined,
+    new_balance: String(data.get('new_balance') || '').trim() ? normalizeMoneyText(String(data.get('new_balance'))) : undefined,
+    idempotency_key: String(data.get('idempotency_key') || state.goalIdempotencyKey || requestId())
+  };
+}
+
+function limitPayload(form: HTMLFormElement): LimitPayload {
+  const data = new FormData(form);
+  return {
+    workspace_id: state.workspaceId,
+    title: String(data.get('title') || '').trim(),
+    scope: String(data.get('scope') || 'category') as LimitPayload['scope'],
+    category: String(data.get('category') || '').trim(),
+    amount: normalizeMoneyText(String(data.get('amount') || '0')),
+    period: String(data.get('period') || 'month') as LimitPayload['period'],
+    alerts_enabled: data.get('alerts_enabled') === 'on',
   };
 }
 
@@ -351,6 +441,23 @@ function wireEvents(): void {
     state.period = { ...state.period, end_date: (event.currentTarget as HTMLInputElement).value };
     if (state.period.start_date) await loadScreen();
   });
+  app.querySelectorAll<HTMLSelectElement>('[data-action="chart-filter"]').forEach((select) => {
+    select.addEventListener('change', async () => {
+      const chart = select.dataset.chart || '';
+      state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
+      if (chart === 'category') state.analyticsFilters.categoryType = select.value as 'expense' | 'income';
+      if (chart === 'dynamics') state.analyticsFilters.dynamicsType = select.value as 'expense' | 'income' | 'both';
+      if (chart === 'radar') state.analyticsFilters.radarType = select.value as 'expense' | 'income';
+      await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: select.value, source: 'mini_app' });
+      await loadScreen();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="plans-mode"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.plansMode = button.dataset.mode === 'limits' ? 'limits' : 'goals';
+      render();
+    });
+  });
 
   app.querySelectorAll<HTMLButtonElement>('[data-action="open-add"]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -373,6 +480,115 @@ function wireEvents(): void {
   app.querySelector<HTMLButtonElement>('[data-action="go-operations"]')?.addEventListener('click', async () => {
     state.tab = 'operations';
     await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="goal-create"]')?.addEventListener('click', () => {
+    state.sheet = 'goal-create';
+    state.saveError = undefined;
+    state.dirty = false;
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="goal-edit"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectedGoal = (plans?.goals || []).find((goal) => goal.id === Number(button.dataset.id)) || null;
+      state.sheet = selectedGoal ? 'goal-edit' : null;
+      state.saveError = undefined;
+      state.dirty = false;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="goal-contribution"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectedGoal = (plans?.goals || []).find((goal) => goal.id === Number(button.dataset.id)) || null;
+      state.goalIdempotencyKey = requestId();
+      state.sheet = selectedGoal ? 'goal-contribution' : null;
+      state.saveError = undefined;
+      state.dirty = false;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="goal-status"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (state.saving) return;
+      state.saving = true;
+      render();
+      try {
+        await api.setGoalStatus(Number(button.dataset.id), state.workspaceId, button.dataset.status || 'active');
+        showToast('Цель обновлена');
+        await reloadActive();
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="limit-create"]')?.addEventListener('click', async () => {
+    await loadCategoriesFor('expense');
+    state.sheet = 'limit-create';
+    state.saveError = undefined;
+    state.dirty = false;
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="limit-edit"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await loadCategoriesFor('expense');
+      selectedLimit = (plans?.limits || []).find((limit) => limit.id === button.dataset.id) || null;
+      state.sheet = selectedLimit ? 'limit-edit' : null;
+      state.saveError = undefined;
+      state.dirty = false;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="limit-delete"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!window.confirm('Удалить лимит?')) return;
+      try {
+        await api.deleteLimit(button.dataset.id || '', state.workspaceId);
+        showToast('Лимит удалён');
+        await reloadActive();
+      } catch (error) {
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
+    state.sheet = 'menu';
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="premium-open"]')?.addEventListener('click', async () => {
+    await api.premium();
+    state.sheet = 'premium';
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="export-open"]')?.addEventListener('click', async () => {
+    await api.exportInfo();
+    state.sheet = 'export';
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="notification-toggle"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        const notifications = await api.updateNotificationPreferences({ action: 'toggle', key: button.dataset.key });
+        if (profile) profile = { ...profile, notifications };
+        showToast('Настройка сохранена');
+        render();
+      } catch (error) {
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="notification-quiet"]')?.addEventListener('click', async () => {
+    const notifications = await api.updateNotificationPreferences({ action: 'quiet_toggle' });
+    if (profile) profile = { ...profile, notifications };
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="share-app"]')?.addEventListener('click', async () => {
+    if (navigator.share) await navigator.share({ title: 'Finuchet', text: 'КопиPaste для учёта финансов' }).catch(() => undefined);
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="report-issue"]')?.addEventListener('click', () => {
+    window.open(profile?.help_url || 'https://t.me/chiracredible', '_blank', 'noreferrer');
   });
 
   app.querySelectorAll<HTMLButtonElement>('[data-action="operation-detail"]').forEach((button) => {
@@ -485,6 +701,108 @@ function wireEvents(): void {
       state.confirmDeleteId = undefined;
       closeSheet();
       showToast('Операция удалена');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="create-goal"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const payload = goalPayload(event.currentTarget as HTMLFormElement);
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.createGoal(payload);
+      state.dirty = false;
+      closeSheet();
+      showToast('Цель создана');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="save-goal"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.updateGoal(Number(form.dataset.id), goalPayload(form));
+      state.dirty = false;
+      closeSheet();
+      showToast('Цель обновлена');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="goal-movement"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.addGoalMovement(Number(form.dataset.id), goalMovementPayload(form));
+      state.goalIdempotencyKey = undefined;
+      state.dirty = false;
+      closeSheet();
+      showToast('Прогресс цели обновлён');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="create-limit"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const payload = limitPayload(event.currentTarget as HTMLFormElement);
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.createLimit(payload);
+      state.dirty = false;
+      closeSheet();
+      showToast('Лимит создан');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="save-limit"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    const payload = limitPayload(form);
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.updateLimit(form.dataset.id || '', payload);
+      state.dirty = false;
+      closeSheet();
+      showToast('Лимит обновлён');
       await reloadActive();
     } catch (error) {
       state.saving = false;

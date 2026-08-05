@@ -1,6 +1,6 @@
 # Mini App Deployment
 
-PR 1 introduces code and a migration only. Do not apply this migration automatically from a feature branch.
+PR 1 introduced the Mini App foundation migrations. PR 2 completes the MVP UI/API surface and does not add a production migration.
 
 ## Migration
 
@@ -64,6 +64,7 @@ Optional:
 - `MINIAPP_HELP_URL`
 
 Do not modify PostHog, systemd unit files or production secrets as part of PR 1.
+Do not modify PostHog, systemd unit files or production secrets as part of PR 2.
 
 ## Release Checks
 
@@ -71,6 +72,7 @@ Do not modify PostHog, systemd unit files or production secrets as part of PR 1.
 - Mini App imports succeed.
 - Python tests pass.
 - Frontend typecheck, lint, tests and build pass.
+- Frontend build installs dependencies from `frontend/package-lock.json`, including the pinned chart library.
 - Bot smoke check still passes.
 - Telegram Mini App opens inside Telegram with signed `initData`.
 

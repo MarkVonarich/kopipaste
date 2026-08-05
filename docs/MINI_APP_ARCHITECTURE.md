@@ -49,7 +49,18 @@ PR 1 includes:
 - Existing category picker integration for create/edit.
 - Confirmed delete and unsaved-change protection.
 
-PR 1 does not include advanced charts, full budget editing, full goal editing, exports, onboarding redesign or push notification management inside the Mini App.
+PR 2 completes the MVP surface for Analytics, Goals, Limits and Profile without replacing PR 1 architecture.
+
+## PR 2 MVP
+
+- Analytics uses backend datasets for summary totals, category structure, time dynamics and radar comparison. Chart rendering is isolated in the frontend; business math stays in the API.
+- Charts use `chart.js` from the lockfile for bar/line rendering plus a small local SVG radar view. Each chart keeps its own local filter state.
+- Goals reuse `services.goals` for create/update/plan/contribution/reminder/status logic. Goal contributions use existing goal movement idempotency keys and never create fake financial operations.
+- Limits reuse category limits, general spending limits and `services.limit_alerts` threshold bands. The frontend displays server-computed usage and status.
+- Profile reuses existing workspace, category, notification preference, export and legal-link configuration. Premium is information-only in MVP.
+- Product analytics go through the existing backend outbox and use only coarse, non-financial properties.
+
+PR 2 still does not include challenges, recurring operations, credits, investments, bank integrations, subscriptions or payments.
 
 ## Privacy
 
