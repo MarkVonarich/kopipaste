@@ -52,17 +52,28 @@ def _goal(**overrides) -> Goal:
 class _IdemDB:
     def __init__(self) -> None:
         self.rows = {}
+        self.general_limits = {}
+        self.category_limits = {}
+        self.next_limit_id = 1
+        self.fail_complete = False
 
 
 class _IdemConn:
     def __init__(self, db: _IdemDB) -> None:
         self.db = db
+        self.rows = {key: value.copy() for key, value in db.rows.items()}
+        self.general_limits = {key: value.copy() for key, value in db.general_limits.items()}
+        self.category_limits = {key: value.copy() for key, value in db.category_limits.items()}
+        self.next_limit_id = db.next_limit_id
 
     def cursor(self):
-        return _IdemCursor(self.db)
+        return _IdemCursor(self)
 
     def commit(self):
-        pass
+        self.db.rows = {key: value.copy() for key, value in self.rows.items()}
+        self.db.general_limits = {key: value.copy() for key, value in self.general_limits.items()}
+        self.db.category_limits = {key: value.copy() for key, value in self.category_limits.items()}
+        self.db.next_limit_id = self.next_limit_id
 
     def rollback(self):
         pass
@@ -72,8 +83,8 @@ class _IdemConn:
 
 
 class _IdemCursor:
-    def __init__(self, db: _IdemDB) -> None:
-        self.db = db
+    def __init__(self, conn: _IdemConn) -> None:
+        self.conn = conn
         self._next = None
         self.rowcount = 0
 
@@ -95,24 +106,51 @@ class _IdemCursor:
         if compact.startswith("INSERT INTO public.miniapp_idempotency_keys"):
             user_id, key, request_hash, _lease = params
             idem_key = (int(user_id), str(key))
-            if idem_key not in self.db.rows:
-                self.db.rows[idem_key] = {"request_hash": request_hash, "status": "pending", "response_json": None, "operation_id": None}
+            if idem_key not in self.conn.rows:
+                self.conn.rows[idem_key] = {"request_hash": request_hash, "status": "pending", "response_json": None, "operation_id": None}
                 self._next = ("pending",)
             return
         if compact.startswith("SELECT request_hash, status, response_json"):
             user_id, key = params
-            row = self.db.rows.get((int(user_id), str(key)))
+            row = self.conn.rows.get((int(user_id), str(key)))
             if row:
                 self._next = (row["request_hash"], row["status"], row["response_json"], row["operation_id"], None, True)
             return
         if compact.startswith("UPDATE public.miniapp_idempotency_keys") and "SET operation_id=%s" in compact:
+            if self.conn.db.fail_complete:
+                raise RuntimeError("complete failed")
             operation_id, response, user_id, key, request_hash = params
-            row = self.db.rows[(int(user_id), str(key))]
+            row = self.conn.rows[(int(user_id), str(key))]
             if row["request_hash"] == request_hash and row["status"] == "pending":
                 row["operation_id"] = operation_id
                 row["status"] = "completed"
                 row["response_json"] = getattr(response, "adapted", response)
                 self.rowcount = 1
+            return
+        if compact.startswith("INSERT INTO public.general_spending_limits"):
+            workspace_id, user_id, name, amount, currency, period, alerts_enabled, _thresholds = params
+            limit_id = self.conn.next_limit_id
+            self.conn.next_limit_id += 1
+            self.conn.general_limits[limit_id] = {
+                "workspace_id": workspace_id,
+                "owner_user_id": int(user_id),
+                "name": name,
+                "amount": amount,
+                "currency": currency,
+                "period": period,
+                "alerts_enabled": bool(alerts_enabled),
+            }
+            self._next = (limit_id, name, amount, currency, period, workspace_id, alerts_enabled)
+            return
+        if compact.startswith("DELETE FROM public.category_limits"):
+            user_id, workspace_id, period, category = params
+            self.conn.category_limits.pop((int(user_id), workspace_id, period, category), None)
+            self.rowcount = 1
+            return
+        if compact.startswith("INSERT INTO public.category_limits"):
+            user_id, workspace_id, period, category, amount, currency = params
+            self.conn.category_limits[(int(user_id), workspace_id, period, category)] = {"amount": amount, "currency": currency}
+            self._next = (period, category, amount, currency, workspace_id)
             return
         raise AssertionError(compact)
 
@@ -126,6 +164,8 @@ def test_analytics_returns_summary_category_other_dynamics_and_radar(monkeypatch
     }})
 
     def _fetch(sql, params=()):
+        if "SELECT DISTINCT COALESCE(currency" in sql:
+            return [("RUB",)]
         if "GROUP BY category, COALESCE(currency" in sql:
             return [
                 ("Food", "RUB", Decimal("300.00"), 2),
@@ -180,11 +220,9 @@ def test_goal_create_preview_contribution_and_idempotent_replay(monkeypatch):
     api = _api(monkeypatch)
     events = []
     monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append((event_name, kwargs)))
-    monkeypatch.setattr("miniapp.api.create_financial_goal", lambda **_kwargs: _goal())
-    monkeypatch.setattr("miniapp.api.update_goal_plan", lambda **_kwargs: _goal(reminders_enabled=True))
-    monkeypatch.setattr(api, "_run_idempotent_create", lambda req, action, idem, body, creator: (creator(), True))
+    monkeypatch.setattr(api, "_run_idempotent_create", lambda req, action, idem, body, creator: ({"goal": api._goal_dict(_goal(reminders_enabled=True)), "plan_preview": api._plan_preview(req, body, _goal(reminders_enabled=True))}, True))
 
-    data = api.create_goal(api.request(42), {
+    body = {
         "workspace_id": 10,
         "idempotency_key": "goal-k1",
         "title": "Trip",
@@ -195,7 +233,10 @@ def test_goal_create_preview_contribution_and_idempotent_replay(monkeypatch):
         "frequency": "monthly",
         "day": 5,
         "reminders_enabled": True,
-    })["data"]
+    }
+    req = api.request(42)
+    body["preview_payload_hash"] = api.goal_plan_preview(req, body)["data"]["plan_preview"]["preview_payload_hash"]
+    data = api.create_goal(req, body)["data"]
 
     assert data["goal"]["target"] == "1000.00"
     assert data["plan_preview"]["recommended_amount"] is not None
@@ -230,6 +271,8 @@ def test_mixed_currency_analytics_groups_without_arithmetic(monkeypatch):
     }})
 
     def _fetch(sql, params=()):
+        if "SELECT DISTINCT COALESCE(currency" in sql:
+            return [("EUR",), ("RUB",)]
         if "GROUP BY category, COALESCE(currency" in sql:
             return [
                 ("Food", "RUB", Decimal("300.00"), 2),
@@ -272,6 +315,73 @@ def test_mixed_currency_analytics_groups_without_arithmetic(monkeypatch):
     assert filtered["radar"]["insufficient_data"] is False
 
 
+def test_radar_currency_discovery_uses_previous_period_when_current_empty(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "overview", lambda _req, _params: {"data": {
+        "aggregation_available": True,
+        "totals_by_currency": {},
+        "recent_operations": [],
+    }})
+
+    def _fetch(sql, params=()):
+        if "SELECT DISTINCT COALESCE(currency" in sql:
+            assert "workspace_id = ANY" in sql
+            return [("EUR",), ("RUB",)]
+        if "GROUP BY category, COALESCE(currency" in sql or "GROUP BY op_date, type" in sql:
+            return []
+        if "GROUP BY bucket, category" in sql:
+            assert "COALESCE(currency" in sql
+            assert "RUB" in params
+            return [
+                ("previous", "Food", Decimal("100.00")),
+                ("previous", "Taxi", Decimal("50.00")),
+            ]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    mixed = api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month"})["data"]
+    assert mixed["available_currencies"] == []
+    assert mixed["radar_available_currencies"] == ["EUR", "RUB"]
+    assert mixed["radar"]["reason"] == "mixed_currencies"
+    assert mixed["radar"]["axes"] == []
+
+    filtered = api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "RUB"})["data"]
+    assert filtered["radar"]["currency"] == "RUB"
+    assert filtered["radar"]["reason"] == "insufficient_data"
+
+    with pytest.raises(MiniAppError) as exc:
+        api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "USD"})
+    assert exc.value.code == "bad_currency"
+
+
+def test_radar_single_previous_currency_auto_filters_when_current_empty(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "overview", lambda _req, _params: {"data": {
+        "aggregation_available": True,
+        "totals_by_currency": {},
+        "recent_operations": [],
+    }})
+
+    def _fetch(sql, params=()):
+        if "SELECT DISTINCT COALESCE(currency" in sql:
+            return [("RUB",)]
+        if "GROUP BY category, COALESCE(currency" in sql or "GROUP BY op_date, type" in sql:
+            return []
+        if "GROUP BY bucket, category" in sql:
+            assert "RUB" in params
+            return [
+                ("previous", "Food", Decimal("100.00")),
+                ("previous", "Taxi", Decimal("50.00")),
+            ]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+    data = api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month"})["data"]
+    assert data["radar_available_currencies"] == ["RUB"]
+    assert data["radar"]["currency"] == "RUB"
+
+
 def test_goal_preview_requires_visible_schedule_and_does_not_default(monkeypatch):
     api = _api(monkeypatch)
     with pytest.raises(MiniAppError) as exc:
@@ -299,6 +409,59 @@ def test_goal_preview_requires_visible_schedule_and_does_not_default(monkeypatch
     assert preview["next_occurrence"] == "2026-08-05"
 
 
+def test_goal_create_requires_exact_preview_hash(monkeypatch):
+    api = _api(monkeypatch)
+    saved = []
+    monkeypatch.setattr(api, "_run_idempotent_create", lambda req, action, idem, body, creator: saved.append(body) or ({"goal": {"id": 7}}, True))
+    body = {
+        "workspace_id": 10,
+        "idempotency_key": "goal-k",
+        "title": "Trip",
+        "target_amount": "1000.00",
+        "current_amount": "100.00",
+        "deadline": "2026-12-31",
+        "strategy": "deadline",
+        "frequency": "monthly",
+        "day": 5,
+        "reminders_enabled": True,
+    }
+    req = api.request(42)
+    preview_hash = api.goal_plan_preview(req, body)["data"]["plan_preview"]["preview_payload_hash"]
+    api.create_goal(req, {**body, "preview_payload_hash": preview_hash})
+    assert saved
+
+    with pytest.raises(MiniAppError) as exc:
+        api.create_goal(req, {**body, "target_amount": "1200.00", "preview_payload_hash": preview_hash})
+    assert exc.value.status == 409
+    assert exc.value.code == "goal_preview_stale"
+
+
+def test_goal_edit_requires_exact_preview_hash(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.get_goal", lambda *_args, **_kwargs: _goal())
+    monkeypatch.setattr("miniapp.api.update_goal_details", lambda **_kwargs: _goal(target_amount=Decimal("1200.00")))
+    monkeypatch.setattr("miniapp.api.update_goal_plan", lambda **_kwargs: _goal(target_amount=Decimal("1200.00")))
+    body = {
+        "workspace_id": 10,
+        "title": "Trip",
+        "target_amount": "1200.00",
+        "current_amount": "250.00",
+        "deadline": "2026-12-31",
+        "strategy": "deadline",
+        "frequency": "monthly",
+        "day": 5,
+        "reminders_enabled": False,
+    }
+    req = api.request(42)
+    preview_hash = api.goal_plan_preview(req, body, goal_id=7)["data"]["plan_preview"]["preview_payload_hash"]
+    updated = api.update_goal(req, 7, {**body, "preview_payload_hash": preview_hash})["data"]
+    assert updated["goal"]["target"] == "1200.00"
+
+    with pytest.raises(MiniAppError) as exc:
+        api.update_goal(req, 7, {**body, "day": 6, "preview_payload_hash": preview_hash})
+    assert exc.value.code == "goal_preview_stale"
+
+
 def test_idempotent_goal_create_replays_and_conflicts(monkeypatch):
     api = _api(monkeypatch)
     db = _IdemDB()
@@ -306,8 +469,9 @@ def test_idempotent_goal_create_replays_and_conflicts(monkeypatch):
     created = []
     monkeypatch.setattr("miniapp.api.get_conn", lambda: _IdemConn(db))
     monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append(event_name))
-    monkeypatch.setattr("miniapp.api.create_financial_goal", lambda **_kwargs: created.append(1) or _goal())
-    monkeypatch.setattr("miniapp.api.update_goal_plan", lambda **_kwargs: _goal())
+    def _creator(_cur):
+        created.append(1)
+        return {"goal": {"id": 7}}
 
     body = {
         "workspace_id": 10,
@@ -320,16 +484,17 @@ def test_idempotent_goal_create_replays_and_conflicts(monkeypatch):
     }
     body["strategy"] = "none"
 
-    first = api.create_goal(api.request(42), body)["data"]
-    second = api.create_goal(api.request(42), body)["data"]
+    first, first_created = api._run_idempotent_create(api.request(42), "goal:create", "retry-key", body, _creator)
+    second, second_created = api._run_idempotent_create(api.request(42), "goal:create", "retry-key", body, _creator)
 
     assert first == second
+    assert first_created is True
+    assert second_created is False
     assert len(created) == 1
-    assert events.count("mini_app_goal_created") == 1
     assert (42, "goal:create:retry-key") in db.rows
 
     with pytest.raises(MiniAppError) as exc:
-        api.create_goal(api.request(42), {**body, "title": "Different"})
+        api._run_idempotent_create(api.request(42), "goal:create", "retry-key", {**body, "title": "Different"}, _creator)
     assert exc.value.status == 409
     assert exc.value.code == "idempotency_conflict"
 
@@ -341,17 +506,6 @@ def test_idempotent_general_limit_create_replays_and_conflicts(monkeypatch):
     events = []
     monkeypatch.setattr("miniapp.api.get_conn", lambda: _IdemConn(db))
     monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append(event_name))
-    monkeypatch.setattr("miniapp.api.create_or_update_general_limit", lambda **kwargs: created.append(kwargs) or type("Stored", (), {
-        "kind": "general",
-        "identifier": "general:9",
-        "title": "Все расходы",
-        "category": None,
-        "amount": Decimal("1000.00"),
-        "currency": "RUB",
-        "period": "month",
-        "workspace_id": 10,
-        "alerts_enabled": True,
-    })())
     monkeypatch.setattr(api, "_limit_spent", lambda *_args, **_kwargs: Decimal("0.00"))
 
     body = {"workspace_id": 10, "idempotency_key": "limit-key", "scope": "all_expenses", "amount": "1000.00", "period": "month"}
@@ -359,13 +513,71 @@ def test_idempotent_general_limit_create_replays_and_conflicts(monkeypatch):
     second = api.create_limit(api.request(42), body)["data"]
 
     assert first == second
-    assert len(created) == 1
+    assert len(db.general_limits) == 1
     assert events.count("mini_app_budget_limit_created") == 1
     assert (42, "limit:create:limit-key") in db.rows
 
     with pytest.raises(MiniAppError) as exc:
         api.create_limit(api.request(42), {**body, "amount": "1200.00"})
     assert exc.value.code == "idempotency_conflict"
+
+
+def test_atomic_idempotent_create_rolls_back_entity_when_creator_fails(monkeypatch):
+    api = _api(monkeypatch)
+    db = _IdemDB()
+    monkeypatch.setattr("miniapp.api.get_conn", lambda: _IdemConn(db))
+
+    def _creator(cur):
+        cur.conn.general_limits[1] = {"amount": Decimal("1000.00")}
+        raise RuntimeError("entity insert failed")
+
+    with pytest.raises(RuntimeError):
+        api._run_idempotent_create(api.request(42), "general_limit:create", "boom", {"amount": "1000.00"}, _creator)
+
+    assert db.general_limits == {}
+    assert db.rows == {}
+
+
+def test_atomic_idempotent_create_rolls_back_when_completion_fails_then_retry_succeeds(monkeypatch):
+    api = _api(monkeypatch)
+    db = _IdemDB()
+    monkeypatch.setattr("miniapp.api.get_conn", lambda: _IdemConn(db))
+
+    def _creator(cur):
+        cur.conn.general_limits[1] = {"amount": Decimal("1000.00")}
+        return {"limit": {"id": "general:1"}}
+
+    db.fail_complete = True
+    with pytest.raises(RuntimeError):
+        api._run_idempotent_create(api.request(42), "general_limit:create", "retry", {"amount": "1000.00"}, _creator)
+    assert db.general_limits == {}
+    assert db.rows == {}
+
+    db.fail_complete = False
+    first, created = api._run_idempotent_create(api.request(42), "general_limit:create", "retry", {"amount": "1000.00"}, _creator)
+    second, replay_created = api._run_idempotent_create(api.request(42), "general_limit:create", "retry", {"amount": "1000.00"}, _creator)
+    assert created is True
+    assert replay_created is False
+    assert first == second
+    assert len(db.general_limits) == 1
+
+
+def test_idempotent_category_limit_create_replays(monkeypatch):
+    api = _api(monkeypatch)
+    db = _IdemDB()
+    events = []
+    monkeypatch.setattr("miniapp.api.get_conn", lambda: _IdemConn(db))
+    monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append(event_name))
+    monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
+    monkeypatch.setattr(api, "_limit_spent", lambda *_args, **_kwargs: Decimal("0.00"))
+
+    body = {"workspace_id": 10, "idempotency_key": "category-limit-key", "scope": "category", "category": "Food", "amount": "1000.00", "period": "month"}
+    first = api.create_limit(api.request(42), body)["data"]
+    second = api.create_limit(api.request(42), body)["data"]
+
+    assert first == second
+    assert len(db.category_limits) == 1
+    assert events.count("mini_app_budget_limit_created") == 1
 
 
 def test_limits_list_uses_existing_threshold_policy_and_workspace_scope(monkeypatch):
@@ -413,3 +625,11 @@ def test_frontend_chart_code_uses_visual_decimal_adapter():
     assert "Number(item.income)" not in source
     assert "parseFloat" not in source
     assert "decimalStringToVisualPoint" in source
+
+
+def test_frontend_goal_preview_invalidation_is_wired():
+    source = open("/root/bot_finuchet/frontend/src/main.ts", encoding="utf-8").read()
+    assert "goalPreviewPayloadHash = undefined" in source
+    assert "invalidateGoalPreview" in source
+    assert "button[data-submit-mode=\"confirm\"]" in source
+    assert "preview_payload_hash: state.goalPreviewPayloadHash" in source

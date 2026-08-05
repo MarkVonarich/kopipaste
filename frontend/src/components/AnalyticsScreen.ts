@@ -83,13 +83,17 @@ export function AnalyticsScreen(
   const mixedCurrency = currencies.length > 1;
   const categoryCurrency = filters.categoryCurrency || currencies[0] || '';
   const dynamicsCurrency = filters.dynamicsCurrency || currencies[0] || '';
-  const radarCurrency = filters.radarCurrency || currencies[0] || '';
+  const radarCurrencies = analytics?.radar_available_currencies || currencies;
+  const radarCurrency = filters.radarCurrency || radarCurrencies[0] || '';
   const categoryItems = categoryCurrency ? analytics?.category_structure.currency_groups?.[categoryCurrency]?.items || [] : analytics?.category_structure.items || [];
   const dynamicsItems = dynamicsCurrency ? (analytics?.time_dynamics.items || []).filter((item) => item.currency === dynamicsCurrency) : analytics?.time_dynamics.items || [];
   const note = mixedCurrency
     ? '<p class="caption">Валюты показаны отдельно. Автоматическая конвертация не выполняется.</p>'
     : '';
   const currencyOptions = (selected: string) => currencies
+    .map((currency) => `<option value="${esc(currency)}" ${currency === selected ? 'selected' : ''}>${esc(currency)}</option>`)
+    .join('');
+  const radarCurrencyOptions = (selected: string) => radarCurrencies
     .map((currency) => `<option value="${esc(currency)}" ${currency === selected ? 'selected' : ''}>${esc(currency)}</option>`)
     .join('');
   return `
@@ -129,7 +133,7 @@ export function AnalyticsScreen(
             <option value="expense" ${filters.radarType === 'expense' ? 'selected' : ''}>Расходы</option>
             <option value="income" ${filters.radarType === 'income' ? 'selected' : ''}>Доходы</option>
           </select>
-          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="radar">${currencyOptions(radarCurrency)}</select>` : ''}
+          ${radarCurrencies.length > 1 ? `<select class="select compact" data-action="chart-currency" data-chart="radar">${radarCurrencyOptions(radarCurrency)}</select>` : ''}
         </div>
         ${analytics?.radar.insufficient_data ? `<p class="caption">Недостаточно данных для сравнения структуры. ${esc(analytics.radar.explanation)}</p>` : radarSvg(analytics?.radar.axes || [])}
         <p class="caption">${esc(analytics?.radar.explanation || 'Значения нормализованы.')} Сравниваются выбранный и предыдущий периоды.</p>

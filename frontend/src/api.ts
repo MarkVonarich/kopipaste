@@ -40,6 +40,7 @@ export type AnalyticsResponse = {
   overview: Overview;
   aggregation_available: boolean;
   available_currencies: string[];
+  radar_available_currencies: string[];
   selected_currency?: string | null;
   currency_groups: Record<string, {
     summary: { income: string; expense: string; result: string; count: number };
@@ -112,6 +113,7 @@ export type GoalPayload = {
   day?: number;
   days?: number[];
   weekday?: number;
+  preview_payload_hash?: string;
 };
 
 export type GoalMovementPayload = {

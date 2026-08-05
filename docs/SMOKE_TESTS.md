@@ -215,10 +215,12 @@ Run after deployment and restart.
 - Confirm Radar compares the selected period with the previous period and explains normalized values.
 - Confirm Radar shows an explanation, not a polygon, when data is insufficient.
 - Confirm Radar does not render mixed currencies and works only after selecting one available currency.
+- Confirm a period with no current operations but mixed-currency previous-period operations still shows Radar currency separation instead of a mixed polygon.
 - Confirm each chart menu changes only that chart's local filter.
 - Confirm different currencies are not silently added together.
 - Confirm Plans switches between Goals and Budgets/Limits.
 - Confirm creating a goal first shows a backend plan preview and does not save before explicit confirmation.
+- After preview, change target/deadline/schedule/reminders and confirm the save confirmation disappears until preview is refreshed.
 - Confirm deadline mode preview shows remaining amount, selected deadline, selected frequency, contribution count, recommended contribution, next date and feasibility.
 - Confirm comfortable amount mode preview shows comfortable contribution, frequency, required contribution count, next date and projected completion date.
 - Confirm monthly schedule requires a visible day 1-28.

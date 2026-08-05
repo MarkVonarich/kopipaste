@@ -118,6 +118,7 @@ export type GoalPlanPreview = {
   feasible: boolean;
   reason?: string | null;
   schedule_config: Record<string, unknown>;
+  preview_payload_hash: string;
 };
 
 export type BudgetLimit = {
@@ -197,6 +198,7 @@ export type AppState = {
   goalCreateIdempotencyKey?: string;
   limitCreateIdempotencyKey?: string;
   goalPlanPreview?: GoalPlanPreview;
+  goalPreviewPayloadHash?: string;
   goalDraft?: Record<string, unknown>;
   confirmLimitDeleteId?: string;
   formDraft?: Partial<Operation>;

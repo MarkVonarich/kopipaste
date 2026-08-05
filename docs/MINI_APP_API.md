@@ -128,13 +128,15 @@ When multiple currencies are present, `aggregation_available=false` and the UI m
 
 Goal endpoints reuse `services.goals`. Money fields are decimal strings. Goal create and contribution requests require an `idempotency_key`; replay with the same key and same body returns the completed response without creating duplicate entities or duplicate Mini App product events. Reusing the same key with a different body returns `idempotency_conflict`.
 
-Plan previews return backend calculations for deadline-first and comfortable-contribution modes. The frontend must call preview before create/update and require explicit confirmation after showing the result. Monthly, twice-monthly and weekly schedules require visible user-selected day fields; hidden defaults such as day 1, days 5/20 or Monday are not accepted by the Mini App API.
+Goal create stores the goal row, optional initial movement, selected plan fields and Mini App idempotency completion in one database transaction. A crash cannot leave a committed goal with only a pending idempotency row.
+
+Plan previews return backend calculations for deadline-first and comfortable-contribution modes plus `preview_payload_hash`, a deterministic binding over normalized plan-relevant fields. Create/update requests must include this hash. If any target/current amount, deadline, strategy, frequency, schedule, comfortable amount or reminders setting changes after preview, the backend returns HTTP 409 `goal_preview_stale`. Monthly, twice-monthly and weekly schedules require visible user-selected day fields; hidden defaults such as day 1, days 5/20 or Monday are not accepted by the Mini App API.
 
 ## Limits
 
 Limit endpoints use existing category limits and general spending limits. MVP periods are `week` and `month`. Usage and statuses reuse backend Decimal calculations and `services.limit_alerts`; the frontend does not implement its own threshold policy.
 
-General-limit creation requires an `idempotency_key`. Category-limit update uses one transaction for old-row removal and replacement. Delete checks the affected row count and returns `limit_not_found` for missing or foreign limits instead of reporting a false success. Changing a limit does not delete category-limit alert delivery history; current-period threshold eligibility therefore remains governed by the existing dedupe rows and operation IDs.
+General-limit and category-limit creation require an `idempotency_key`. Limit creation and Mini App idempotency completion commit in the same database transaction. Category-limit update uses one transaction for old-row removal and replacement. Delete checks the affected row count and returns `limit_not_found` for missing or foreign limits instead of reporting a false success. Changing a limit does not delete category-limit alert delivery history; current-period threshold eligibility therefore remains governed by the existing dedupe rows and operation IDs.
 
 ## Profile
 
