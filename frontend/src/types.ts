@@ -43,12 +43,28 @@ export type ChartCategoryItem = {
   share: number;
 };
 
+export type CategoryCurrencyGroup = {
+  currency: string;
+  total: string;
+  items: ChartCategoryItem[];
+};
+
 export type TimeDynamicsItem = {
   date: string;
   currency: string;
   income: string;
   expense: string;
   count: number;
+};
+
+export type TimeDynamicsDataset = {
+  kind: 'expense' | 'income';
+  items: Array<{ date: string; amount: string; count: number }>;
+};
+
+export type TimeDynamicsCurrencyGroup = {
+  currency: string;
+  datasets: TimeDynamicsDataset[];
 };
 
 export type RadarAxis = {
@@ -71,6 +87,7 @@ export type Goal = {
   frequency: string;
   comfortable_amount?: string | null;
   planned_contribution_amount?: string | null;
+  schedule_config?: Record<string, unknown>;
   projected_completion_date?: string | null;
   next_contribution_date?: string | null;
   reminders_enabled: boolean;
@@ -177,6 +194,11 @@ export type AppState = {
   saveError?: string;
   addIdempotencyKey?: string;
   goalIdempotencyKey?: string;
+  goalCreateIdempotencyKey?: string;
+  limitCreateIdempotencyKey?: string;
+  goalPlanPreview?: GoalPlanPreview;
+  goalDraft?: Record<string, unknown>;
+  confirmLimitDeleteId?: string;
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
@@ -186,6 +208,9 @@ export type AppState = {
     categoryType: 'expense' | 'income';
     dynamicsType: 'expense' | 'income' | 'both';
     radarType: 'expense' | 'income';
+    categoryCurrency?: string;
+    dynamicsCurrency?: string;
+    radarCurrency?: string;
   };
   selectedGoalId?: number;
   selectedLimitId?: string;

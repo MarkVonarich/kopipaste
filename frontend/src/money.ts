@@ -30,11 +30,11 @@ export function subtractMoneyStrings(income: string | number, expense: string | 
     const normalized = normalizeMoneyText(value);
     const negative = normalized.startsWith('-');
     const [whole, fraction] = (negative ? normalized.slice(1) : normalized).split('.');
-    const cents = Number(whole) * 100 + Number(fraction);
+    const cents = BigInt(whole || '0') * 100n + BigInt(fraction || '0');
     return negative ? -cents : cents;
   };
   const cents = toCents(income) - toCents(expense);
   const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(cents);
-  return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
+  const abs = cents < 0 ? -cents : cents;
+  return `${sign}${abs / 100n}.${String(abs % 100n).padStart(2, '0')}`;
 }

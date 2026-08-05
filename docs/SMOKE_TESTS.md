@@ -209,15 +209,28 @@ Run after deployment and restart.
 - Confirm Analytics income, expense and result match operations for the selected period.
 - Confirm Analytics workspace and period switches update all charts.
 - Confirm category structure and dynamics charts render at 320 px and in dark/light themes.
+- In a staging account with RUB and EUR operations, confirm the Mini App says `Валюты показаны отдельно. Автоматическая конвертация не выполняется.`
+- Confirm category structure has a currency selector and percentages are 100% only inside the selected currency.
+- Confirm dynamics has a currency selector and does not connect RUB and EUR in one line.
 - Confirm Radar compares the selected period with the previous period and explains normalized values.
 - Confirm Radar shows an explanation, not a polygon, when data is insufficient.
+- Confirm Radar does not render mixed currencies and works only after selecting one available currency.
 - Confirm each chart menu changes only that chart's local filter.
 - Confirm different currencies are not silently added together.
 - Confirm Plans switches between Goals and Budgets/Limits.
-- Confirm creating a goal saves Decimal target/current values.
-- Confirm deadline mode returns a recommended contribution.
-- Confirm comfortable amount mode returns a projected completion date.
+- Confirm creating a goal first shows a backend plan preview and does not save before explicit confirmation.
+- Confirm deadline mode preview shows remaining amount, selected deadline, selected frequency, contribution count, recommended contribution, next date and feasibility.
+- Confirm comfortable amount mode preview shows comfortable contribution, frequency, required contribution count, next date and projected completion date.
+- Confirm monthly schedule requires a visible day 1-28.
+- Confirm twice-monthly schedule requires two visible ordered days 1-28.
+- Confirm weekly schedule requires a visible weekday.
+- Confirm reminder-enabled goal plans require a visible schedule and preserve quiet-hours/timezone behavior.
+- Confirm retrying the same goal create after a timeout reuses the same idempotency key and creates one goal.
 - Confirm goal contribution uses one idempotency key and double submit does not create two movements.
+- Confirm creating a general limit twice with the same idempotency key creates one limit.
+- Confirm editing a category limit across category/period either stores the new limit or leaves the old limit after an injected failure.
+- Confirm deleting a missing or foreign limit shows not found rather than success.
+- Confirm deleting a limit uses the Mini App confirmation dialog.
 - Confirm pause/resume/archive goal actions work only in a writable workspace.
 - Confirm goal reminders are opt-in and quiet-hours aware through the central notification system.
 - Confirm creating, editing and deleting a limit works for week/month periods.

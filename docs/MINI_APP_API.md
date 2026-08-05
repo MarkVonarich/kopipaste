@@ -120,15 +120,21 @@ The `idempotency_key` must be generated when the form opens and reused for retry
 - `time_dynamics`: backend-selected day/week/month grouping;
 - `radar`: normalized category-share comparison against the previous period.
 
-When multiple currencies are present, `aggregation_available=false` and the UI must not display one false total.
+When multiple currencies are present, `aggregation_available=false` and the UI must not display one false total. The response includes `available_currencies` and `currency_groups`; category percentages, top-N and `Прочее` are calculated independently inside each currency group. Time dynamics returns one set of datasets per currency so the frontend never draws one line through RUB and EUR values.
+
+`currency=RUB` is accepted as an optional chart filter after workspace access is checked. The value must be one of `available_currencies` for the authorized result set. Radar refuses mixed-currency data unless a concrete available currency is selected; in that case it returns `reason=mixed_currencies`, `insufficient_data=true`, and no axes.
 
 ## Goals
 
-Goal endpoints reuse `services.goals`. Money fields are decimal strings. Goal contribution requests require an `idempotency_key`; replay with the same key does not create a second movement. Plan previews return backend calculations for deadline-first and comfortable-contribution modes.
+Goal endpoints reuse `services.goals`. Money fields are decimal strings. Goal create and contribution requests require an `idempotency_key`; replay with the same key and same body returns the completed response without creating duplicate entities or duplicate Mini App product events. Reusing the same key with a different body returns `idempotency_conflict`.
+
+Plan previews return backend calculations for deadline-first and comfortable-contribution modes. The frontend must call preview before create/update and require explicit confirmation after showing the result. Monthly, twice-monthly and weekly schedules require visible user-selected day fields; hidden defaults such as day 1, days 5/20 or Monday are not accepted by the Mini App API.
 
 ## Limits
 
 Limit endpoints use existing category limits and general spending limits. MVP periods are `week` and `month`. Usage and statuses reuse backend Decimal calculations and `services.limit_alerts`; the frontend does not implement its own threshold policy.
+
+General-limit creation requires an `idempotency_key`. Category-limit update uses one transaction for old-row removal and replacement. Delete checks the affected row count and returns `limit_not_found` for missing or foreign limits instead of reporting a false success. Changing a limit does not delete category-limit alert delivery history; current-period threshold eligibility therefore remains governed by the existing dedupe rows and operation IDs.
 
 ## Profile
 
