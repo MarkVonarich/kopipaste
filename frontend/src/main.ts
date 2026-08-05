@@ -3,7 +3,7 @@ import Chart from 'chart.js/auto';
 import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
 import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
-import { getTelegramWebApp, initTelegramShell, prepareTelegramLaunch } from './telegram';
+import { getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
 import type { AppState, BudgetLimit, CategoryOption, Goal, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
@@ -59,6 +59,26 @@ function applyTheme(mode: ThemeMode): void {
   const tg = getTelegramWebApp();
   const effective = mode === 'telegram' ? tg?.colorScheme || 'light' : mode;
   document.documentElement.dataset.theme = effective;
+  const params = tg?.themeParams || {};
+  const root = document.documentElement.style;
+  const tokenMap: Array<[keyof typeof params, string]> = [
+    ['bg_color', '--page'],
+    ['secondary_bg_color', '--surface-secondary'],
+    ['section_bg_color', '--surface'],
+    ['text_color', '--text'],
+    ['hint_color', '--text-secondary'],
+    ['button_color', '--accent'],
+    ['button_text_color', '--accent-text'],
+    ['destructive_text_color', '--danger'],
+  ];
+  if (mode !== 'telegram') {
+    for (const [, target] of tokenMap) root.removeProperty(target);
+    return;
+  }
+  for (const [source, target] of tokenMap) {
+    const value = params[source];
+    if (value) root.setProperty(target, value);
+  }
 }
 
 function workspaceLabel(workspace: Workspace): string {
@@ -90,16 +110,16 @@ function renderTopbar(): string {
     ['custom', 'Период']
   ];
   return `
-    <div class="toolbar">
-      <select class="select" data-action="workspace">${workspaceOptions}</select>
-      <select class="select" data-action="period">
+    <div class="toolbar" aria-label="Период и пространство">
+      <label class="toolbar-field"><span>Пространство</span><select class="select compact" data-action="workspace" aria-label="Пространство">${workspaceOptions}</select></label>
+      <label class="toolbar-field"><span>Период</span><select class="select compact" data-action="period" aria-label="Период">
         ${periodOptions.map(([key, label]) => `<option value="${key}" ${state.period.period === key ? 'selected' : ''}>${label}</option>`).join('')}
-      </select>
+      </select></label>
     </div>
     ${state.period.period === 'custom' ? `
-      <div class="toolbar">
-        <input class="input" type="date" data-action="start-date" value="${esc(state.period.start_date || '')}" />
-        <input class="input" type="date" data-action="end-date" value="${esc(state.period.end_date || '')}" />
+      <div class="toolbar custom-period">
+        <label class="toolbar-field"><span>Начало</span><input class="input compact" type="date" data-action="start-date" value="${esc(state.period.start_date || '')}" /></label>
+        <label class="toolbar-field"><span>Конец</span><input class="input compact" type="date" data-action="end-date" value="${esc(state.period.end_date || '')}" /></label>
       </div>
     ` : ''}
   `;
@@ -166,8 +186,8 @@ function renderSheet(): string {
   if (state.sheet === 'actions') {
     return BottomSheet('Добавить операцию', `
       <div class="form-grid">
-        <button class="button primary" data-action="open-add" data-kind="expense">Расход</button>
-        <button class="button" data-action="open-add" data-kind="income">Доход</button>
+        <button class="button primary" data-action="open-add" data-kind="expense">Добавить расход</button>
+        <button class="button secondary" data-action="open-add" data-kind="income">Добавить доход</button>
       </div>
     `);
   }
@@ -225,6 +245,7 @@ function render(): void {
 }
 
 function safeError(error: unknown): string {
+  hapticError();
   const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: string }).code) : '';
   return {
     unauthorized: 'Не удалось подтвердить Telegram-вход.',
@@ -248,6 +269,7 @@ function showToast(text: string): void {
   node.className = 'toast';
   node.textContent = text;
   document.body.appendChild(node);
+  hapticSuccess();
   toastTimer = window.setTimeout(() => node.remove(), 2600);
 }
 
@@ -365,8 +387,8 @@ function renderCharts(): void {
   if (state.tab !== 'analytics' || !analytics) return;
   const styles = getComputedStyle(document.documentElement);
   const accent = styles.getPropertyValue('--tg-theme-button-color').trim() || styles.getPropertyValue('--accent').trim() || '#0a7a75';
-  const destructive = styles.getPropertyValue('--danger').trim() || '#b83242';
-  const positive = styles.getPropertyValue('--positive').trim() || '#147a43';
+  const destructive = styles.getPropertyValue('--expense').trim() || '#87554f';
+  const positive = styles.getPropertyValue('--income').trim() || '#147a43';
   const categoryCurrency = state.analyticsFilters?.categoryCurrency || analytics.available_currencies[0];
   const dynamicsCurrency = state.analyticsFilters?.dynamicsCurrency || analytics.available_currencies[0];
   const categoryCanvas = document.querySelector<HTMLCanvasElement>('#categoryChart');
@@ -501,6 +523,7 @@ function wireEvents(): void {
   app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => {
     button.addEventListener('click', async () => {
       const tab = button.dataset.tab as AppState['tab'];
+      hapticSelection();
       state.tab = tab;
       state.sheet = null;
       selectedOperation = null;
@@ -512,12 +535,14 @@ function wireEvents(): void {
   app.querySelector<HTMLButtonElement>('[data-action="retry"]')?.addEventListener('click', () => void reloadActive());
   app.querySelector<HTMLSelectElement>('[data-action="workspace"]')?.addEventListener('change', async (event) => {
     const value = (event.currentTarget as HTMLSelectElement).value;
+    hapticSelection();
     state.workspaceId = value === 'all' ? 'all' : value === 'null' || value === '' ? null : Number(value);
     await api.track('mini_app_workspace_changed', { scope: String(state.workspaceId) });
     await loadScreen();
   });
   app.querySelector<HTMLSelectElement>('[data-action="period"]')?.addEventListener('change', async (event) => {
     const period = (event.currentTarget as HTMLSelectElement).value as PeriodKey;
+    hapticSelection();
     if (period === 'custom') {
       const today = new Date().toISOString().slice(0, 10);
       state.period = { period, start_date: today, end_date: today };
@@ -552,6 +577,7 @@ function wireEvents(): void {
       if (chart === 'category') state.analyticsFilters.categoryType = select.value as 'expense' | 'income';
       if (chart === 'dynamics') state.analyticsFilters.dynamicsType = select.value as 'expense' | 'income' | 'both';
       if (chart === 'radar') state.analyticsFilters.radarType = select.value as 'expense' | 'income';
+      hapticSelection();
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: select.value, source: 'mini_app' });
       await loadScreen();
     });
@@ -563,12 +589,14 @@ function wireEvents(): void {
       if (chart === 'category') state.analyticsFilters.categoryCurrency = select.value;
       if (chart === 'dynamics') state.analyticsFilters.dynamicsCurrency = select.value;
       if (chart === 'radar') state.analyticsFilters.radarCurrency = select.value;
+      hapticSelection();
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: 'currency', source: 'mini_app' });
       await loadScreen();
     });
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="plans-mode"]').forEach((button) => {
     button.addEventListener('click', () => {
+      hapticSelection();
       state.plansMode = button.dataset.mode === 'limits' ? 'limits' : 'goals';
       render();
     });
@@ -814,6 +842,7 @@ function wireEvents(): void {
 
   app.querySelector<HTMLButtonElement>('[data-action="delete-operation"]')?.addEventListener('click', async (event) => {
     const id = Number((event.currentTarget as HTMLButtonElement).dataset.id);
+    hapticDestructive();
     state.confirmDeleteId = id;
     render();
   });

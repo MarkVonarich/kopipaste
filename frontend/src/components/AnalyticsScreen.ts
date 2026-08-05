@@ -1,34 +1,31 @@
 import { formatMoneyString } from '../money';
 import type { ChartCategoryItem, TimeDynamicsItem, RadarAxis } from '../types';
 import type { AnalyticsResponse } from '../api';
-
-function esc(value: unknown): string {
-  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+import { EmptyPanel, SectionHeader, esc } from './ui';
 
 function metricRows(analytics: AnalyticsResponse | null): string {
   const totals = analytics?.summary.totals_by_currency || {};
   const currencies = Object.keys(totals);
   if (!currencies.length) {
     return `
-      <div class="metric"><span>Доходы</span><strong>0 ₽</strong></div>
-      <div class="metric"><span>Расходы</span><strong>0 ₽</strong></div>
-      <div class="metric"><span>Результат</span><strong>0 ₽</strong></div>
+      <div class="metric-line income"><span>Доходы</span><strong>0 ₽</strong></div>
+      <div class="metric-line expense"><span>Расходы</span><strong>0 ₽</strong></div>
+      <div class="metric-line"><span>Результат</span><strong>0 ₽</strong></div>
     `;
   }
   return currencies.map((currency) => {
     const item = totals[currency];
     const result = analytics?.summary.result_by_currency[currency] || '0.00';
     return `
-      <div class="metric"><span>Доходы · ${esc(currency)}</span><strong>${formatMoneyString(item.income, currency)}</strong></div>
-      <div class="metric"><span>Расходы · ${esc(currency)}</span><strong>${formatMoneyString(item.expense, currency)}</strong></div>
-      <div class="metric"><span>Результат · ${esc(currency)}</span><strong>${formatMoneyString(result, currency)}</strong></div>
+      <div class="metric-line income"><span>Доходы · ${esc(currency)}</span><strong>${formatMoneyString(item.income, currency)}</strong></div>
+      <div class="metric-line expense"><span>Расходы · ${esc(currency)}</span><strong>${formatMoneyString(item.expense, currency)}</strong></div>
+      <div class="metric-line"><span>Результат · ${esc(currency)}</span><strong>${formatMoneyString(result, currency)}</strong></div>
     `;
   }).join('');
 }
 
 function categoryBars(items: ChartCategoryItem[]): string {
-  if (!items.length) return '<p class="caption">Нет данных за период.</p>';
+  if (!items.length) return EmptyPanel('Нет структуры', 'За этот период не хватает операций для категорий.');
   return items.map((item) => `
     <div class="bar-row">
       <div class="bar-label"><span>${esc(item.category)}</span><strong>${formatMoneyString(item.total, item.currency)}</strong></div>
@@ -39,10 +36,10 @@ function categoryBars(items: ChartCategoryItem[]): string {
 }
 
 function dynamicsRows(items: TimeDynamicsItem[], mode: string): string {
-  if (!items.length) return '<p class="caption">Нет динамики за период.</p>';
+  if (!items.length) return EmptyPanel('Нет динамики', 'Данные появятся после операций в выбранном периоде.');
   return items.slice(-8).map((item) => {
     const amount = mode === 'income' ? item.income : mode === 'expense' ? item.expense : `${formatMoneyString(item.income, item.currency)} / ${formatMoneyString(item.expense, item.currency)}`;
-    return `<div class="detail-row"><span>${esc(item.date)}<br><small>${esc(item.currency)}</small></span><strong>${typeof amount === 'string' && amount.includes('/') ? amount : formatMoneyString(String(amount), item.currency)}</strong></div>`;
+    return `<div class="detail-row light"><span>${esc(item.date)}<br><small>${esc(item.currency)}</small></span><strong>${typeof amount === 'string' && amount.includes('/') ? amount : formatMoneyString(String(amount), item.currency)}</strong></div>`;
   }).join('');
 }
 
@@ -98,46 +95,51 @@ export function AnalyticsScreen(
     .join('');
   return `
     <section class="screen analytics-screen">
-      <div class="metrics triple">${metricRows(analytics)}</div>
+      <div class="insight-block">
+        <span class="eyebrow">Ключевой вывод</span>
+        <h2>${mixedCurrency ? 'Смотрите каждую валюту отдельно' : 'Картина периода собрана'}</h2>
+        <p>${mixedCurrency ? 'КопиPaste не смешивает валюты и не создаёт ложный общий итог.' : 'Доходы, расходы и результат ниже относятся к выбранному пространству и периоду.'}</p>
+      </div>
+      <div class="metrics-grid">${metricRows(analytics)}</div>
       ${note}
-      <div class="panel chart-panel">
-        <div class="section-header">
-          <strong>Структура категорий</strong>
-          <select class="select compact" data-action="chart-filter" data-chart="category">
+      <section class="chart-section">
+        ${SectionHeader('Структура категорий', 'Доля категорий внутри выбранной валюты')}
+        <div class="chart-controls">
+          <select class="select compact" data-action="chart-filter" data-chart="category" aria-label="Тип категорий">
             <option value="expense" ${filters.categoryType === 'expense' ? 'selected' : ''}>Расходы</option>
             <option value="income" ${filters.categoryType === 'income' ? 'selected' : ''}>Доходы</option>
           </select>
-          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="category">${currencyOptions(categoryCurrency)}</select>` : ''}
+          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="category" aria-label="Валюта структуры">${currencyOptions(categoryCurrency)}</select>` : ''}
         </div>
         <canvas id="categoryChart" height="180"></canvas>
         ${categoryBars(categoryItems)}
-      </div>
-      <div class="panel chart-panel">
-        <div class="section-header">
-          <strong>Динамика</strong>
-          <select class="select compact" data-action="chart-filter" data-chart="dynamics">
+      </section>
+      <section class="chart-section">
+        ${SectionHeader('Динамика', 'Как менялись доходы и расходы во времени')}
+        <div class="chart-controls">
+          <select class="select compact" data-action="chart-filter" data-chart="dynamics" aria-label="Тип динамики">
             <option value="both" ${filters.dynamicsType === 'both' ? 'selected' : ''}>Доходы и расходы</option>
             <option value="expense" ${filters.dynamicsType === 'expense' ? 'selected' : ''}>Расходы</option>
             <option value="income" ${filters.dynamicsType === 'income' ? 'selected' : ''}>Доходы</option>
           </select>
-          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="dynamics">${currencyOptions(dynamicsCurrency)}</select>` : ''}
+          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="dynamics" aria-label="Валюта динамики">${currencyOptions(dynamicsCurrency)}</select>` : ''}
         </div>
         <canvas id="dynamicsChart" height="180"></canvas>
         <p class="caption">Группировка: ${esc(analytics?.time_dynamics.grouping || 'day')}</p>
         ${dynamicsRows(dynamicsItems, filters.dynamicsType)}
-      </div>
-      <div class="panel chart-panel">
-        <div class="section-header">
-          <strong>Radar</strong>
-          <select class="select compact" data-action="chart-filter" data-chart="radar">
+      </section>
+      <section class="chart-section">
+        ${SectionHeader('Radar', 'Сравнение структуры с предыдущим периодом')}
+        <div class="chart-controls">
+          <select class="select compact" data-action="chart-filter" data-chart="radar" aria-label="Тип radar">
             <option value="expense" ${filters.radarType === 'expense' ? 'selected' : ''}>Расходы</option>
             <option value="income" ${filters.radarType === 'income' ? 'selected' : ''}>Доходы</option>
           </select>
-          ${radarCurrencies.length > 1 ? `<select class="select compact" data-action="chart-currency" data-chart="radar">${radarCurrencyOptions(radarCurrency)}</select>` : ''}
+          ${radarCurrencies.length > 1 ? `<select class="select compact" data-action="chart-currency" data-chart="radar" aria-label="Валюта radar">${radarCurrencyOptions(radarCurrency)}</select>` : ''}
         </div>
-        ${analytics?.radar.insufficient_data ? `<p class="caption">Недостаточно данных для сравнения структуры. ${esc(analytics.radar.explanation)}</p>` : radarSvg(analytics?.radar.axes || [])}
+        ${analytics?.radar.insufficient_data ? EmptyPanel('Недостаточно данных', `Недостаточно данных для сравнения структуры. ${analytics.radar.explanation}`) : radarSvg(analytics?.radar.axes || [])}
         <p class="caption">${esc(analytics?.radar.explanation || 'Значения нормализованы.')} Сравниваются выбранный и предыдущий периоды.</p>
-      </div>
+      </section>
     </section>
   `;
 }

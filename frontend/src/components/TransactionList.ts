@@ -1,10 +1,7 @@
 import { formatMoneyString } from '../money';
 import type { Operation } from '../types';
 import { EmptyState } from './States';
-
-function esc(value: unknown): string {
-  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
+import { esc } from './ui';
 
 function operationAmount(op: Operation): string {
   return op.amount_text || formatMoneyString(op.amount, op.currency);
@@ -20,9 +17,10 @@ export function TransactionList(items: Operation[], emptyText = 'Операци�
     <div class="operation-list">
       ${items.map((op) => `
         <button class="operation-row" data-action="operation-detail" data-id="${op.id}">
-          <span>
+          <span class="operation-mark ${operationKind(op)}" aria-hidden="true">${esc((op.category || op.description || 'О').trim().slice(0, 1).toUpperCase())}</span>
+          <span class="operation-copy">
             <span class="operation-title">${esc(op.category || op.description || 'Операция')}</span>
-            <span class="operation-meta">${esc(op.op_date)}${op.workspace_name ? ` · ${esc(op.workspace_name)}` : ''}${op.description ? ` · ${esc(op.description)}` : ''}</span>
+            <span class="operation-meta">${op.description ? `${esc(op.description)} · ` : ''}${esc(op.op_date)}${op.workspace_name ? ` · ${esc(op.workspace_name)}` : ''}</span>
           </span>
           <span class="operation-amount ${operationKind(op)}">${operationKind(op) === 'income' ? '+' : '-'}${esc(operationAmount(op))}</span>
         </button>
