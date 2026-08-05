@@ -3,7 +3,7 @@ import Chart from 'chart.js/auto';
 import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
 import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
-import { getTelegramWebApp, initTelegramShell } from './telegram';
+import { getTelegramWebApp, initTelegramShell, prepareTelegramLaunch } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
 import type { AppState, BudgetLimit, CategoryOption, Goal, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
@@ -34,6 +34,18 @@ let selectedLimit: BudgetLimit | null = null;
 let categoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 let chartInstances: Chart[] = [];
+
+function showStartupBlocker(message: string): void {
+  state.loading = false;
+  state.error = undefined;
+  app.innerHTML = `<main class="startup-screen" data-state="startup-blocked"><p>${esc(message)}</p></main>`;
+}
+
+function installStartupErrorHandlers(): void {
+  const showSafeStartupError = () => showStartupBlocker('Не получилось открыть Mini App. Попробуйте ещё раз из Telegram.');
+  window.addEventListener('error', showSafeStartupError);
+  window.addEventListener('unhandledrejection', showSafeStartupError);
+}
 
 function esc(value: unknown): string {
   return String(value ?? '')
@@ -286,6 +298,12 @@ async function loadScreen(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  installStartupErrorHandlers();
+  const launchError = prepareTelegramLaunch();
+  if (launchError) {
+    showStartupBlocker(launchError);
+    return;
+  }
   initTelegramShell();
   const tg = getTelegramWebApp();
   tg?.onEvent('themeChanged', () => applyTheme(state.theme));
