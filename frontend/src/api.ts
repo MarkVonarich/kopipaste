@@ -4,6 +4,7 @@ import type {
   BudgetLimit,
   CategoryOption,
   ChartCategoryItem,
+  CategoryCurrencyGroup,
   Goal,
   GoalMovement,
   GoalPlanPreview,
@@ -13,6 +14,7 @@ import type {
   PremiumInfo,
   RadarAxis,
   ThemeMode,
+  TimeDynamicsCurrencyGroup,
   TimeDynamicsItem,
   Workspace
 } from './types';
@@ -36,20 +38,33 @@ export type Overview = {
 export type AnalyticsResponse = {
   period: { key: string; start_date: string; end_date: string };
   overview: Overview;
+  aggregation_available: boolean;
+  available_currencies: string[];
+  selected_currency?: string | null;
+  currency_groups: Record<string, {
+    summary: { income: string; expense: string; result: string; count: number };
+    category_structure: CategoryCurrencyGroup;
+    time_dynamics: TimeDynamicsCurrencyGroup;
+  }>;
   summary: {
     aggregation_available: boolean;
+    available_currencies: string[];
+    currency_groups: Record<string, { income: string; expense: string; result: string; count: number }>;
     totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
     result_by_currency: Record<string, string>;
   };
-  category_structure: { type: 'expense' | 'income'; top_n: number; items: ChartCategoryItem[] };
-  time_dynamics: { grouping: string; items: TimeDynamicsItem[] };
+  category_structure: { type: 'expense' | 'income'; top_n: number; currency_groups: Record<string, CategoryCurrencyGroup>; items: ChartCategoryItem[] };
+  time_dynamics: { grouping: string; currency_groups: Record<string, TimeDynamicsCurrencyGroup>; items: TimeDynamicsItem[] };
   radar: {
     type: 'expense' | 'income';
+    currency?: string | null;
+    aggregation_available?: boolean;
     current_period: { key: string; start_date: string; end_date: string };
     previous_period: { key: string; start_date: string; end_date: string };
     metric: string;
     max_axes: number;
     insufficient_data: boolean;
+    reason?: string | null;
     explanation: string;
     axes: RadarAxis[];
   };
@@ -83,6 +98,7 @@ export type OperationPayload = {
 
 export type GoalPayload = {
   workspace_id: number | 'all' | null;
+  idempotency_key?: string;
   title?: string;
   display_name?: string;
   target_amount?: string;
@@ -108,6 +124,7 @@ export type GoalMovementPayload = {
 
 export type LimitPayload = {
   workspace_id: number | 'all' | null;
+  idempotency_key?: string;
   title?: string;
   scope: 'category' | 'all_expenses';
   category?: string;
@@ -174,7 +191,7 @@ export const api = {
   updateOperation: (id: number, payload: Partial<OperationPayload>) =>
     apiFetch<{ operation: Operation }>(`/miniapp/api/operations/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteOperation: (id: number) => apiFetch<{ deleted: boolean; operation_id: number }>(`/miniapp/api/operations/${id}`, { method: 'DELETE', body: '{}' }),
-  analytics: (workspaceId: number | 'all' | null, period: PeriodState) =>
+  analytics: (workspaceId: number | 'all' | null, period: PeriodState & { currency?: string }) =>
     apiFetch<AnalyticsResponse>(
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...period })}`
     ),

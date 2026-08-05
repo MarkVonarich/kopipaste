@@ -17,7 +17,7 @@ from psycopg2.extras import Json
 
 from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency, get_user_locale
-from services.budgeting import list_general_limits, upsert_general_limit
+from services.budgeting import list_general_limits
 from services.categories import list_managed_categories, normalized_category_key
 from services.goal_planning import (
     FREQUENCY_MONTHLY,
@@ -55,6 +55,13 @@ from services.operations import (
 )
 from services.product_events import ProductEvent, track_product_event
 from services.limit_alerts import alert_status_for_band, threshold_band
+from services.miniapp_limits import (
+    MiniAppLimitError,
+    StoredLimit,
+    create_or_update_general_limit,
+    delete_limit as delete_stored_limit,
+    replace_category_limit,
+)
 from services.notification_preferences import (
     TOGGLE_FIELDS,
     get_notification_preferences,
@@ -404,6 +411,7 @@ class MiniAppAPI:
             "frequency": goal.frequency,
             "comfortable_amount": goal.comfortable_amount,
             "planned_contribution_amount": goal.planned_contribution_amount,
+            "schedule_config": goal.schedule_config,
             "projected_completion_date": goal.projected_completion_date,
             "next_contribution_date": goal.next_contribution_date,
             "reminders_enabled": goal.reminders_enabled,
@@ -424,13 +432,27 @@ class MiniAppAPI:
 
     def _schedule_from_body(self, body: dict[str, Any], frequency: str) -> dict[str, Any]:
         if frequency == FREQUENCY_MONTHLY:
-            return {"day": max(1, min(28, int(body.get("day") or 1)))}
+            if body.get("day") in {None, ""}:
+                raise MiniAppError(400, "schedule_required", "Choose a monthly day.")
+            day = int(body.get("day"))
+            if day < 1 or day > 28:
+                raise MiniAppError(400, "bad_goal_schedule", "Monthly day must be 1-28.")
+            return {"day": day}
         if frequency == FREQUENCY_TWICE_MONTHLY:
-            days = body.get("days") if isinstance(body.get("days"), list) else [5, 20]
-            clean = sorted({max(1, min(28, int(day))) for day in days[:2]})
-            return {"days": clean or [5, 20]}
+            days = body.get("days") if isinstance(body.get("days"), list) else []
+            clean = sorted({int(day) for day in days if str(day).strip()})
+            if len(clean) != 2:
+                raise MiniAppError(400, "schedule_required", "Choose two monthly days.")
+            if clean[0] == clean[1] or clean[0] < 1 or clean[1] > 28:
+                raise MiniAppError(400, "bad_goal_schedule", "Twice-monthly days must be distinct and 1-28.")
+            return {"days": clean}
         if frequency == FREQUENCY_WEEKLY:
-            return {"weekday": max(0, min(6, int(body.get("weekday") or 0)))}
+            if body.get("weekday") in {None, ""}:
+                raise MiniAppError(400, "schedule_required", "Choose a weekday.")
+            weekday = int(body.get("weekday"))
+            if weekday < 0 or weekday > 6:
+                raise MiniAppError(400, "bad_goal_schedule", "Weekday must be 0-6.")
+            return {"weekday": weekday}
         return {}
 
     def _schedule_config(self, schedule: dict[str, Any], frequency: str) -> ScheduleConfig:
@@ -446,6 +468,8 @@ class MiniAppAPI:
         frequency = str(body.get("frequency") or (goal.frequency if goal else FREQUENCY_NONE))
         if strategy not in GOAL_STRATEGIES or frequency not in GOAL_FREQUENCIES:
             raise MiniAppError(400, "bad_goal_plan", "Invalid goal plan.")
+        if bool(body.get("reminders_enabled")) and frequency == FREQUENCY_NONE:
+            raise MiniAppError(400, "schedule_required", "Choose a reminder schedule.")
         target = to_decimal_money(body.get("target_amount") if body.get("target_amount") is not None else (goal.target_amount if goal else 0), positive=True)
         current = to_decimal_money(body.get("current_amount") if body.get("current_amount") is not None else (goal.current_balance if goal else 0))
         deadline = date.fromisoformat(str(body["deadline"])) if body.get("deadline") else (goal.deadline if goal else None)
@@ -529,6 +553,20 @@ class MiniAppAPI:
             "workspace_id": workspace_id,
             "icon": "category" if category else "wallet",
         }
+
+    def _stored_limit_dict(self, req: MiniAppRequest, stored: StoredLimit) -> dict:
+        return self._limit_dict(
+            user_id=req.user_id,
+            kind=stored.kind,
+            identifier=stored.identifier,
+            title=stored.title,
+            category=stored.category,
+            amount=stored.amount,
+            currency=stored.currency,
+            period=stored.period,
+            workspace_id=stored.workspace_id,
+            alerts_enabled=stored.alerts_enabled,
+        )
 
 
     def overview(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
@@ -691,7 +729,7 @@ class MiniAppAPI:
         payload, recorded, created = self._create_operation_atomically(
             req=req,
             ctx=ctx,
-            idempotency_key=idem,
+            idempotency_key=self._namespaced_idempotency_key("operation:create", idem),
             request_hash=request_hash,
             op_date=op_date,
             op_type=op_type,
@@ -829,15 +867,57 @@ class MiniAppAPI:
         start, end, period_key = self._period(req, params, None if all_scope else workspace_ids[0])
         overview = self.overview(req, params)["data"]
         where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
+        available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
+        requested_currency = str(params.get("currency") or "").strip().upper()
+        if requested_currency:
+            if requested_currency not in available_currencies:
+                raise MiniAppError(400, "bad_currency", "Currency is not available for this scope.")
+            chart_currencies = [requested_currency]
+        else:
+            chart_currencies = available_currencies
+        aggregation_available = len(available_currencies) <= 1
         category_type = OP_TYPES.get(str(params.get("category_type") or "expense")) or "Расходы"
-        structure = self._category_structure(req, where, wparams, start, end, category_type)
-        dynamics = self._time_dynamics(req, where, wparams, start, end)
-        radar = self._radar(req, workspace_ids, all_scope, start, end, period_key, OP_TYPES.get(str(params.get("radar_type") or "expense")) or "Расходы")
+        structure = self._category_structure(req, where, wparams, start, end, category_type, currencies=chart_currencies)
+        dynamics = self._time_dynamics(req, where, wparams, start, end, currencies=chart_currencies)
+        radar = self._radar(
+            req,
+            workspace_ids,
+            all_scope,
+            start,
+            end,
+            period_key,
+            OP_TYPES.get(str(params.get("radar_type") or "expense")) or "Расходы",
+            currency=requested_currency or (available_currencies[0] if len(available_currencies) == 1 else None),
+            available_currencies=available_currencies,
+        )
+        currency_groups = {
+            currency: {
+                "summary": {
+                    **overview["totals_by_currency"][currency],
+                    "result": to_decimal_money(overview["totals_by_currency"][currency]["income"]) - to_decimal_money(overview["totals_by_currency"][currency]["expense"]),
+                },
+                "category_structure": structure["currency_groups"].get(currency, {"currency": currency, "total": Decimal("0.00"), "items": []}),
+                "time_dynamics": dynamics["currency_groups"].get(currency, {"currency": currency, "datasets": []}),
+            }
+            for currency in available_currencies
+        }
         return success({
             "period": {"key": period_key, "start_date": start, "end_date": end},
             "overview": overview,
+            "aggregation_available": aggregation_available,
+            "available_currencies": available_currencies,
+            "selected_currency": requested_currency or None,
+            "currency_groups": currency_groups,
             "summary": {
-                "aggregation_available": overview["aggregation_available"],
+                "aggregation_available": aggregation_available,
+                "available_currencies": available_currencies,
+                "currency_groups": {
+                    currency: {
+                        **values,
+                        "result": to_decimal_money(values["income"]) - to_decimal_money(values["expense"]),
+                    }
+                    for currency, values in overview["totals_by_currency"].items()
+                },
                 "totals_by_currency": overview["totals_by_currency"],
                 "result_by_currency": {
                     currency: to_decimal_money(values["income"]) - to_decimal_money(values["expense"])
@@ -850,7 +930,7 @@ class MiniAppAPI:
             "top_expense_categories": structure["items"],
         }, request_id=req.request_id)
 
-    def _category_structure(self, req: MiniAppRequest, where: str, wparams: tuple, start: date, end: date, op_type: str) -> dict:
+    def _category_structure(self, req: MiniAppRequest, where: str, wparams: tuple, start: date, end: date, op_type: str, *, currencies: list[str] | None = None) -> dict:
         rows = pg_fetchall(
             f"""
             SELECT category, COALESCE(currency, %s), COALESCE(SUM(amount),0), COUNT(*)
@@ -865,22 +945,31 @@ class MiniAppAPI:
         )
         by_currency: dict[str, list[tuple[str, Decimal, int]]] = defaultdict(list)
         for category, currency, total, count in rows:
+            if currencies and str(currency) not in currencies:
+                continue
             by_currency[str(currency)].append((str(category), to_decimal_money(total), int(count or 0)))
         items = []
+        groups: dict[str, dict[str, Any]] = {}
         for currency, values in by_currency.items():
             currency_total = sum((row[1] for row in values), Decimal("0.00"))
             top = values[:CHART_TOP_N]
             other_total = sum((row[1] for row in values[CHART_TOP_N:]), Decimal("0.00"))
             other_count = sum((row[2] for row in values[CHART_TOP_N:]), 0)
+            group_items = []
             for category, total, count in top:
                 share = int((total / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0
-                items.append({"category": category, "currency": currency, "total": total, "count": count, "share": share})
+                item = {"category": category, "currency": currency, "total": total, "count": count, "share": share}
+                items.append(item)
+                group_items.append(item)
             if other_total > 0:
                 share = int((other_total / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0
-                items.append({"category": "Прочее", "currency": currency, "total": other_total, "count": other_count, "share": share})
-        return {"type": "income" if op_type == "Доходы" else "expense", "top_n": CHART_TOP_N, "items": items}
+                item = {"category": "Прочее", "currency": currency, "total": other_total, "count": other_count, "share": share}
+                items.append(item)
+                group_items.append(item)
+            groups[currency] = {"currency": currency, "total": currency_total, "items": group_items}
+        return {"type": "income" if op_type == "Доходы" else "expense", "top_n": CHART_TOP_N, "currency_groups": groups, "items": items}
 
-    def _time_dynamics(self, req: MiniAppRequest, where: str, wparams: tuple, start: date, end: date) -> dict:
+    def _time_dynamics(self, req: MiniAppRequest, where: str, wparams: tuple, start: date, end: date, *, currencies: list[str] | None = None) -> dict:
         grouping = self._chart_grouping(start, end)
         rows = pg_fetchall(
             f"""
@@ -897,6 +986,8 @@ class MiniAppAPI:
         )
         buckets: dict[tuple[date, str], dict[str, Any]] = {}
         for op_date, typ, currency, total, count in rows:
+            if currencies and str(currency) not in currencies:
+                continue
             bucket = self._bucket_date(op_date, grouping)
             item = buckets.setdefault((bucket, str(currency)), {"date": bucket, "currency": str(currency), "income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
             if typ == "Доходы":
@@ -904,11 +995,50 @@ class MiniAppAPI:
             elif typ == "Расходы":
                 item["expense"] += to_decimal_money(total)
             item["count"] += int(count or 0)
-        return {"grouping": grouping, "items": [buckets[key] for key in sorted(buckets)]}
+        items = [buckets[key] for key in sorted(buckets)]
+        groups: dict[str, dict[str, Any]] = {}
+        for currency in sorted({item["currency"] for item in items}):
+            currency_items = [item for item in items if item["currency"] == currency]
+            groups[currency] = {
+                "currency": currency,
+                "datasets": [
+                    {"kind": "expense", "items": [{"date": item["date"], "amount": item["expense"], "count": item["count"]} for item in currency_items]},
+                    {"kind": "income", "items": [{"date": item["date"], "amount": item["income"], "count": item["count"]} for item in currency_items]},
+                ],
+            }
+        return {"grouping": grouping, "currency_groups": groups, "items": items}
 
-    def _radar(self, req: MiniAppRequest, workspace_ids: list[int | None], all_scope: bool, start: date, end: date, period_key: str, op_type: str) -> dict:
+    def _radar(
+        self,
+        req: MiniAppRequest,
+        workspace_ids: list[int | None],
+        all_scope: bool,
+        start: date,
+        end: date,
+        period_key: str,
+        op_type: str,
+        *,
+        currency: str | None,
+        available_currencies: list[str],
+    ) -> dict:
         prev_start, prev_end, prev_key = self._previous_period(start, end, period_key)
+        if not currency and len(available_currencies) > 1:
+            return {
+                "type": "income" if op_type == "Доходы" else "expense",
+                "currency": None,
+                "aggregation_available": False,
+                "current_period": {"key": period_key, "start_date": start, "end_date": end},
+                "previous_period": {"key": prev_key, "start_date": prev_start, "end_date": prev_end},
+                "metric": "normalized_category_share_percent",
+                "max_axes": RADAR_MAX_AXES,
+                "insufficient_data": True,
+                "reason": "mixed_currencies",
+                "explanation": "Radar недоступен для нескольких валют без выбора конкретной валюты.",
+                "axes": [],
+            }
         where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
+        currency_filter = "AND COALESCE(currency, %s)=%s" if currency else ""
+        currency_params: tuple[Any, ...] = (get_user_currency(req.user_id), currency) if currency else ()
         rows = pg_fetchall(
             f"""
             SELECT CASE WHEN op_date BETWEEN %s AND %s THEN 'current' ELSE 'previous' END AS bucket,
@@ -916,11 +1046,12 @@ class MiniAppAPI:
               FROM public.operations
              WHERE {where}
                AND type=%s
+               {currency_filter}
                AND ((op_date BETWEEN %s AND %s) OR (op_date BETWEEN %s AND %s))
                AND COALESCE(category,'') <> 'Без операций'
              GROUP BY bucket, category
             """,
-            (start, end, *wparams, op_type, start, end, prev_start, prev_end),
+            (start, end, *wparams, op_type, *currency_params, start, end, prev_start, prev_end),
         )
         totals = {"current": Decimal("0.00"), "previous": Decimal("0.00")}
         values: dict[str, dict[str, Decimal]] = defaultdict(lambda: {"current": Decimal("0.00"), "previous": Decimal("0.00")})
@@ -940,11 +1071,14 @@ class MiniAppAPI:
         ]
         return {
             "type": "income" if op_type == "Доходы" else "expense",
+            "currency": currency,
+            "aggregation_available": True,
             "current_period": {"key": period_key, "start_date": start, "end_date": end},
             "previous_period": {"key": prev_key, "start_date": prev_start, "end_date": prev_end},
             "metric": "normalized_category_share_percent",
             "max_axes": RADAR_MAX_AXES,
             "insufficient_data": insufficient,
+            "reason": "insufficient_data" if insufficient else None,
             "explanation": "Значения нормализованы как доля категории внутри периода.",
             "axes": [] if insufficient else axes,
         }
@@ -984,7 +1118,22 @@ class MiniAppAPI:
 
     def create_goal(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
+        idem = str(body.get("idempotency_key") or "").strip()[:120]
+        if not idem:
+            raise MiniAppError(400, "idempotency_required", "Idempotency key is required.")
         ctx = self._write_scope(req, body.get("workspace_id"))
+        response, created = self._run_idempotent_create(
+            req,
+            "goal:create",
+            idem,
+            body,
+            lambda: self._create_goal_untracked(req, ctx, body),
+        )
+        if created:
+            self._safe_goal_event(req, "mini_app_goal_created", workspace_id=ctx.workspace_id, action="create")
+        return success(response, request_id=req.request_id)
+
+    def _create_goal_untracked(self, req: MiniAppRequest, ctx: WorkspaceContext, body: dict[str, Any]) -> dict:
         try:
             goal = create_financial_goal(
                 owner_user_id=req.user_id,
@@ -1009,8 +1158,7 @@ class MiniAppAPI:
                 )
         except (GoalError, ValueError, TypeError, MoneyParseError) as exc:
             raise MiniAppError(400, "bad_goal", "Invalid goal fields.") from exc
-        self._safe_goal_event(req, "mini_app_goal_created", workspace_id=ctx.workspace_id, action="create")
-        return success({"goal": self._goal_dict(goal), "plan_preview": self._plan_preview(req, body, goal)}, request_id=req.request_id)
+        return {"goal": self._goal_dict(goal), "plan_preview": self._plan_preview(req, body, goal)}
 
     def update_goal(self, req: MiniAppRequest, goal_id: int, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
@@ -1051,9 +1199,9 @@ class MiniAppAPI:
 
     def goal_plan_preview(self, req: MiniAppRequest, body: dict[str, Any], goal_id: int | None = None) -> dict:
         workspace_id = body.get("workspace_id")
+        ctx = self._write_scope(req, workspace_id)
         goal = None
         if goal_id is not None:
-            ctx = self._write_scope(req, workspace_id)
             goal = get_goal(int(goal_id), req.user_id, ctx.workspace_id)
             if not goal:
                 raise MiniAppError(404, "goal_not_found", "Goal was not found.")
@@ -1165,7 +1313,22 @@ class MiniAppAPI:
 
     def create_limit(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
+        idem = str(body.get("idempotency_key") or "").strip()[:120]
+        if not idem:
+            raise MiniAppError(400, "idempotency_required", "Idempotency key is required.")
         ctx = self._write_scope(req, body.get("workspace_id"))
+        response, created = self._run_idempotent_create(
+            req,
+            "limit:create",
+            idem,
+            body,
+            lambda: self._create_limit_untracked(req, ctx, body),
+        )
+        if created:
+            self._track(req, "mini_app_budget_limit_created", workspace_id=ctx.workspace_id, properties={"period_kind": response["limit"]["period"], "action": "create", "source": "mini_app"})
+        return success(response, request_id=req.request_id)
+
+    def _create_limit_untracked(self, req: MiniAppRequest, ctx: WorkspaceContext, body: dict[str, Any]) -> dict:
         period = str(body.get("period") or "month")
         if period not in LIMIT_PERIODS:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")
@@ -1173,13 +1336,11 @@ class MiniAppAPI:
         scope = str(body.get("scope") or "category")
         currency = str(body.get("currency") or get_user_currency(req.user_id))[:8]
         if scope == "all_expenses":
-            limit_id = upsert_general_limit(user_id=req.user_id, workspace_id=ctx.workspace_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period_type=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
+            stored = create_or_update_general_limit(user_id=req.user_id, workspace_id=ctx.workspace_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
         else:
             category = self._validate_category(req, ctx.workspace_id, "Расходы", str(body.get("category") or ""))
-            self._upsert_category_limit(req.user_id, ctx.workspace_id, period, category, amount, currency)
-            limit_id = f"category:{period}:{category}"
-        self._track(req, "mini_app_budget_limit_created", workspace_id=ctx.workspace_id, properties={"period_kind": period, "action": "create", "source": "mini_app"})
-        return success({"limit": next((item for item in self._limits(req, ctx.workspace_id) if item["id"] == (f"general:{limit_id}" if scope == "all_expenses" else limit_id)), None)}, request_id=req.request_id)
+            stored = replace_category_limit(user_id=req.user_id, workspace_id=ctx.workspace_id, old_period=None, old_category=None, period=period, category=category, amount=amount, currency=currency)
+        return {"limit": self._stored_limit_dict(req, stored)}
 
     def update_limit(self, req: MiniAppRequest, limit_id: str, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
@@ -1192,74 +1353,44 @@ class MiniAppAPI:
         currency = str(body.get("currency") or get_user_currency(req.user_id))[:8]
         if decoded.startswith("general:"):
             raw_id = int(decoded.split(":", 1)[1])
-            upsert_general_limit(user_id=req.user_id, workspace_id=ctx.workspace_id, limit_id=raw_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period_type=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
+            try:
+                stored = create_or_update_general_limit(user_id=req.user_id, workspace_id=ctx.workspace_id, limit_id=raw_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
+            except MiniAppLimitError as exc:
+                raise MiniAppError(404 if exc.code == "limit_not_found" else 400, exc.code, "Limit could not be updated.") from exc
             lookup = f"general:{raw_id}"
         else:
             _kind, old_period, old_category = decoded.split(":", 2)
             category = self._validate_category(req, ctx.workspace_id, "Расходы", str(body.get("category") or old_category))
-            self._delete_category_limit(req.user_id, ctx.workspace_id, old_period, old_category)
-            self._upsert_category_limit(req.user_id, ctx.workspace_id, period, category, amount, currency)
+            try:
+                stored = replace_category_limit(
+                    user_id=req.user_id,
+                    workspace_id=ctx.workspace_id,
+                    old_period=old_period,
+                    old_category=old_category,
+                    period=period,
+                    category=category,
+                    amount=amount,
+                    currency=currency,
+                    require_existing=True,
+                )
+            except MiniAppLimitError as exc:
+                raise MiniAppError(404 if exc.code == "limit_not_found" else 400, exc.code, "Limit could not be updated.") from exc
             lookup = f"category:{period}:{category}"
         self._track(req, "mini_app_budget_limit_updated", workspace_id=ctx.workspace_id, properties={"period_kind": period, "action": "update", "source": "mini_app"})
-        return success({"limit": next((item for item in self._limits(req, ctx.workspace_id) if item["id"] == lookup), None)}, request_id=req.request_id)
+        return success({"limit": self._stored_limit_dict(req, stored), "id": lookup}, request_id=req.request_id)
 
     def delete_limit(self, req: MiniAppRequest, limit_id: str, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
         ctx = self._write_scope(req, body.get("workspace_id"))
         decoded = unquote(limit_id)
-        conn = get_conn()
         try:
-            with conn.cursor() as cur:
-                if decoded.startswith("general:"):
-                    cur.execute("DELETE FROM public.general_spending_limits WHERE id=%s AND owner_user_id=%s AND workspace_id IS NOT DISTINCT FROM %s", (int(decoded.split(":", 1)[1]), req.user_id, ctx.workspace_id))
-                else:
-                    _kind, period, category = decoded.split(":", 2)
-                    cur.execute("DELETE FROM public.category_limits WHERE user_id=%s AND workspace_id IS NOT DISTINCT FROM %s AND period=%s AND category=%s", (req.user_id, ctx.workspace_id, period, category))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            deleted = delete_stored_limit(user_id=req.user_id, workspace_id=ctx.workspace_id, limit_id=decoded)
+        except (MiniAppLimitError, ValueError) as exc:
+            raise MiniAppError(400, "bad_limit_id", "Invalid limit id.") from exc
+        if not deleted:
+            raise MiniAppError(404, "limit_not_found", "Limit was not found.")
         self._track(req, "mini_app_budget_limit_deleted", workspace_id=ctx.workspace_id, properties={"action": "delete", "source": "mini_app"})
         return success({"deleted": True, "limit_id": decoded}, request_id=req.request_id)
-
-    def _upsert_category_limit(self, user_id: int, workspace_id: int | None, period: str, category: str, amount: Decimal, currency: str) -> None:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    DELETE FROM public.category_limits
-                     WHERE user_id=%s AND workspace_id IS NOT DISTINCT FROM %s AND period=%s AND category=%s
-                    """,
-                    (user_id, workspace_id, period, category),
-                )
-                cur.execute(
-                    """
-                    INSERT INTO public.category_limits (user_id, workspace_id, period, category, amount, currency, updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,now())
-                    """,
-                    (user_id, workspace_id, period, category, amount, currency),
-                )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def _delete_category_limit(self, user_id: int, workspace_id: int | None, period: str, category: str) -> None:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM public.category_limits WHERE user_id=%s AND workspace_id IS NOT DISTINCT FROM %s AND period=%s AND category=%s", (user_id, workspace_id, period, category))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def _limit_spent(self, user_id: int, workspace_id: int | None, period: str, category: str | None, today: date | None = None) -> Decimal:
         today = today or user_local_date(user_id, workspace_id)
@@ -1433,6 +1564,56 @@ class MiniAppAPI:
 
     def _request_hash(self, request_body: dict[str, Any]) -> str:
         return hashlib.sha256(json.dumps(serialize(request_body), sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _namespaced_idempotency_key(self, action: str, key: str) -> str:
+        return f"{action}:{str(key).strip()}"[:180]
+
+    def _run_idempotent_create(
+        self,
+        req: MiniAppRequest,
+        action: str,
+        idempotency_key: str,
+        body: dict[str, Any],
+        creator,
+    ) -> tuple[dict, bool]:
+        key = self._namespaced_idempotency_key(action, idempotency_key)
+        request_hash = self._request_hash(body)
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                claim = self._claim_idempotency_tx(cur, req.user_id, key, request_hash)
+                status = claim["status"]
+                if status == "completed":
+                    conn.commit()
+                    return claim["response"], False
+                if status != "claimed":
+                    conn.rollback()
+                    raise MiniAppError(claim["http_status"], claim["status"], claim["message"])
+            conn.commit()
+        except errors.UndefinedTable as exc:
+            conn.rollback()
+            raise MiniAppError(503, "miniapp_not_configured", "Mini App storage is not configured.") from exc
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        response = creator()
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                self._complete_idempotency_tx(cur, req.user_id, key, request_hash, response, operation_id=None)
+            conn.commit()
+            return response, True
+        except errors.UndefinedTable as exc:
+            conn.rollback()
+            raise MiniAppError(503, "miniapp_not_configured", "Mini App storage is not configured.") from exc
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _claim_idempotency_tx(self, cur, user_id: int, key: str, request_hash: str) -> dict:
         cur.execute(

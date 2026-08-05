@@ -1,6 +1,7 @@
 import './styles.css';
 import Chart from 'chart.js/auto';
 import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
+import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { getTelegramWebApp, initTelegramShell } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
@@ -120,12 +121,15 @@ function renderSheet(): string {
   if (state.confirmDeleteId && selectedOperation) {
     return ConfirmDialog(state.confirmDeleteId, `${selectedOperation.category} · ${operationAmount(selectedOperation)}`);
   }
+  if (state.confirmLimitDeleteId && selectedLimit) {
+    return ConfirmDialog(state.confirmLimitDeleteId, `${selectedLimit.title} · ${formatMoneyString(selectedLimit.amount, selectedLimit.currency)}`, 'Удалить лимит?', 'confirm-limit-delete');
+  }
   if (!state.sheet && !selectedOperation) return '';
   if (state.sheet === 'goal-create') {
-    return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError));
+    return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
   }
   if (state.sheet === 'goal-edit' && selectedGoal) {
-    return BottomSheet('Изменить цель', GoalForm(selectedGoal, state.saving, state.saveError));
+    return BottomSheet('Изменить цель', GoalForm(selectedGoal, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
   }
   if (state.sheet === 'goal-contribution' && selectedGoal) {
     return BottomSheet('Пополнить цель', GoalContributionForm(selectedGoal, state.goalIdempotencyKey || requestId(), state.saving, state.saveError));
@@ -199,6 +203,7 @@ function render(): void {
               : renderHome();
   app.innerHTML = `${AppShell(state, renderTopbar(), screen)}${renderNav()}${renderSheet()}`;
   wireEvents();
+  syncGoalScheduleFields();
   renderCharts();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
@@ -242,11 +247,29 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'home') overview = await api.overview(state.workspaceId, state.period);
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, state.period, 0, state.search);
     if (state.tab === 'analytics') {
-      const response = await api.analytics(state.workspaceId, {
+      let response = await api.analytics(state.workspaceId, {
         ...state.period,
         category_type: state.analyticsFilters?.categoryType,
-        radar_type: state.analyticsFilters?.radarType
+        radar_type: state.analyticsFilters?.radarType,
+        currency: state.analyticsFilters?.radarCurrency
       } as typeof state.period);
+      if (response.available_currencies.length > 1 && !state.analyticsFilters?.radarCurrency) {
+        const firstCurrency = response.available_currencies[0];
+        state.analyticsFilters = {
+          categoryType: state.analyticsFilters?.categoryType || 'expense',
+          dynamicsType: state.analyticsFilters?.dynamicsType || 'both',
+          radarType: state.analyticsFilters?.radarType || 'expense',
+          categoryCurrency: state.analyticsFilters?.categoryCurrency || firstCurrency,
+          dynamicsCurrency: state.analyticsFilters?.dynamicsCurrency || firstCurrency,
+          radarCurrency: firstCurrency
+        };
+        response = await api.analytics(state.workspaceId, {
+          ...state.period,
+          category_type: state.analyticsFilters.categoryType,
+          radar_type: state.analyticsFilters.radarType,
+          currency: firstCurrency
+        } as typeof state.period);
+      }
       overview = response.overview;
       analytics = response;
     }
@@ -285,6 +308,11 @@ function closeSheet(): void {
     render();
     return;
   }
+  if (state.confirmLimitDeleteId) {
+    state.confirmLimitDeleteId = undefined;
+    render();
+    return;
+  }
   if (state.dirty && !window.confirm('Закрыть без сохранения?')) return;
   state.sheet = null;
   selectedOperation = null;
@@ -295,34 +323,80 @@ function closeSheet(): void {
   state.dirty = false;
   state.addIdempotencyKey = undefined;
   state.goalIdempotencyKey = undefined;
+  state.goalCreateIdempotencyKey = undefined;
+  state.limitCreateIdempotencyKey = undefined;
+  state.goalPlanPreview = undefined;
+  state.goalDraft = undefined;
+  state.confirmLimitDeleteId = undefined;
   state.formDraft = undefined;
   render();
 }
 
+function syncGoalScheduleFields(): void {
+  const form = app.querySelector<HTMLFormElement>('form[data-action="create-goal"], form[data-action="save-goal"]');
+  if (!form) return;
+  const frequency = form.querySelector<HTMLSelectElement>('select[name="frequency"]')?.value || 'none';
+  form.querySelectorAll<HTMLElement>('[data-schedule]').forEach((node) => {
+    node.hidden = node.dataset.schedule !== frequency;
+  });
+}
+
 function renderCharts(): void {
   if (state.tab !== 'analytics' || !analytics) return;
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue('--tg-theme-button-color').trim() || styles.getPropertyValue('--accent').trim() || '#0a7a75';
+  const destructive = styles.getPropertyValue('--danger').trim() || '#b83242';
+  const positive = styles.getPropertyValue('--positive').trim() || '#147a43';
+  const categoryCurrency = state.analyticsFilters?.categoryCurrency || analytics.available_currencies[0];
+  const dynamicsCurrency = state.analyticsFilters?.dynamicsCurrency || analytics.available_currencies[0];
   const categoryCanvas = document.querySelector<HTMLCanvasElement>('#categoryChart');
-  if (categoryCanvas && analytics.category_structure.items.length) {
+  const categoryItems = categoryCurrency ? analytics.category_structure.currency_groups[categoryCurrency]?.items || [] : analytics.category_structure.items;
+  if (categoryCanvas && categoryItems.length) {
     chartInstances.push(new Chart(categoryCanvas, {
       type: 'bar',
       data: {
-        labels: analytics.category_structure.items.map((item) => item.category),
-        datasets: [{ label: 'Доля', data: analytics.category_structure.items.map((item) => item.share), backgroundColor: '#0a7a75' }]
+        labels: categoryItems.map((item) => `${item.category} · ${item.currency}`),
+        datasets: [{ label: `Доля · ${categoryCurrency}`, data: categoryItems.map((item) => item.share), backgroundColor: accent }]
       },
-      options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true, max: 100 } } }
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: (ctx) => `${categoryItems[ctx.dataIndex]?.share ?? 0}% · ${formatMoneyString(categoryItems[ctx.dataIndex]?.total || '0.00', categoryItems[ctx.dataIndex]?.currency || categoryCurrency)}` } }
+        },
+        scales: { x: { beginAtZero: true, max: 100 } }
+      }
     }));
   }
   const dynamicsCanvas = document.querySelector<HTMLCanvasElement>('#dynamicsChart');
-  if (dynamicsCanvas && analytics.time_dynamics.items.length) {
-    const labels = analytics.time_dynamics.items.map((item) => item.date);
+  const dynamicsItems = dynamicsCurrency ? analytics.time_dynamics.items.filter((item) => item.currency === dynamicsCurrency) : analytics.time_dynamics.items;
+  if (dynamicsCanvas && dynamicsItems.length) {
+    const labels = dynamicsItems.map((item) => item.date);
     const mode = state.analyticsFilters?.dynamicsType || 'both';
     const datasets = [];
-    if (mode !== 'income') datasets.push({ label: 'Расходы', data: analytics.time_dynamics.items.map((item) => Number(item.expense)), borderColor: '#b83242', backgroundColor: 'rgba(184,50,66,.18)' });
-    if (mode !== 'expense') datasets.push({ label: 'Доходы', data: analytics.time_dynamics.items.map((item) => Number(item.income)), borderColor: '#147a43', backgroundColor: 'rgba(20,122,67,.18)' });
+    const expensePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.expense));
+    const incomePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.income));
+    if (mode !== 'income') datasets.push({ label: `Расходы · ${dynamicsCurrency}`, data: expensePoints.map((point) => point.value), borderColor: destructive, backgroundColor: 'rgba(184,50,66,.18)' });
+    if (mode !== 'expense') datasets.push({ label: `Доходы · ${dynamicsCurrency}`, data: incomePoints.map((point) => point.value), borderColor: positive, backgroundColor: 'rgba(20,122,67,.18)' });
     chartInstances.push(new Chart(dynamicsCanvas, {
       type: 'line',
       data: { labels, datasets },
-      options: { responsive: true, plugins: { legend: { display: true } }, scales: { y: { beginAtZero: true } } }
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: true },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const source = ctx.datasetIndex === 0 && mode !== 'income' ? expensePoints : incomePoints;
+                return `${ctx.dataset.label}: ${formatMoneyString(source[ctx.dataIndex]?.original || '0.00', dynamicsCurrency)}`;
+              }
+            }
+          }
+        },
+        scales: { y: { beginAtZero: true } }
+      }
     }));
   }
 }
@@ -347,8 +421,9 @@ function formPayload(form: HTMLFormElement): OperationPayload {
 function goalPayload(form: HTMLFormElement): GoalPayload {
   const data = new FormData(form);
   const frequency = String(data.get('frequency') || 'none') as GoalPayload['frequency'];
-  return {
+  const payload: GoalPayload = {
     workspace_id: state.workspaceId,
+    idempotency_key: state.goalCreateIdempotencyKey,
     title: String(data.get('title') || '').trim(),
     target_amount: normalizeMoneyText(String(data.get('target_amount') || '0')),
     current_amount: normalizeMoneyText(String(data.get('current_amount') || '0')),
@@ -358,6 +433,13 @@ function goalPayload(form: HTMLFormElement): GoalPayload {
     comfortable_amount: String(data.get('comfortable_amount') || '').trim() ? normalizeMoneyText(String(data.get('comfortable_amount'))) : '',
     reminders_enabled: data.get('reminders_enabled') === 'on',
   };
+  if (frequency === 'monthly') payload.day = globalThis.parseInt(String(data.get('day') || ''), 10);
+  if (frequency === 'twice_monthly') payload.days = [
+    globalThis.parseInt(String(data.get('day_first') || ''), 10),
+    globalThis.parseInt(String(data.get('day_second') || ''), 10)
+  ].filter((value) => !globalThis.Number.isNaN(value));
+  if (frequency === 'weekly') payload.weekday = globalThis.parseInt(String(data.get('weekday') || ''), 10);
+  return payload;
 }
 
 function goalMovementPayload(form: HTMLFormElement): GoalMovementPayload {
@@ -375,6 +457,7 @@ function limitPayload(form: HTMLFormElement): LimitPayload {
   const data = new FormData(form);
   return {
     workspace_id: state.workspaceId,
+    idempotency_key: state.limitCreateIdempotencyKey,
     title: String(data.get('title') || '').trim(),
     scope: String(data.get('scope') || 'category') as LimitPayload['scope'],
     category: String(data.get('category') || '').trim(),
@@ -452,6 +535,17 @@ function wireEvents(): void {
       await loadScreen();
     });
   });
+  app.querySelectorAll<HTMLSelectElement>('[data-action="chart-currency"]').forEach((select) => {
+    select.addEventListener('change', async () => {
+      const chart = select.dataset.chart || '';
+      state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
+      if (chart === 'category') state.analyticsFilters.categoryCurrency = select.value;
+      if (chart === 'dynamics') state.analyticsFilters.dynamicsCurrency = select.value;
+      if (chart === 'radar') state.analyticsFilters.radarCurrency = select.value;
+      await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: 'currency', source: 'mini_app' });
+      await loadScreen();
+    });
+  });
   app.querySelectorAll<HTMLButtonElement>('[data-action="plans-mode"]').forEach((button) => {
     button.addEventListener('click', () => {
       state.plansMode = button.dataset.mode === 'limits' ? 'limits' : 'goals';
@@ -483,6 +577,9 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="goal-create"]')?.addEventListener('click', () => {
     state.sheet = 'goal-create';
+    state.goalCreateIdempotencyKey = requestId();
+    state.goalPlanPreview = undefined;
+    state.goalDraft = undefined;
     state.saveError = undefined;
     state.dirty = false;
     render();
@@ -491,6 +588,8 @@ function wireEvents(): void {
     button.addEventListener('click', () => {
       selectedGoal = (plans?.goals || []).find((goal) => goal.id === Number(button.dataset.id)) || null;
       state.sheet = selectedGoal ? 'goal-edit' : null;
+      state.goalPlanPreview = undefined;
+      state.goalDraft = undefined;
       state.saveError = undefined;
       state.dirty = false;
       render();
@@ -525,6 +624,7 @@ function wireEvents(): void {
   app.querySelector<HTMLButtonElement>('[data-action="limit-create"]')?.addEventListener('click', async () => {
     await loadCategoriesFor('expense');
     state.sheet = 'limit-create';
+    state.limitCreateIdempotencyKey = requestId();
     state.saveError = undefined;
     state.dirty = false;
     render();
@@ -541,15 +641,9 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="limit-delete"]').forEach((button) => {
     button.addEventListener('click', async () => {
-      if (!window.confirm('Удалить лимит?')) return;
-      try {
-        await api.deleteLimit(button.dataset.id || '', state.workspaceId);
-        showToast('Лимит удалён');
-        await reloadActive();
-      } catch (error) {
-        state.saveError = safeError(error);
-        render();
-      }
+      selectedLimit = (plans?.limits || []).find((limit) => limit.id === button.dataset.id) || null;
+      state.confirmLimitDeleteId = selectedLimit?.id;
+      render();
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
@@ -615,6 +709,7 @@ function wireEvents(): void {
     });
     input.addEventListener('change', () => {
       state.dirty = true;
+      if (input.getAttribute('name') === 'frequency') syncGoalScheduleFields();
     });
   });
 
@@ -687,6 +782,7 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="cancel-delete"]')?.addEventListener('click', () => {
     state.confirmDeleteId = undefined;
+    state.confirmLimitDeleteId = undefined;
     render();
   });
   app.querySelector<HTMLButtonElement>('[data-action="confirm-delete"]')?.addEventListener('click', async (event) => {
@@ -708,16 +804,47 @@ function wireEvents(): void {
       render();
     }
   });
-
-  app.querySelector<HTMLFormElement>('form[data-action="create-goal"]')?.addEventListener('submit', async (event) => {
-    event.preventDefault();
+  app.querySelector<HTMLButtonElement>('[data-action="confirm-limit-delete"]')?.addEventListener('click', async (event) => {
     if (state.saving) return;
-    const payload = goalPayload(event.currentTarget as HTMLFormElement);
+    const id = String((event.currentTarget as HTMLButtonElement).dataset.id || '');
     state.saving = true;
     state.saveError = undefined;
     render();
     try {
+      await api.deleteLimit(id, state.workspaceId);
+      state.confirmLimitDeleteId = undefined;
+      selectedLimit = null;
+      showToast('Лимит удалён');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="create-goal"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const submitter = (event as SubmitEvent).submitter as HTMLButtonElement | null;
+    const payload = goalPayload(event.currentTarget as HTMLFormElement);
+    state.goalDraft = payload as unknown as Record<string, unknown>;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      if (submitter?.dataset.submitMode !== 'confirm') {
+        const preview = await api.goalPlanPreview(payload);
+        state.goalPlanPreview = preview.plan_preview;
+        state.saving = false;
+        render();
+        return;
+      }
+      if (!state.goalPlanPreview) throw new Error('preview_required');
       await api.createGoal(payload);
+      state.goalCreateIdempotencyKey = undefined;
+      state.goalPlanPreview = undefined;
+      state.goalDraft = undefined;
       state.dirty = false;
       closeSheet();
       showToast('Цель создана');
@@ -733,11 +860,24 @@ function wireEvents(): void {
     event.preventDefault();
     if (state.saving) return;
     const form = event.currentTarget as HTMLFormElement;
+    const submitter = (event as SubmitEvent).submitter as HTMLButtonElement | null;
+    const payload = goalPayload(form);
+    state.goalDraft = payload as unknown as Record<string, unknown>;
     state.saving = true;
     state.saveError = undefined;
     render();
     try {
-      await api.updateGoal(Number(form.dataset.id), goalPayload(form));
+      if (submitter?.dataset.submitMode !== 'confirm') {
+        const preview = await api.goalPlanPreview(payload, Number(form.dataset.id));
+        state.goalPlanPreview = preview.plan_preview;
+        state.saving = false;
+        render();
+        return;
+      }
+      if (!state.goalPlanPreview) throw new Error('preview_required');
+      await api.updateGoal(Number(form.dataset.id), payload);
+      state.goalPlanPreview = undefined;
+      state.goalDraft = undefined;
       state.dirty = false;
       closeSheet();
       showToast('Цель обновлена');
@@ -779,6 +919,7 @@ function wireEvents(): void {
     render();
     try {
       await api.createLimit(payload);
+      state.limitCreateIdempotencyKey = undefined;
       state.dirty = false;
       closeSheet();
       showToast('Лимит создан');

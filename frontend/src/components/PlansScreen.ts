@@ -1,5 +1,5 @@
 import { formatMoneyString } from '../money';
-import type { BudgetLimit, Goal } from '../types';
+import type { BudgetLimit, Goal, GoalPlanPreview } from '../types';
 
 type PlansData = {
   all_scope_note?: string | null;
@@ -96,28 +96,99 @@ export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' = 
   `;
 }
 
-export function GoalForm(goal: Goal | null, saving = false, error = ''): string {
+function scheduleValue(goal: Goal | null, draft: Record<string, unknown> | undefined, key: string): string {
+  if (draft && draft[key] !== undefined) {
+    const value = draft[key];
+    return Array.isArray(value) ? value.join(',') : String(value ?? '');
+  }
+  const value = goal?.schedule_config?.[key];
+  return Array.isArray(value) ? value.join(',') : String(value ?? '');
+}
+
+function previewReason(reason?: string | null): string {
+  return {
+    missing_deadline: 'Укажите срок цели.',
+    no_occurrences: 'В выбранном расписании нет взносов до срока.',
+    invalid_contribution: 'Комфортная сумма должна быть больше нуля.',
+    horizon_exceeded: 'Расписание слишком длинное для расчёта.',
+    no_schedule: 'Срок будет зависеть от ручных пополнений.',
+    no_plan: 'План не настроен.',
+  }[String(reason || '')] || String(reason || '');
+}
+
+function GoalPreview(preview?: GoalPlanPreview): string {
+  if (!preview) return '';
+  const schedule = preview.schedule_config || {};
+  const scheduleText = preview.frequency === 'monthly'
+    ? `День месяца: ${schedule.day ?? '-'}`
+    : preview.frequency === 'twice_monthly'
+      ? `Дни месяца: ${Array.isArray(schedule.days) ? schedule.days.join(' и ') : '-'}`
+      : preview.frequency === 'weekly'
+        ? `День недели: ${schedule.weekday ?? '-'}`
+        : 'Без расписания';
+  return `
+    <div class="preview-panel" data-testid="goal-plan-preview">
+      <strong>${preview.feasible ? 'Предпросмотр плана' : 'План требует внимания'}</strong>
+      <div class="detail-row"><span>Осталось</span><strong>${formatMoneyString(preview.remaining_amount)}</strong></div>
+      ${preview.recommended_amount ? `<div class="detail-row"><span>Рекомендуемый взнос</span><strong>${formatMoneyString(preview.recommended_amount)}</strong></div>` : ''}
+      ${preview.comfortable_amount ? `<div class="detail-row"><span>Комфортный взнос</span><strong>${formatMoneyString(preview.comfortable_amount)}</strong></div>` : ''}
+      <div class="detail-row"><span>Частота</span><strong>${esc(preview.frequency)}</strong></div>
+      <div class="detail-row"><span>Расписание</span><strong>${esc(scheduleText)}</strong></div>
+      <div class="detail-row"><span>Взносов</span><strong>${preview.required_contributions ?? preview.occurrence_count}</strong></div>
+      <div class="detail-row"><span>Следующая дата</span><strong>${esc(preview.next_occurrence || '-')}</strong></div>
+      <div class="detail-row"><span>Оценка завершения</span><strong>${esc(preview.projected_completion_date || '-')}</strong></div>
+      ${!preview.feasible || preview.reason ? `<p class="caption">${esc(previewReason(preview.reason))}</p>` : ''}
+    </div>
+  `;
+}
+
+export function GoalForm(goal: Goal | null, saving = false, error = '', preview?: GoalPlanPreview, draft?: Record<string, unknown>): string {
+  const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
+  const monthlyDay = scheduleValue(goal, draft, 'day');
+  const twiceDays = scheduleValue(goal, draft, 'days').split(',').filter(Boolean);
+  const weeklyDay = scheduleValue(goal, draft, 'weekday');
   return `
     <form class="form-grid" data-action="${goal ? 'save-goal' : 'create-goal'}" ${goal ? `data-id="${goal.id}"` : ''}>
-      <input class="input" name="title" maxlength="80" placeholder="Название" value="${esc(goal?.title || '')}" required />
-      <input class="input" name="target_amount" inputmode="decimal" placeholder="Цель" value="${esc(goal?.target || '')}" required />
-      <input class="input" name="current_amount" inputmode="decimal" placeholder="Уже накоплено" value="${esc(goal?.current || '')}" />
-      <input class="input" name="deadline" type="date" value="${esc(goal?.deadline || '')}" />
+      <input class="input" name="title" maxlength="80" placeholder="Название" value="${esc(value('title', goal?.title || ''))}" required />
+      <input class="input" name="target_amount" inputmode="decimal" placeholder="Цель" value="${esc(value('target_amount', goal?.target || ''))}" required />
+      <input class="input" name="current_amount" inputmode="decimal" placeholder="Уже накоплено" value="${esc(value('current_amount', goal?.current || ''))}" />
+      <input class="input" name="deadline" type="date" value="${esc(value('deadline', goal?.deadline || ''))}" />
       <select class="select" name="strategy">
-        <option value="deadline" ${goal?.strategy === 'deadline' ? 'selected' : ''}>К сроку</option>
-        <option value="contribution" ${goal?.strategy === 'contribution' ? 'selected' : ''}>Комфортная сумма</option>
-        <option value="none" ${goal?.strategy === 'none' ? 'selected' : ''}>Без плана</option>
+        <option value="deadline" ${value('strategy', goal?.strategy || 'deadline') === 'deadline' ? 'selected' : ''}>К сроку</option>
+        <option value="contribution" ${value('strategy', goal?.strategy || '') === 'contribution' ? 'selected' : ''}>Комфортная сумма</option>
+        <option value="none" ${value('strategy', goal?.strategy || '') === 'none' ? 'selected' : ''}>Без плана</option>
       </select>
       <select class="select" name="frequency">
-        <option value="monthly" ${goal?.frequency === 'monthly' ? 'selected' : ''}>Раз в месяц</option>
-        <option value="twice_monthly" ${goal?.frequency === 'twice_monthly' ? 'selected' : ''}>Два раза в месяц</option>
-        <option value="weekly" ${goal?.frequency === 'weekly' ? 'selected' : ''}>Раз в неделю</option>
-        <option value="none" ${goal?.frequency === 'none' ? 'selected' : ''}>Без расписания</option>
+        <option value="monthly" ${value('frequency', goal?.frequency || 'none') === 'monthly' ? 'selected' : ''}>Раз в месяц</option>
+        <option value="twice_monthly" ${value('frequency', goal?.frequency || 'none') === 'twice_monthly' ? 'selected' : ''}>Два раза в месяц</option>
+        <option value="weekly" ${value('frequency', goal?.frequency || 'none') === 'weekly' ? 'selected' : ''}>Раз в неделю</option>
+        <option value="none" ${value('frequency', goal?.frequency || 'none') === 'none' ? 'selected' : ''}>Без расписания</option>
       </select>
-      <input class="input" name="comfortable_amount" inputmode="decimal" placeholder="Комфортное пополнение" value="${esc(goal?.comfortable_amount || '')}" />
-      <label class="toggle-row"><input type="checkbox" name="reminders_enabled" ${goal?.reminders_enabled ? 'checked' : ''} /> Напоминания</label>
+      <input class="input" name="comfortable_amount" inputmode="decimal" placeholder="Комфортное пополнение" value="${esc(value('comfortable_amount', goal?.comfortable_amount || ''))}" />
+      <div class="schedule-fields" data-schedule="monthly">
+        <label class="field-label">День месяца
+          <input class="input" name="day" type="number" min="1" max="28" placeholder="Например, 5" value="${esc(monthlyDay)}" />
+        </label>
+      </div>
+      <div class="schedule-fields" data-schedule="twice_monthly">
+        <label class="field-label">Первый день
+          <input class="input" name="day_first" type="number" min="1" max="28" placeholder="Например, 5" value="${esc(twiceDays[0] || '')}" />
+        </label>
+        <label class="field-label">Второй день
+          <input class="input" name="day_second" type="number" min="1" max="28" placeholder="Например, 20" value="${esc(twiceDays[1] || '')}" />
+        </label>
+      </div>
+      <div class="schedule-fields" data-schedule="weekly">
+        <select class="select" name="weekday">
+          <option value="" ${weeklyDay === '' ? 'selected' : ''}>Выберите день недели</option>
+          ${['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, index) => `<option value="${index}" ${weeklyDay === String(index) ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </div>
+      <label class="toggle-row"><input type="checkbox" name="reminders_enabled" ${draft?.reminders_enabled === true || (!draft && goal?.reminders_enabled) ? 'checked' : ''} /> Напоминания</label>
+      ${GoalPreview(preview)}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
-      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
+      <button class="button" type="submit" data-submit-mode="preview" ${saving ? 'disabled' : ''}>Предпросмотр</button>
+      ${preview ? `<button class="button primary" type="submit" data-submit-mode="confirm" ${saving || !preview.feasible ? 'disabled' : ''}>Подтвердить сохранение</button>` : ''}
     </form>
   `;
 }
