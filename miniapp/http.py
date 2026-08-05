@@ -93,10 +93,60 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_operation(req, op_id, body))
         if method == "GET" and path == "/miniapp/api/analytics":
             return _json_response(start_response, 200, api.analytics(req, params))
+        if method == "GET" and path == "/miniapp/api/analytics/category-structure":
+            return _json_response(start_response, 200, api.analytics(req, params))
+        if method == "GET" and path == "/miniapp/api/analytics/time-dynamics":
+            return _json_response(start_response, 200, api.analytics(req, params))
+        if method == "GET" and path == "/miniapp/api/analytics/radar":
+            return _json_response(start_response, 200, api.analytics(req, params))
         if method == "GET" and path == "/miniapp/api/plans":
             return _json_response(start_response, 200, api.plans(req, params))
+        if method == "GET" and path == "/miniapp/api/goals":
+            return _json_response(start_response, 200, api.goals(req, params))
+        if method == "POST" and path == "/miniapp/api/goals":
+            return _json_response(start_response, 200, api.create_goal(req, body))
+        if method == "POST" and path == "/miniapp/api/goals/plan-preview":
+            return _json_response(start_response, 200, api.goal_plan_preview(req, body))
+        if path.startswith("/miniapp/api/goals/"):
+            parts = path.strip("/").split("/")
+            goal_id = int(parts[3])
+            tail = parts[4] if len(parts) > 4 else ""
+            if method == "GET" and not tail:
+                return _json_response(start_response, 200, api.goal_detail(req, goal_id, params))
+            if method == "PATCH" and not tail:
+                return _json_response(start_response, 200, api.update_goal(req, goal_id, body))
+            if method == "POST" and tail == "contributions":
+                return _json_response(start_response, 200, api.goal_contribution(req, goal_id, body))
+            if method == "POST" and tail == "plan-preview":
+                return _json_response(start_response, 200, api.goal_plan_preview(req, body, goal_id))
+            if method == "POST" and tail == "reminders":
+                return _json_response(start_response, 200, api.goal_reminders(req, goal_id, body))
+            if method == "POST" and tail == "status":
+                return _json_response(start_response, 200, api.goal_status(req, goal_id, body))
+        if method == "GET" and path == "/miniapp/api/limits":
+            return _json_response(start_response, 200, api.limits(req, params))
+        if method == "POST" and path == "/miniapp/api/limits":
+            return _json_response(start_response, 200, api.create_limit(req, body))
+        if path.startswith("/miniapp/api/limits/"):
+            limit_id = path.rsplit("/", 1)[-1]
+            if method == "PATCH":
+                return _json_response(start_response, 200, api.update_limit(req, limit_id, body))
+            if method == "DELETE":
+                return _json_response(start_response, 200, api.delete_limit(req, limit_id, body))
         if method == "GET" and path == "/miniapp/api/profile":
             return _json_response(start_response, 200, api.profile(req))
+        if method == "GET" and path == "/miniapp/api/profile/categories":
+            return _json_response(start_response, 200, api.profile_categories(req, params))
+        if method == "GET" and path == "/miniapp/api/profile/notifications":
+            return _json_response(start_response, 200, api.notification_preferences(req))
+        if method == "POST" and path == "/miniapp/api/profile/notifications":
+            return _json_response(start_response, 200, api.update_notification_preferences(req, body))
+        if method == "GET" and path == "/miniapp/api/profile/premium":
+            return _json_response(start_response, 200, api.premium(req))
+        if method == "GET" and path == "/miniapp/api/profile/export":
+            return _json_response(start_response, 200, api.export_entry(req))
+        if method == "POST" and path == "/miniapp/api/profile/export":
+            return _json_response(start_response, 200, api.export_entry(req, body))
         if method == "POST" and path == "/miniapp/api/profile/theme":
             return _json_response(start_response, 200, api.set_theme(req, body))
         if method == "POST" and path == "/miniapp/api/analytics/event":

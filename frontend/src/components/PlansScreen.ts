@@ -1,39 +1,163 @@
 import { formatMoneyString } from '../money';
+import type { BudgetLimit, Goal } from '../types';
 
 type PlansData = {
   all_scope_note?: string | null;
-  goals: Array<{ title: string; target: string; current: string; percent: number; currency: string; status: string; deadline?: string | null }>;
-  limits: Array<{ category: string; amount: string; spent: string; remaining: string; percent: number; period: string; status: string; currency: string }>;
+  read_only?: boolean;
+  goals: Goal[];
+  limits: BudgetLimit[];
 };
 
 function esc(value: unknown): string {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-export function PlansScreen(plans: PlansData | null): string {
+function statusLabel(status: string): string {
+  return {
+    active: 'активна',
+    paused: 'приостановлена',
+    achieved: 'выполнена',
+    archived: 'архивирована',
+    normal: 'в норме',
+    half_used: 'половина',
+    approaching: 'близко',
+    critical: 'критично',
+    reached: 'исчерпан',
+    exceeded: 'превышен',
+  }[status] || status;
+}
+
+function goalCard(goal: Goal): string {
+  return `
+    <article class="plan-card" data-goal-id="${goal.id}">
+      <div class="section-header">
+        <strong>${esc(goal.title)}</strong>
+        <span class="pill">${esc(statusLabel(goal.status))}</span>
+      </div>
+      <div class="progress" aria-label="${goal.percent}%"><span style="width:${Math.min(100, Math.max(0, goal.percent))}%"></span></div>
+      <div class="detail-row"><span>Накоплено</span><strong>${formatMoneyString(goal.current, goal.currency)} / ${formatMoneyString(goal.target, goal.currency)}</strong></div>
+      <div class="detail-row"><span>Следующий шаг</span><strong>${esc(goal.next_action)}</strong></div>
+      <div class="detail-row"><span>План</span><strong>${esc(goal.frequency)}${goal.deadline ? ` · ${esc(goal.deadline)}` : ''}</strong></div>
+      <div class="actions">
+        <button class="button" data-action="goal-contribution" data-id="${goal.id}">Пополнить</button>
+        <button class="button" data-action="goal-edit" data-id="${goal.id}">Изменить</button>
+      </div>
+      <div class="actions">
+        <button class="button" data-action="goal-status" data-id="${goal.id}" data-status="${goal.status === 'paused' ? 'active' : 'paused'}">${goal.status === 'paused' ? 'Возобновить' : 'Пауза'}</button>
+        <button class="button danger" data-action="goal-status" data-id="${goal.id}" data-status="archived">Архив</button>
+      </div>
+    </article>
+  `;
+}
+
+function limitCard(limit: BudgetLimit): string {
+  return `
+    <article class="plan-card ${esc(limit.status)}" data-limit-id="${esc(limit.id)}">
+      <div class="section-header">
+        <strong>${esc(limit.title)}</strong>
+        <span class="pill">${esc(statusLabel(limit.status))}</span>
+      </div>
+      <div class="progress" aria-label="${limit.percent}%"><span style="width:${Math.min(100, Math.max(0, limit.percent))}%"></span></div>
+      <div class="detail-row"><span>${limit.scope === 'all_expenses' ? 'Все расходы' : esc(limit.category)}</span><strong>${formatMoneyString(limit.spent, limit.currency)} / ${formatMoneyString(limit.amount, limit.currency)}</strong></div>
+      <div class="detail-row"><span>Осталось</span><strong>${formatMoneyString(limit.remaining, limit.currency)}</strong></div>
+      <div class="detail-row"><span>Период</span><strong>${limit.period === 'week' ? 'Неделя' : 'Месяц'}</strong></div>
+      <div class="actions">
+        <button class="button" data-action="limit-edit" data-id="${esc(limit.id)}">Изменить</button>
+        <button class="button danger" data-action="limit-delete" data-id="${esc(limit.id)}">Удалить</button>
+      </div>
+    </article>
+  `;
+}
+
+export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' = 'goals', canWrite = false): string {
   if (plans?.all_scope_note) {
     return `<section class="screen"><div class="panel">${esc(plans.all_scope_note)}</div></section>`;
   }
   return `
     <section class="screen">
-      <div class="panel">
-        <strong>Цели</strong>
-        ${(plans?.goals || []).map((goal) => `
-          <div class="detail-row">
-            <span>${esc(goal.title)}<br><small>${esc(goal.status)}${goal.deadline ? ` · ${esc(goal.deadline)}` : ''}</small></span>
-            <strong>${formatMoneyString(goal.current, goal.currency)} / ${formatMoneyString(goal.target, goal.currency)}<br><small>${goal.percent}%</small></strong>
-          </div>
-        `).join('') || '<p class="caption">Целей пока нет.</p>'}
+      <div class="segmented">
+        <button data-action="plans-mode" data-mode="goals" class="${mode === 'goals' ? 'active' : ''}">Цели</button>
+        <button data-action="plans-mode" data-mode="limits" class="${mode === 'limits' ? 'active' : ''}">Бюджеты и лимиты</button>
       </div>
-      <div class="panel">
-        <strong>Лимиты</strong>
-        ${(plans?.limits || []).map((limit) => `
-          <div class="detail-row">
-            <span>${esc(limit.category)}<br><small>${esc(limit.period)} · ${esc(limit.status)}</small></span>
-            <strong>${formatMoneyString(limit.spent, limit.currency)} / ${formatMoneyString(limit.amount, limit.currency)}<br><small>Осталось ${formatMoneyString(limit.remaining, limit.currency)} · ${limit.percent}%</small></strong>
-          </div>
-        `).join('') || '<p class="caption">Лимитов пока нет.</p>'}
-      </div>
+      ${mode === 'goals' ? `
+        <div class="section-header">
+          <strong>Цели</strong>
+          ${canWrite ? '<button class="icon-button" data-action="goal-create" aria-label="Создать цель">+</button>' : ''}
+        </div>
+        ${(plans?.goals || []).map(goalCard).join('') || '<div class="empty">Целей пока нет.</div>'}
+      ` : `
+        <div class="section-header">
+          <strong>Бюджеты и лимиты</strong>
+          ${canWrite ? '<button class="icon-button" data-action="limit-create" aria-label="Создать лимит">+</button>' : ''}
+        </div>
+        ${(plans?.limits || []).map(limitCard).join('') || '<div class="empty">Лимитов пока нет.</div>'}
+      `}
     </section>
+  `;
+}
+
+export function GoalForm(goal: Goal | null, saving = false, error = ''): string {
+  return `
+    <form class="form-grid" data-action="${goal ? 'save-goal' : 'create-goal'}" ${goal ? `data-id="${goal.id}"` : ''}>
+      <input class="input" name="title" maxlength="80" placeholder="Название" value="${esc(goal?.title || '')}" required />
+      <input class="input" name="target_amount" inputmode="decimal" placeholder="Цель" value="${esc(goal?.target || '')}" required />
+      <input class="input" name="current_amount" inputmode="decimal" placeholder="Уже накоплено" value="${esc(goal?.current || '')}" />
+      <input class="input" name="deadline" type="date" value="${esc(goal?.deadline || '')}" />
+      <select class="select" name="strategy">
+        <option value="deadline" ${goal?.strategy === 'deadline' ? 'selected' : ''}>К сроку</option>
+        <option value="contribution" ${goal?.strategy === 'contribution' ? 'selected' : ''}>Комфортная сумма</option>
+        <option value="none" ${goal?.strategy === 'none' ? 'selected' : ''}>Без плана</option>
+      </select>
+      <select class="select" name="frequency">
+        <option value="monthly" ${goal?.frequency === 'monthly' ? 'selected' : ''}>Раз в месяц</option>
+        <option value="twice_monthly" ${goal?.frequency === 'twice_monthly' ? 'selected' : ''}>Два раза в месяц</option>
+        <option value="weekly" ${goal?.frequency === 'weekly' ? 'selected' : ''}>Раз в неделю</option>
+        <option value="none" ${goal?.frequency === 'none' ? 'selected' : ''}>Без расписания</option>
+      </select>
+      <input class="input" name="comfortable_amount" inputmode="decimal" placeholder="Комфортное пополнение" value="${esc(goal?.comfortable_amount || '')}" />
+      <label class="toggle-row"><input type="checkbox" name="reminders_enabled" ${goal?.reminders_enabled ? 'checked' : ''} /> Напоминания</label>
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
+    </form>
+  `;
+}
+
+export function GoalContributionForm(goal: Goal, idempotencyKey: string, saving = false, error = ''): string {
+  return `
+    <form class="form-grid" data-action="goal-movement" data-id="${goal.id}">
+      <input type="hidden" name="idempotency_key" value="${esc(idempotencyKey)}" />
+      <select class="select" name="movement_type">
+        <option value="contribution">Пополнить</option>
+        <option value="withdrawal">Уменьшить</option>
+        <option value="adjustment">Изменить прогресс</option>
+      </select>
+      <input class="input" name="amount" inputmode="decimal" placeholder="Сумма" />
+      <input class="input" name="new_balance" inputmode="decimal" placeholder="Новый прогресс для режима изменения" />
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Применить</button>
+    </form>
+  `;
+}
+
+export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = ''): string {
+  return `
+    <form class="form-grid" data-action="${limit ? 'save-limit' : 'create-limit'}" ${limit ? `data-id="${esc(limit.id)}"` : ''}>
+      <input class="input" name="title" maxlength="80" placeholder="Название" value="${esc(limit?.title || '')}" />
+      <select class="select" name="scope">
+        <option value="category" ${limit?.scope !== 'all_expenses' ? 'selected' : ''}>Категория</option>
+        <option value="all_expenses" ${limit?.scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
+      </select>
+      <select class="select" name="category">
+        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${limit?.category === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
+      </select>
+      <input class="input" name="amount" inputmode="decimal" placeholder="Сумма" value="${esc(limit?.amount || '')}" required />
+      <select class="select" name="period">
+        <option value="month" ${limit?.period !== 'week' ? 'selected' : ''}>Месяц</option>
+        <option value="week" ${limit?.period === 'week' ? 'selected' : ''}>Неделя</option>
+      </select>
+      <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${limit?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
+    </form>
   `;
 }

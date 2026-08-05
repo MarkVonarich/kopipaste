@@ -5,7 +5,8 @@ import { TransactionForm } from '../src/components/TransactionForm';
 import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
 import { PlansScreen } from '../src/components/PlansScreen';
-import { ProfileScreen } from '../src/components/ProfileScreen';
+import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
+import { AdditionalMenu, ProfileScreen } from '../src/components/ProfileScreen';
 
 const overview = {
   period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-04' },
@@ -65,17 +66,133 @@ describe('acceptance components', () => {
 
   it('renders read-only plans with actual goal and limit values', () => {
     const html = PlansScreen({
-      goals: [{ title: 'Trip', target: '1000.00', current: '250.00', percent: 25, currency: 'RUB', status: 'active', deadline: '2026-12-31' }],
-      limits: [{ category: 'Food', amount: '1000.00', spent: '750.00', remaining: '250.00', percent: 75, period: 'month', status: 'ok', currency: 'RUB' }],
+      goals: [{
+        id: 1,
+        title: 'Trip',
+        target: '1000.00',
+        current: '250.00',
+        remaining: '750.00',
+        percent: 25,
+        currency: 'RUB',
+        status: 'active',
+        deadline: '2026-12-31',
+        strategy: 'deadline',
+        frequency: 'monthly',
+        reminders_enabled: false,
+        next_action: 'Пополнить 250 ₽',
+        movement_count: 1,
+      }],
+      limits: [{
+        id: 'category:month:Food',
+        kind: 'category',
+        title: 'Food',
+        category: 'Food',
+        scope: 'category',
+        amount: '1000.00',
+        spent: '750.00',
+        remaining: '250.00',
+        percent: 75,
+        period: 'month',
+        status: 'half_used',
+        currency: 'RUB',
+        alerts_enabled: true,
+        workspace_id: 10,
+        icon: 'category',
+      }],
     });
     expect(html).toContain('Trip');
-    expect(html).toContain('Food');
-    expect(html).toContain('750 ₽ / 1 000 ₽');
+    const limitsHtml = PlansScreen({
+      goals: [],
+      limits: [{
+        id: 'category:month:Food',
+        kind: 'category',
+        title: 'Food',
+        category: 'Food',
+        scope: 'category',
+        amount: '1000.00',
+        spent: '750.00',
+        remaining: '250.00',
+        percent: 75,
+        period: 'month',
+        status: 'half_used',
+        currency: 'RUB',
+        alerts_enabled: true,
+        workspace_id: 10,
+        icon: 'category',
+      }],
+    }, 'limits');
+    expect(limitsHtml).toContain('Food');
+    expect(limitsHtml).toContain('750 ₽ / 1 000 ₽');
+  });
+
+  it('renders analytics charts with local filter controls and radar empty state', () => {
+    const html = AnalyticsScreen({
+      period: overview.period,
+      overview,
+      summary: {
+        aggregation_available: true,
+        totals_by_currency: overview.totals_by_currency,
+        result_by_currency: { RUB: '649.75' },
+      },
+      category_structure: { type: 'expense', top_n: 5, items: [{ category: 'Food', currency: 'RUB', total: '350.25', count: 2, share: 70 }] },
+      time_dynamics: { grouping: 'day', items: [{ date: '2026-08-04', currency: 'RUB', income: '1000.00', expense: '350.25', count: 2 }] },
+      radar: {
+        type: 'expense',
+        current_period: overview.period,
+        previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
+        metric: 'normalized_category_share_percent',
+        max_axes: 6,
+        insufficient_data: true,
+        explanation: 'Значения нормализованы',
+        axes: [],
+      },
+      top_expense_categories: [],
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' });
+
+    expect(html).toContain('categoryChart');
+    expect(html).toContain('dynamicsChart');
+    expect(html).toContain('data-chart="category"');
+    expect(html).toContain('Недостаточно данных');
   });
 
   it('does not render invalid repository profile document links', () => {
     const html = ProfileScreen({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test', links: { privacy: null, terms: null } }, [], 'telegram');
     expect(html).toContain('Документ пока недоступен');
     expect(html).not.toContain('docs/MINI_APP_AUTH.md');
+  });
+
+  it('renders full profile sections and hides unsupported add-to-home', () => {
+    const html = ProfileScreen({
+      theme: 'telegram',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+      notifications: {
+        morning_enabled: true,
+        evening_enabled: true,
+        limit_alerts_enabled: true,
+        budget_alerts_enabled: true,
+        weekly_reports_enabled: true,
+        monthly_reports_enabled: true,
+        challenge_notifications_enabled: false,
+        goal_notifications_enabled: false,
+        morning_time: '08:30',
+        evening_time: '20:30',
+        quiet_hours_enabled: true,
+        quiet_hours_start: '22:30',
+        quiet_hours_end: '08:00',
+        timezone: 'Europe/Moscow',
+      },
+      premium: { available: false, title: 'Premium', status: 'info_only', description: 'Информационный раздел', features: [] },
+      export: { available: true, status: 'ready', presets: ['month'], privacy_note: 'Существующий flow' },
+      categories: { expense: [], income: [] },
+    }, [], 'telegram');
+    expect(html).toContain('Уведомления');
+    expect(html).toContain('Premium');
+    expect(html).toContain('Экспорт и данные');
+
+    const menu = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, false);
+    expect(menu).toContain('Поделиться Finuchet');
+    expect(menu).not.toContain('Добавить на главный экран');
   });
 });

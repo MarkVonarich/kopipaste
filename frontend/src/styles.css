@@ -159,6 +159,10 @@ button {
   overflow-wrap: anywhere;
 }
 
+.metrics.triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .result-card {
   display: grid;
   gap: 8px;
@@ -186,6 +190,11 @@ button {
   color: var(--accent-contrast);
   font-size: 24px;
   line-height: 1;
+}
+
+.icon-button.secondary {
+  background: var(--surface-soft);
+  color: var(--text);
 }
 
 .actions {
@@ -379,9 +388,147 @@ button {
   border-bottom: 1px solid var(--line);
 }
 
+.toggle-button {
+  width: 100%;
+  min-height: 44px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
 .detail-row strong {
   text-align: right;
   overflow-wrap: anywhere;
+}
+
+.chart-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.select.compact {
+  width: auto;
+  min-width: 132px;
+}
+
+.bar-row {
+  display: grid;
+  gap: 5px;
+}
+
+.bar-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.bar-track,
+.progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-soft);
+}
+
+.bar-track span,
+.progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.radar {
+  width: 100%;
+  max-width: 320px;
+  min-height: 220px;
+  margin: 0 auto;
+}
+
+.radar circle,
+.radar line {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.radar text {
+  fill: var(--muted);
+  font-size: 8px;
+  text-anchor: middle;
+}
+
+.radar-current {
+  fill: rgba(10, 122, 117, 0.3);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.radar-prev {
+  fill: rgba(96, 112, 128, 0.2);
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+
+.plan-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.plan-card.exceeded,
+.plan-card.reached {
+  border-color: var(--danger);
+}
+
+.plan-card.approaching {
+  border-color: var(--warning);
+}
+
+.pill {
+  align-self: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.chips span {
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.toggle-row {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: var(--text) !important;
+  font-size: 14px !important;
+}
+
+.error-text {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
 }
 
 .toast {
@@ -420,6 +567,7 @@ button {
 @media (max-width: 360px) {
   .toolbar,
   .metrics,
+  .metrics.triple,
   .actions {
     grid-template-columns: 1fr;
   }

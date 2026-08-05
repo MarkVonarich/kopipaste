@@ -38,7 +38,9 @@ export function initialState(): AppState {
     search: '',
     saving: false,
     dirty: false,
-    sheet: null
+    sheet: null,
+    plansMode: 'goals',
+    analyticsFilters: { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }
   };
 }
 
