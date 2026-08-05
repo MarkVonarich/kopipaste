@@ -57,9 +57,10 @@ PR 2 completes the MVP surface for Analytics, Goals, Limits and Profile without 
 - Multi-currency analytics is grouped by currency throughout the API. There is no implicit FX conversion, no mixed-currency radar, no mixed-currency category percentage structure and no line chart dataset spanning different currencies.
 - Chart.js receives numeric coordinates only through `frontend/src/chartDecimal.ts`, a visual-only adapter for backend decimal strings. The original decimal string remains the display/tooltip value and is not used for financial decisions in the browser.
 - Charts use `chart.js` from the lockfile for bar/line rendering plus a small local SVG radar view. Each chart keeps its own local filter state.
-- Goals reuse `services.goals` for create/update/plan/contribution/reminder/status logic. Goal create uses Mini App idempotency keys, goal contributions use existing goal movement idempotency keys, and neither creates fake financial operations.
+- Goals reuse `services.goals` for create/update/plan/contribution/reminder/status logic. Mini App goal create uses `create_goal_with_plan_tx` so the goal row, initial movement, selected plan, reminders flag and idempotency completion commit together. Goal contributions use existing goal movement idempotency keys, and neither creates fake financial operations.
 - Goal planning is preview-before-confirm: the frontend displays backend-calculated remaining amount, schedule, next contribution date and feasibility before save.
-- Limits reuse category limits, general spending limits and `services.limit_alerts` threshold bands. Category/general limit mutations are owned by `services.miniapp_limits`; the API does not perform raw delete-plus-insert business SQL.
+- Goal previews include a deterministic `preview_payload_hash`. Save requests recompute the binding from normalized fields and reject stale hashes with `goal_preview_stale`.
+- Limits reuse category limits, general spending limits and `services.limit_alerts` threshold bands. Category/general limit mutations are owned by `services.miniapp_limits`; create helpers have cursor-aware variants so entity creation and idempotency completion commit together.
 - Profile reuses existing workspace, category, notification preference, export and legal-link configuration. Premium is information-only in MVP.
 - Product analytics go through the existing backend outbox and use only coarse, non-financial properties.
 
@@ -78,4 +79,4 @@ Create requests must include a stable `idempotency_key`. Public Mini App create 
 
 Pending requests carry a short server lease. If a worker stops before inserting an operation, the same key and payload can reclaim the stale pending row and retry. If recovery finds a completed operation id but no cached response, the API reconstructs the response from that operation and marks the idempotency row completed. A failure before response persistence rolls back the operation insert with the idempotency update.
 
-Operation creation stores the idempotency row and operation in one database transaction. PR 2 goal and limit create actions reuse the same durable idempotency table with replayable `response_json`; no additional idempotency table is required.
+Operation creation stores the idempotency row and operation in one database transaction. PR 2 goal and limit create actions reuse the same durable idempotency table with replayable `response_json` and cursor-aware entity writes; no additional idempotency table is required. Product analytics are emitted only after the transaction commits and are not emitted on replay.

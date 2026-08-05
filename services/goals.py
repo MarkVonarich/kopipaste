@@ -387,6 +387,77 @@ def create_goal(
         conn.close()
 
 
+def create_goal_with_plan_tx(
+    cur,
+    *,
+    owner_user_id: int,
+    workspace_id: int | None,
+    display_name: str,
+    target_amount: Decimal | int | str,
+    currency: str | None = None,
+    deadline: date | None = None,
+    initial_amount: Decimal | int | str = Decimal("0"),
+    strategy: str = STRATEGY_NONE,
+    frequency: str = FREQUENCY_NONE,
+    comfortable_amount: Decimal | int | str | None = None,
+    schedule_config: dict[str, Any] | None = None,
+    reminders_enabled: bool = False,
+) -> Goal:
+    if strategy not in {STRATEGY_NONE, STRATEGY_DEADLINE, STRATEGY_CONTRIBUTION}:
+        raise GoalError("invalid_strategy")
+    if frequency not in {FREQUENCY_NONE, FREQUENCY_MONTHLY, FREQUENCY_TWICE_MONTHLY, FREQUENCY_WEEKLY, FREQUENCY_SALARY_MONTHLY, FREQUENCY_SALARY_TWICE_MONTHLY}:
+        raise GoalError("invalid_frequency")
+    name = normalize_goal_name(display_name)
+    key = normalized_goal_key(name)
+    target = parse_money(target_amount)
+    initial = parse_nonnegative_money(initial_amount)
+    comfortable = parse_money(comfortable_amount) if comfortable_amount is not None else None
+    goal_currency = (currency or get_user_currency(owner_user_id) or "RUB")[:8]
+    today = _today_for_user(owner_user_id)
+    if deadline and deadline < today:
+        raise GoalError("past_deadline")
+    status = "achieved" if initial >= target else "active"
+    cur.execute(
+        """
+        INSERT INTO public.financial_goals
+            (owner_user_id, workspace_id, display_name, normalized_name, currency,
+             target_amount, current_balance, deadline, strategy, frequency,
+             comfortable_amount, schedule_config, reminders_enabled, status, achieved_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='achieved' THEN now() ELSE NULL END)
+        RETURNING id
+        """,
+        (
+            owner_user_id,
+            workspace_id,
+            name,
+            key,
+            goal_currency,
+            target,
+            initial,
+            deadline,
+            strategy,
+            frequency,
+            comfortable,
+            Json(schedule_config or {}),
+            bool(reminders_enabled),
+            status,
+            status,
+        ),
+    )
+    goal_id = int(cur.fetchone()[0])
+    if initial > 0:
+        cur.execute(
+            """
+            INSERT INTO public.goal_movements
+                (goal_id, actor_user_id, movement_type, amount, balance_after, source, idempotency_key)
+            VALUES (%s,%s,'initial',%s,%s,'manual',%s)
+            """,
+            (goal_id, owner_user_id, initial, initial, f"goal:{goal_id}:initial"),
+        )
+    goal = get_goal_cur(cur, goal_id, owner_user_id, workspace_id, lock=True)
+    return _update_plan_columns(cur, goal, today=today)
+
+
 def update_goal_plan(
     *,
     goal_id: int,

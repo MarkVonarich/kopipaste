@@ -222,6 +222,7 @@ function safeError(error: unknown): string {
     category_not_available: 'Выберите категорию из списка.',
     idempotency_conflict: 'Эта попытка сохранения уже использовалась для другой операции.',
     idempotency_pending: 'Операция уже сохраняется. Подождите немного.',
+    goal_preview_stale: 'План изменился. Обновите предпросмотр.',
     rate_limited: 'Слишком много действий подряд. Попробуйте позже.',
     miniapp_not_configured: 'Mini App ещё не настроен на сервере.',
   }[code] || 'Не получилось выполнить действие. Попробуйте ещё раз.';
@@ -253,14 +254,14 @@ async function loadScreen(): Promise<void> {
         radar_type: state.analyticsFilters?.radarType,
         currency: state.analyticsFilters?.radarCurrency
       } as typeof state.period);
-      if (response.available_currencies.length > 1 && !state.analyticsFilters?.radarCurrency) {
-        const firstCurrency = response.available_currencies[0];
+      if ((response.radar_available_currencies.length > 1 || response.available_currencies.length > 1) && !state.analyticsFilters?.radarCurrency) {
+        const firstCurrency = response.radar_available_currencies[0] || response.available_currencies[0];
         state.analyticsFilters = {
           categoryType: state.analyticsFilters?.categoryType || 'expense',
           dynamicsType: state.analyticsFilters?.dynamicsType || 'both',
           radarType: state.analyticsFilters?.radarType || 'expense',
-          categoryCurrency: state.analyticsFilters?.categoryCurrency || firstCurrency,
-          dynamicsCurrency: state.analyticsFilters?.dynamicsCurrency || firstCurrency,
+          categoryCurrency: state.analyticsFilters?.categoryCurrency || response.available_currencies[0],
+          dynamicsCurrency: state.analyticsFilters?.dynamicsCurrency || response.available_currencies[0],
           radarCurrency: firstCurrency
         };
         response = await api.analytics(state.workspaceId, {
@@ -326,6 +327,7 @@ function closeSheet(): void {
   state.goalCreateIdempotencyKey = undefined;
   state.limitCreateIdempotencyKey = undefined;
   state.goalPlanPreview = undefined;
+  state.goalPreviewPayloadHash = undefined;
   state.goalDraft = undefined;
   state.confirmLimitDeleteId = undefined;
   state.formDraft = undefined;
@@ -424,6 +426,7 @@ function goalPayload(form: HTMLFormElement): GoalPayload {
   const payload: GoalPayload = {
     workspace_id: state.workspaceId,
     idempotency_key: state.goalCreateIdempotencyKey,
+    preview_payload_hash: state.goalPreviewPayloadHash,
     title: String(data.get('title') || '').trim(),
     target_amount: normalizeMoneyText(String(data.get('target_amount') || '0')),
     current_amount: normalizeMoneyText(String(data.get('current_amount') || '0')),
@@ -579,6 +582,7 @@ function wireEvents(): void {
     state.sheet = 'goal-create';
     state.goalCreateIdempotencyKey = requestId();
     state.goalPlanPreview = undefined;
+    state.goalPreviewPayloadHash = undefined;
     state.goalDraft = undefined;
     state.saveError = undefined;
     state.dirty = false;
@@ -589,6 +593,7 @@ function wireEvents(): void {
       selectedGoal = (plans?.goals || []).find((goal) => goal.id === Number(button.dataset.id)) || null;
       state.sheet = selectedGoal ? 'goal-edit' : null;
       state.goalPlanPreview = undefined;
+      state.goalPreviewPayloadHash = undefined;
       state.goalDraft = undefined;
       state.saveError = undefined;
       state.dirty = false;
@@ -704,11 +709,25 @@ function wireEvents(): void {
     if ((event.target as HTMLElement).dataset.action === 'close-confirm') closeSheet();
   });
   app.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('form input, form textarea, form select').forEach((input) => {
+    const invalidateGoalPreview = () => {
+      const form = input.closest<HTMLFormElement>('form[data-action="create-goal"], form[data-action="save-goal"]');
+      if (!form) return;
+      state.goalPlanPreview = undefined;
+      state.goalPreviewPayloadHash = undefined;
+      form.querySelector<HTMLElement>('[data-testid="goal-plan-preview"]')?.remove();
+      const confirm = form.querySelector<HTMLButtonElement>('button[data-submit-mode="confirm"]');
+      if (confirm) {
+        confirm.disabled = true;
+        confirm.hidden = true;
+      }
+    };
     input.addEventListener('input', () => {
       state.dirty = true;
+      invalidateGoalPreview();
     });
     input.addEventListener('change', () => {
       state.dirty = true;
+      invalidateGoalPreview();
       if (input.getAttribute('name') === 'frequency') syncGoalScheduleFields();
     });
   });
@@ -836,6 +855,7 @@ function wireEvents(): void {
       if (submitter?.dataset.submitMode !== 'confirm') {
         const preview = await api.goalPlanPreview(payload);
         state.goalPlanPreview = preview.plan_preview;
+        state.goalPreviewPayloadHash = preview.plan_preview.preview_payload_hash;
         state.saving = false;
         render();
         return;
@@ -844,6 +864,7 @@ function wireEvents(): void {
       await api.createGoal(payload);
       state.goalCreateIdempotencyKey = undefined;
       state.goalPlanPreview = undefined;
+      state.goalPreviewPayloadHash = undefined;
       state.goalDraft = undefined;
       state.dirty = false;
       closeSheet();
@@ -870,6 +891,7 @@ function wireEvents(): void {
       if (submitter?.dataset.submitMode !== 'confirm') {
         const preview = await api.goalPlanPreview(payload, Number(form.dataset.id));
         state.goalPlanPreview = preview.plan_preview;
+        state.goalPreviewPayloadHash = preview.plan_preview.preview_payload_hash;
         state.saving = false;
         render();
         return;
@@ -877,6 +899,7 @@ function wireEvents(): void {
       if (!state.goalPlanPreview) throw new Error('preview_required');
       await api.updateGoal(Number(form.dataset.id), payload);
       state.goalPlanPreview = undefined;
+      state.goalPreviewPayloadHash = undefined;
       state.goalDraft = undefined;
       state.dirty = false;
       closeSheet();

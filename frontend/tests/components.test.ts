@@ -138,6 +138,7 @@ describe('acceptance components', () => {
       },
       aggregation_available: true,
       available_currencies: ['RUB'],
+      radar_available_currencies: ['RUB'],
       selected_currency: null,
       currency_groups: {
         RUB: {
@@ -177,6 +178,7 @@ describe('acceptance components', () => {
       overview: { ...overview, aggregation_available: false, totals_by_currency: { RUB: overview.totals_by_currency.RUB, EUR: { income: '0.00', expense: '40.00', count: 1 } } },
       aggregation_available: false,
       available_currencies: ['RUB', 'EUR'],
+      radar_available_currencies: ['RUB', 'EUR'],
       selected_currency: 'RUB',
       currency_groups: {},
       summary: {
@@ -235,6 +237,7 @@ describe('acceptance components', () => {
       feasible: true,
       reason: null,
       schedule_config: { day: 5 },
+      preview_payload_hash: 'preview-hash',
     }, { title: 'Trip', target_amount: '1000.00', current_amount: '250.00', strategy: 'deadline', frequency: 'monthly', day: 5 });
 
     expect(html).toContain('data-testid="goal-plan-preview"');
