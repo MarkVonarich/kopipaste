@@ -38,7 +38,7 @@ Recommended architecture:
 - serve `frontend/dist` as static files over HTTPS;
 - run API with pinned `gunicorn==23.0.0` and `miniapp.http:application`;
 - proxy `/miniapp/api/*` and `/miniapp/health` to Gunicorn under the same trusted origin;
-- keep strict CSP compatible with the Vite output;
+- keep strict CSP compatible with the Vite output and Telegram SDK;
 - apply reverse-proxy rate limiting in addition to PostgreSQL-backed application rate limiting;
 - write Gunicorn access/error logs under `/var/log/finuchet/`.
 
@@ -72,9 +72,14 @@ Do not modify PostHog, systemd unit files or production secrets as part of PR 2.
 - Mini App imports succeed.
 - Python tests pass.
 - Frontend typecheck, lint, tests and build pass.
+- Frontend entrypoint loads `https://telegram.org/js/telegram-web-app.js?63` before the Vite module.
+- CSP allows `script-src 'self' https://telegram.org` and does not use `unsafe-inline` or `unsafe-eval` for scripts.
+- Production `dist/index.html` has the Telegram SDK, no inline scripts, no `nomodule` scripts and no Vite legacy loader.
 - Frontend build installs dependencies from `frontend/package-lock.json`, including the pinned chart library.
 - Bot smoke check still passes.
 - Telegram Mini App opens inside Telegram with signed `initData`.
+- Dotfile probes such as `/.env`, `/.git/HEAD`, `/config/.env`, `/app/.env`, `/api/.env`, `/application/.env` and `/functions/.env` return 404 instead of the SPA HTML.
+- ACME paths under `/.well-known/acme-challenge/` remain available for certificate renewal.
 
 ## Local Production-Like Smoke
 
@@ -92,6 +97,10 @@ Full local smoke, after dependencies are installed:
 
 ## Telegram Entry Point
 
+The frontend includes the official Telegram WebApp SDK in `frontend/index.html`.
+The SDK must load before the Vite module entrypoint so `window.Telegram.WebApp`,
+`ready()`, `expand()` and signed `initData` are available before API bootstrap.
+
 The `/app` command shows a WebApp button only when `MINIAPP_PUBLIC_URL` is configured. If absent, the bot replies that Mini App is unavailable. BotFather menu-button configuration is a separate manual production step and is not performed by tests or deploy scripts.
 
 Dry-run documentation command:
@@ -102,3 +111,8 @@ from settings import MINIAPP_PUBLIC_URL
 print("Configure BotFather menu button manually:", MINIAPP_PUBLIC_URL)
 PY
 ```
+
+Production browser smoke should be performed inside Telegram Desktop and on a
+mobile Telegram client. Opening the URL directly in a normal browser must show
+the safe message asking the user to open the application through the Telegram
+bot button, and it must not call Mini App API bootstrap without `initData`.

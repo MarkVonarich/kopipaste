@@ -8,11 +8,11 @@
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/lint.mjs",
     "test": "vitest run",
+    "check:dist": "node scripts/check-dist.mjs",
     "build": "tsc --noEmit && vite build"
   },
   "devDependencies": {
     "@types/estree": "^1.0.9",
-    "@vitejs/plugin-legacy": "^8.2.2",
     "jsdom": "25.0.1",
     "typescript": "5.6.3",
     "vite": "^8.2.0",

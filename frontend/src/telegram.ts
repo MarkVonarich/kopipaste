@@ -16,6 +16,8 @@ export type TelegramWebApp = {
   };
 };
 
+const TELEGRAM_LAUNCH_MESSAGE = 'Откройте приложение через кнопку в Telegram-боте';
+
 declare global {
   interface Window {
     Telegram?: { WebApp?: TelegramWebApp };
@@ -24,6 +26,19 @@ declare global {
 
 export function getTelegramWebApp(): TelegramWebApp | null {
   return window.Telegram?.WebApp ?? null;
+}
+
+export function prepareTelegramLaunch(): string | null {
+  const tg = getTelegramWebApp();
+  if (!tg) return TELEGRAM_LAUNCH_MESSAGE;
+  try {
+    tg.ready();
+    tg.expand();
+  } catch {
+    return TELEGRAM_LAUNCH_MESSAGE;
+  }
+  if (!String(tg.initData ?? '').trim()) return TELEGRAM_LAUNCH_MESSAGE;
+  return null;
 }
 
 export function initTelegramShell(): TelegramWebApp | null {
