@@ -33,6 +33,9 @@ export type Overview = {
   totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
   recent_operations: Operation[];
   info?: { kind: string; text: string } | null;
+  challenge?: { key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_key: string; period_end?: string | null } | null;
+  focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
+  insight?: { kind: string; tone: string; title: string; text: string; currency?: string } | null;
 };
 
 export type AnalyticsResponse = {
@@ -220,8 +223,13 @@ export const api = {
     apiFetch<{ limit: BudgetLimit }>(`/miniapp/api/limits/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteLimit: (id: string, workspaceId: number | 'all' | null) =>
     apiFetch<{ deleted: boolean; limit_id: string }>(`/miniapp/api/limits/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),
-  profile: () => apiFetch<{ theme: ThemeMode; currency: string; timezone: string; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] } }>('/miniapp/api/profile'),
+  profile: () => apiFetch<{ theme: ThemeMode; preferred_name?: string | null; display_name?: string; currency: string; available_currencies?: string[]; timezone: string; timezone_options?: Array<{ label: string; value: string }>; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] } }>('/miniapp/api/profile'),
   setTheme: (theme: ThemeMode) => apiFetch<{ theme: ThemeMode }>('/miniapp/api/profile/theme', { method: 'POST', body: JSON.stringify({ theme }) }),
+  setPreferredName: (preferred_name: string) => apiFetch<{ preferred_name?: string | null; display_name: string }>('/miniapp/api/profile/preferred-name', { method: 'POST', body: JSON.stringify({ preferred_name }) }),
+  setCurrency: (currency: string) => apiFetch<{ currency: string }>('/miniapp/api/profile/currency', { method: 'POST', body: JSON.stringify({ currency }) }),
+  setTimezone: (timezone: string) => apiFetch<{ timezone: string; notifications: NotificationPreferences }>('/miniapp/api/profile/timezone', { method: 'POST', body: JSON.stringify({ timezone }) }),
+  setActiveWorkspace: (workspace_id: number) => apiFetch<{ workspaces: Workspace[]; active_workspace_id: number }>('/miniapp/api/profile/active-workspace', { method: 'POST', body: JSON.stringify({ workspace_id }) }),
+  renameWorkspace: (workspace_id: number, name: string) => apiFetch<{ workspace: Workspace; workspaces: Workspace[] }>(`/miniapp/api/workspaces/${workspace_id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   notificationPreferences: () => apiFetch<NotificationPreferences>('/miniapp/api/profile/notifications'),
   updateNotificationPreferences: (payload: Record<string, unknown>) =>
     apiFetch<NotificationPreferences>('/miniapp/api/profile/notifications', { method: 'POST', body: JSON.stringify(payload) }),

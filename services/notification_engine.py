@@ -42,6 +42,7 @@ class NotificationPreferences:
     recurring_spend_alerts_enabled: bool = True
     weekly_reports_enabled: bool = True
     monthly_reports_enabled: bool = True
+    quiet_hours_enabled: bool = True
     quiet_hours_start: time | None = None
     quiet_hours_end: time | None = None
 
@@ -54,6 +55,9 @@ def _parse_time(value: str | time | None) -> time | None:
 
 
 def preferences_from_dict(values: dict) -> NotificationPreferences:
+    start = _parse_time(values.get("quiet_hours_start"))
+    end = _parse_time(values.get("quiet_hours_end"))
+    enabled = bool(values["quiet_hours_enabled"]) if "quiet_hours_enabled" in values else bool(start and end)
     return NotificationPreferences(
         morning_enabled=bool(values.get("morning_enabled", True)),
         evening_enabled=bool(values.get("evening_enabled", True)),
@@ -63,14 +67,17 @@ def preferences_from_dict(values: dict) -> NotificationPreferences:
         recurring_spend_alerts_enabled=bool(values.get("recurring_spend_alerts_enabled", True)),
         weekly_reports_enabled=bool(values.get("weekly_reports_enabled", True)),
         monthly_reports_enabled=bool(values.get("monthly_reports_enabled", True)),
-        quiet_hours_start=_parse_time(values.get("quiet_hours_start")),
-        quiet_hours_end=_parse_time(values.get("quiet_hours_end")),
+        quiet_hours_enabled=enabled,
+        quiet_hours_start=start,
+        quiet_hours_end=end,
     )
 
 
 def is_quiet_time(local_dt: datetime, prefs: NotificationPreferences) -> bool:
     start = prefs.quiet_hours_start
     end = prefs.quiet_hours_end
+    if not prefs.quiet_hours_enabled:
+        return False
     if not start or not end:
         return False
     current = local_dt.time()

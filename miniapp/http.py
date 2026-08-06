@@ -56,7 +56,14 @@ def _init_data(environ) -> str:
 def _request(environ, request_id: str):
     max_age = int(os.getenv("MINIAPP_INITDATA_MAX_AGE_SECONDS", "86400") or "86400")
     user = verify_telegram_init_data(_init_data(environ), bot_token=TELEGRAM_TOKEN, max_age_seconds=max_age)
-    return api.request(user.user_id, request_id=request_id, locale=user.language_code)
+    return api.request(
+        user.user_id,
+        request_id=request_id,
+        locale=user.language_code,
+        telegram_first_name=user.first_name,
+        telegram_last_name=user.last_name,
+        telegram_username=user.username,
+    )
 
 
 def application(environ, start_response):
@@ -75,6 +82,10 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.bootstrap(req, params))
         if method == "GET" and path == "/miniapp/api/workspaces":
             return _json_response(start_response, 200, api.workspaces(req))
+        if path.startswith("/miniapp/api/workspaces/"):
+            workspace_id = int(path.rsplit("/", 1)[-1])
+            if method == "PATCH":
+                return _json_response(start_response, 200, api.update_workspace(req, workspace_id, body))
         if method == "GET" and path == "/miniapp/api/categories":
             return _json_response(start_response, 200, api.categories(req, params))
         if method == "GET" and path == "/miniapp/api/overview":
@@ -141,6 +152,14 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.notification_preferences(req))
         if method == "POST" and path == "/miniapp/api/profile/notifications":
             return _json_response(start_response, 200, api.update_notification_preferences(req, body))
+        if method == "POST" and path == "/miniapp/api/profile/preferred-name":
+            return _json_response(start_response, 200, api.set_profile_preferred_name(req, body))
+        if method == "POST" and path == "/miniapp/api/profile/currency":
+            return _json_response(start_response, 200, api.set_profile_currency(req, body))
+        if method == "POST" and path == "/miniapp/api/profile/timezone":
+            return _json_response(start_response, 200, api.set_profile_timezone(req, body))
+        if method == "POST" and path == "/miniapp/api/profile/active-workspace":
+            return _json_response(start_response, 200, api.set_profile_active_workspace(req, body))
         if method == "GET" and path == "/miniapp/api/profile/premium":
             return _json_response(start_response, 200, api.premium(req))
         if method == "GET" and path == "/miniapp/api/profile/export":

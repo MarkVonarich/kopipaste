@@ -28,6 +28,7 @@ from services.limit_alerts import (
 from services.operations import RecordedOperation, record_financial_operation
 from services.goals import build_salary_suggestion_text, format_money, salary_suggestion_goals
 from services.product_events import ProductEvent, track_product_event
+from services.user_profile import get_user_display_name
 from services.user_time import user_local_date
 from utils.money import format_money as format_money_value
 
@@ -406,10 +407,7 @@ async def record_operation(cat: str, amt, dt,
     ]])
 
     # Имя пользователя
-    name = (getattr(user, 'full_name', None)
-            or getattr(user, 'first_name', None)
-            or getattr(user, 'username', None)
-            or "Пользователь")
+    name = get_user_display_name(cid, user)
 
     # Текст ответа
     if typ == "Доходы":

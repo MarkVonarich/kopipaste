@@ -4,6 +4,8 @@ from decimal import Decimal
 import pytest
 
 from miniapp.api import MiniAppAPI, MiniAppError
+from miniapp.auth import MiniAppUser
+from services.challenges import ChallengeCard, ChallengeDefinition
 from services.operations import RecordedOperation
 from services.workspaces import WorkspaceContext
 
@@ -14,6 +16,7 @@ def _api(monkeypatch) -> MiniAppAPI:
     monkeypatch.setattr(api, "_check_write_rate", lambda _req: None)
     monkeypatch.setattr("miniapp.api.get_user_currency", lambda _user_id: "RUB")
     monkeypatch.setattr("miniapp.api.get_user_locale", lambda _user_id: "ru")
+    monkeypatch.setattr("miniapp.api.get_user_preferred_name", lambda _user_id: None)
     monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 4))
     return api
 
@@ -310,6 +313,161 @@ def test_overview_keeps_mixed_currencies_unaggregated(monkeypatch):
     assert data["aggregation_available"] is False
     assert data["totals_by_currency"]["RUB"]["expense"] == "100.00"
     assert data["totals_by_currency"]["USD"]["income"] == "10.00"
+
+
+def test_overview_recent_operations_are_limited_to_three(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [
+        {"workspace_id": 10, "name": "Family", "kind": "group", "role": "member", "active": True, "read_only": False}
+    ])
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda *_args, **_kwargs: [("RUB", "Расходы", Decimal("100.00"), 1)])
+    monkeypatch.setattr(api, "operations", lambda _req, _params: {"data": {"items": [{"id": i} for i in range(5)]}})
+    monkeypatch.setattr(api, "_home_challenge", lambda _req: None)
+    monkeypatch.setattr(api, "_home_focus", lambda *_args: None)
+    monkeypatch.setattr(api, "_home_insight", lambda *_args: {"kind": "fallback", "tone": "neutral", "title": "x", "text": "x"})
+
+    data = api.overview(api.request(42), {"workspace_id": 10})["data"]
+
+    assert [item["id"] for item in data["recent_operations"]] == [0, 1, 2]
+
+
+def test_home_challenge_serializes_existing_daily_challenge(monkeypatch):
+    api = _api(monkeypatch)
+    definition = ChallengeDefinition("daily_test", "Две записи", "Запишите две операции.", "day", "operation_count", 2, "daily", "Добавить", "menu_examples", "Готово.")
+    monkeypatch.setattr("miniapp.api.upsert_assignments", lambda _user_id, section: [ChallengeCard(definition, 1, 2, False, "2026-08-04", date(2026, 8, 4))])
+
+    card = api._home_challenge(api.request(42))
+
+    assert card["key"] == "daily_test"
+    assert card["progress"] == 1
+    assert card["completed"] is False
+
+
+def test_home_focus_priority_is_stable(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": [
+        {"id": 2, "title": "Urgent goal", "percent": 20, "deadline": "2026-08-10", "next_action": "Пополнить"},
+    ]}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [
+        {"id": "normal", "title": "Normal limit", "percent": 40},
+        {"id": "warn", "title": "Warning limit", "percent": 90},
+    ]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, False)
+
+    assert item["kind"] == "limit"
+    assert item["id"] == "warn"
+    assert item["target_mode"] == "limits"
+
+
+def test_home_insight_does_not_mix_currencies():
+    api = MiniAppAPI()
+    data = api._home_insight(
+        api.request(42),
+        [10],
+        date(2026, 8, 1),
+        date(2026, 8, 5),
+        "current_month",
+        {
+            "RUB": {"income": Decimal("0.00"), "expense": Decimal("100.00"), "count": 1},
+            "USD": {"income": Decimal("0.00"), "expense": Decimal("10.00"), "count": 1},
+        },
+    )
+
+    assert data["kind"] == "currency_mix"
+
+
+def test_profile_setters_and_quiet_hours_update(monkeypatch):
+    api = _api(monkeypatch)
+    events = []
+    monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append((event_name, kwargs)))
+    monkeypatch.setattr("miniapp.api.set_user_preferred_name", lambda _user_id, value: value.strip())
+    monkeypatch.setattr("miniapp.api.set_user_currency", lambda _user_id, value: value)
+    monkeypatch.setattr("miniapp.api.set_notification_timezone", lambda _user_id, value: {"timezone": value})
+    monkeypatch.setattr("miniapp.api.set_quiet_hours", lambda _user_id, enabled, start, end: {"quiet_hours_enabled": enabled, "quiet_hours_start": start, "quiet_hours_end": end})
+    monkeypatch.setattr("miniapp.api.get_notification_preferences", lambda _user_id: {"quiet_hours_enabled": True})
+
+    assert api.set_profile_preferred_name(api.request(42), {"preferred_name": " Маша "})["data"]["preferred_name"] == "Маша"
+    assert api.set_profile_currency(api.request(42), {"currency": "USD"})["data"]["currency"] == "USD"
+    assert api.set_profile_timezone(api.request(42), {"timezone": "Europe/Moscow"})["data"]["timezone"] == "Europe/Moscow"
+    data = api.update_notification_preferences(api.request(42), {"action": "quiet_hours_update", "enabled": True, "start": "22:30", "end": "08:00"})["data"]
+
+    assert data["quiet_hours_enabled"] is True
+    assert events[-1][0] == "mini_app_profile_setting_changed"
+
+
+def test_miniapp_display_name_uses_verified_telegram_first_name(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [])
+    monkeypatch.setattr(api, "_profile_theme", lambda _user_id: "telegram")
+    monkeypatch.setattr("miniapp.api.user_timezone_name", lambda _user_id: ("Europe/Moscow", "user"))
+    req = api.request(42, telegram_first_name=" Максим ")
+
+    data = api.bootstrap(req)["data"]
+
+    assert data["user"]["display_name"] == "Максим"
+
+
+def test_miniapp_display_name_combines_first_and_last(monkeypatch):
+    api = _api(monkeypatch)
+    req = api.request(42, telegram_first_name="Максим", telegram_last_name="Иванов")
+
+    assert api._display_name(req, None) == "Максим Иванов"
+
+
+def test_miniapp_preferred_name_has_priority_over_telegram_name(monkeypatch):
+    api = _api(monkeypatch)
+    req = api.request(42, telegram_first_name="Максим", telegram_username="fin")
+
+    assert api._display_name(req, " Леонель Месси ") == "Леонель Месси"
+
+
+def test_miniapp_display_name_uses_username_then_neutral_fallback(monkeypatch):
+    api = _api(monkeypatch)
+
+    assert api._display_name(api.request(42, telegram_username="fin_user"), None) == "fin_user"
+    assert api._display_name(api.request(42), None) == "Пользователь"
+
+
+def test_clearing_preferred_name_returns_telegram_display_name(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.set_user_preferred_name", lambda _user_id, _value: None)
+    req = api.request(42, telegram_first_name="Максим")
+
+    data = api.set_profile_preferred_name(req, {"preferred_name": ""})["data"]
+
+    assert data["preferred_name"] is None
+    assert data["display_name"] == "Максим"
+
+
+def test_http_request_uses_only_verified_initdata_names(monkeypatch):
+    from miniapp import http
+
+    monkeypatch.setattr(
+        http,
+        "verify_telegram_init_data",
+        lambda *_args, **_kwargs: MiniAppUser(
+            user_id=42,
+            auth_date=1000,
+            first_name="Verified",
+            last_name="User",
+            username="verified_user",
+            language_code="ru",
+        ),
+    )
+
+    req = http._request(
+        {
+            "HTTP_AUTHORIZATION": "tma signed",
+            "QUERY_STRING": "first_name=Fake&username=fake",
+            "wsgi.input": None,
+        },
+        "req-1",
+    )
+
+    assert req.telegram_first_name == "Verified"
+    assert req.telegram_last_name == "User"
+    assert req.telegram_username == "verified_user"
 
 
 def test_product_event_failures_do_not_fail_request(monkeypatch):

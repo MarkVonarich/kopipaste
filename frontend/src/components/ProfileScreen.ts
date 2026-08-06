@@ -1,10 +1,14 @@
-import type { CategoryOption, NotificationPreferences, PremiumInfo, ThemeMode, Workspace } from '../types';
+import type { CategoryOption, NotificationPreferences, PremiumInfo, ProfileSection, ThemeMode, Workspace } from '../types';
 import { SectionHeader, esc, icon } from './ui';
 
-type ProfileData = {
+export type ProfileData = {
   theme: ThemeMode;
+  preferred_name?: string | null;
+  display_name?: string;
   currency: string;
+  available_currencies?: string[];
   timezone: string;
+  timezone_options?: Array<{ label: string; value: string }>;
   version: string;
   help_url?: string;
   links?: { privacy?: string | null; terms?: string | null };
@@ -15,7 +19,19 @@ type ProfileData = {
   export?: { available: boolean; status: string; presets: string[]; privacy_note: string };
 };
 
-function settingsRow(label: string, value = '', description = '', action = '', attrs = ''): string {
+const SECTIONS: Array<[ProfileSection, string]> = [
+  ['user', 'Пользователь'],
+  ['appearance', 'Внешний вид'],
+  ['workspaces', 'Пространства'],
+  ['categories', 'Категории'],
+  ['notifications', 'Уведомления'],
+  ['export-data', 'Экспорт и данные'],
+  ['premium', 'Premium'],
+  ['help', 'Помощь'],
+  ['legal', 'Правовая информация'],
+];
+
+function row(label: string, value = '', description = '', action = '', attrs = ''): string {
   const tag = action ? 'button' : 'div';
   return `
     <${tag} class="settings-row" ${action ? `type="button" data-action="${action}"` : ''} ${attrs}>
@@ -28,73 +44,142 @@ function settingsRow(label: string, value = '', description = '', action = '', a
   `;
 }
 
-function settingsGroup(title: string, body: string): string {
+function switchRow(label: string, key: string, enabled: boolean): string {
   return `
-    <section class="settings-group">
-      <h2>${esc(title)}</h2>
-      <div class="settings-list">${body}</div>
+    <button class="settings-row switch-row" type="button" data-action="notification-toggle" data-key="${esc(key)}" role="switch" aria-checked="${enabled ? 'true' : 'false'}">
+      <span><strong>${esc(label)}</strong></span>
+      <em><span class="switch-control ${enabled ? 'on' : ''}" aria-hidden="true"></span></em>
+    </button>
+  `;
+}
+
+function panel(section: ProfileSection, active: ProfileSection, body: string): string {
+  const title = SECTIONS.find(([key]) => key === section)?.[1] || section;
+  const open = section === active;
+  return `
+    <section class="accordion-section">
+      <button class="accordion-trigger" type="button" data-action="profile-section" data-section="${section}" aria-expanded="${open ? 'true' : 'false'}" aria-controls="profile-panel-${section}">
+        <span>${esc(title)}</span>${icon('chevron')}
+      </button>
+      <div class="accordion-panel" id="profile-panel-${section}" ${open ? '' : 'hidden'}>
+        ${body}
+      </div>
     </section>
   `;
 }
 
-function toggle(label: string, key: string, enabled: boolean): string {
-  return settingsRow(label, enabled ? 'Вкл' : 'Выкл', '', 'notification-toggle', `data-key="${key}"`);
-}
-
-export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace[], activeTheme: ThemeMode): string {
+export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace[], activeTheme: ThemeMode, activeSection: ProfileSection): string {
   const prefs = profile?.notifications;
   const cats = profile?.categories;
   const visibleWorkspaces = profile?.workspaces || workspaces.filter((item) => item.workspace_id !== 'all');
+  const activeWorkspace = visibleWorkspaces.find((workspace) => workspace.active);
   return `
     <section class="screen profile-screen">
       ${SectionHeader('Настройки', 'Профиль, данные и внешний вид', `<button class="icon-button secondary" data-action="open-menu" aria-label="Открыть дополнительное меню">${icon('more')}</button>`)}
-      ${settingsGroup('Пользователь', `
-        ${settingsRow('Валюта', profile?.currency || 'RUB')}
-        ${settingsRow('Часовой пояс', profile?.timezone || prefs?.timezone || 'Не выбран')}
-        ${settingsRow('Пространства', String(visibleWorkspaces.length))}
-      `)}
-      <section class="settings-group">
-        <h2>Внешний вид</h2>
-        <div class="segmented" data-action="theme" role="tablist" aria-label="Тема">
-          ${(['telegram', 'light', 'dark'] as ThemeMode[]).map((theme) => `<button data-theme="${theme}" class="${activeTheme === theme ? 'active' : ''}">${theme === 'telegram' ? 'Telegram' : theme === 'light' ? 'Светлая' : 'Тёмная'}</button>`).join('')}
-        </div>
-      </section>
-      ${settingsGroup('Пространства', visibleWorkspaces.map((workspace) => settingsRow(workspace.name, `${workspace.role}${workspace.read_only ? ' · read-only' : ''}`, workspace.kind)).join('') || '<p class="caption">Нет доступных пространств.</p>')}
-      <section class="settings-group">
-        <h2>Категории и уведомления</h2>
-        <p class="caption">Категории используют существующие правила Telegram-бота.</p>
-        <div class="chips">
-          ${(cats?.expense || []).slice(0, 8).map((cat) => `<span>${esc(cat.name)}</span>`).join('') || '<span>Расходы</span>'}
-          ${(cats?.income || []).slice(0, 4).map((cat) => `<span>${esc(cat.name)}</span>`).join('')}
-        </div>
-        <h2>Уведомления</h2>
-        <div class="settings-list">
-        ${prefs ? `
-          ${toggle('Утро', 'morning', prefs.morning_enabled)}
-          ${toggle('Вечер', 'evening', prefs.evening_enabled)}
-          ${toggle('Лимиты', 'limits', prefs.limit_alerts_enabled)}
-          ${toggle('Цели', 'goals', prefs.goal_notifications_enabled)}
-          ${toggle('Челленджи', 'challenges', prefs.challenge_notifications_enabled)}
-          ${toggle('Еженедельные отчёты', 'weekly', prefs.weekly_reports_enabled)}
-          ${toggle('Ежемесячные отчёты', 'monthly', prefs.monthly_reports_enabled)}
-          ${settingsRow('Тихие часы', prefs.quiet_hours_enabled ? `${prefs.quiet_hours_start}–${prefs.quiet_hours_end}` : 'Выкл', '', 'notification-quiet')}
-        ` : '<p class="caption">Настройки недоступны.</p>'}
-        </div>
-      </section>
-      ${settingsGroup('Экспорт и данные', `
-        ${settingsRow('Экспорт', profile?.export?.status || 'Открыть', profile?.export?.privacy_note || 'Экспорт использует существующий flow.', 'export-open')}
-      `)}
-      ${settingsGroup('Premium', settingsRow(profile?.premium?.title || 'Premium', profile?.premium?.status || 'info', profile?.premium?.description || 'Информационный раздел.', 'premium-open'))}
-      ${settingsGroup('Помощь', `
-        ${profile?.help_url ? `<a class="settings-row" href="${esc(profile.help_url)}" target="_blank" rel="noreferrer"><span><strong>Помощь</strong></span><em>${icon('chevron')}</em></a>` : ''}
-        ${settingsRow('Версия', profile?.version || '')}
-      `)}
-      ${settingsGroup('Юридическая информация', `
-        ${profile?.links?.privacy ? `<a class="settings-row" href="${esc(profile.links.privacy)}" target="_blank" rel="noreferrer"><span><strong>Privacy</strong></span><em>${icon('chevron')}</em></a>` : '<p class="caption">Документ пока недоступен</p>'}
-        ${profile?.links?.terms ? `<a class="settings-row" href="${esc(profile.links.terms)}" target="_blank" rel="noreferrer"><span><strong>Terms</strong></span><em>${icon('chevron')}</em></a>` : ''}
-      `)}
+      <div class="accordion" data-testid="profile-accordion">
+        ${panel('user', activeSection, `
+          <div class="settings-list">
+            ${row('Как к вам обращаться?', profile?.preferred_name || profile?.display_name || 'Пользователь', 'Используется и в боте', 'profile-name-open')}
+            ${row('Валюта', profile?.currency || 'RUB', 'Для новых операций по умолчанию', 'profile-currency-open')}
+            ${row('Часовой пояс', profile?.timezone || prefs?.timezone || 'Не выбран', 'Для уведомлений и периодов', 'profile-timezone-open')}
+            ${row('Активное пространство', activeWorkspace?.name || 'Личное', 'Для личных действий по умолчанию', 'profile-active-workspace-open')}
+          </div>
+        `)}
+        ${panel('appearance', activeSection, `
+          <div class="segmented" data-action="theme" role="tablist" aria-label="Тема">
+            ${(['telegram', 'light', 'dark'] as ThemeMode[]).map((theme) => `<button data-theme="${theme}" class="${activeTheme === theme ? 'active' : ''}">${theme === 'telegram' ? 'Telegram' : theme === 'light' ? 'Светлая' : 'Тёмная'}</button>`).join('')}
+          </div>
+        `)}
+        ${panel('workspaces', activeSection, `
+          <div class="settings-list">
+            ${visibleWorkspaces.map((workspace) => row(workspace.name, `${workspace.role}${workspace.active ? ' · активно' : ''}`, workspace.kind, workspace.role === 'owner' || workspace.role === 'admin' ? 'profile-workspace-open' : 'profile-active-workspace-set', `data-id="${esc(workspace.workspace_id)}"`)).join('') || '<p class="caption">Нет доступных пространств.</p>'}
+          </div>
+        `)}
+        ${panel('categories', activeSection, `
+          <p class="caption">Категории используют существующие правила Telegram-бота.</p>
+          <div class="chips">
+            ${(cats?.expense || []).slice(0, 8).map((cat) => `<span>${esc(cat.name)}</span>`).join('') || '<span>Расходы</span>'}
+            ${(cats?.income || []).slice(0, 4).map((cat) => `<span>${esc(cat.name)}</span>`).join('')}
+          </div>
+        `)}
+        ${panel('notifications', activeSection, `
+          <div class="settings-list">
+            ${prefs ? `
+              ${switchRow('Утро', 'morning', prefs.morning_enabled)}
+              ${switchRow('Вечер', 'evening', prefs.evening_enabled)}
+              ${switchRow('Лимиты', 'limits', prefs.limit_alerts_enabled)}
+              ${switchRow('Бюджеты', 'budgets', prefs.budget_alerts_enabled)}
+              ${switchRow('Цели', 'goals', prefs.goal_notifications_enabled)}
+              ${switchRow('Челленджи', 'challenges', prefs.challenge_notifications_enabled)}
+              ${switchRow('Еженедельные отчёты', 'weekly', prefs.weekly_reports_enabled)}
+              ${switchRow('Ежемесячные отчёты', 'monthly', prefs.monthly_reports_enabled)}
+              ${row('Тихие часы', prefs.quiet_hours_enabled ? `${prefs.quiet_hours_start}–${prefs.quiet_hours_end}` : 'Выкл', 'Открывает редактор времени', 'quiet-hours-open')}
+            ` : '<p class="caption">Настройки недоступны.</p>'}
+          </div>
+        `)}
+        ${panel('export-data', activeSection, row('Экспорт', profile?.export?.status || 'Открыть', profile?.export?.privacy_note || 'Экспорт использует существующий flow.', 'export-open'))}
+        ${panel('premium', activeSection, row(profile?.premium?.title || 'Premium', profile?.premium?.status || 'info', profile?.premium?.description || 'Информационный раздел.', 'premium-open'))}
+        ${panel('help', activeSection, `
+          ${profile?.help_url ? `<a class="settings-row" href="${esc(profile.help_url)}" target="_blank" rel="noreferrer"><span><strong>Помощь</strong></span><em>${icon('chevron')}</em></a>` : ''}
+          ${row('Версия', profile?.version || '')}
+        `)}
+        ${panel('legal', activeSection, `
+          ${profile?.links?.privacy ? `<a class="settings-row" href="${esc(profile.links.privacy)}" target="_blank" rel="noreferrer"><span><strong>Privacy</strong></span><em>${icon('chevron')}</em></a>` : '<p class="caption">Документ пока недоступен</p>'}
+          ${profile?.links?.terms ? `<a class="settings-row" href="${esc(profile.links.terms)}" target="_blank" rel="noreferrer"><span><strong>Terms</strong></span><em>${icon('chevron')}</em></a>` : ''}
+        `)}
+      </div>
     </section>
   `;
+}
+
+export function PreferredNameForm(profile: ProfileData | null, saving: boolean, error?: string): string {
+  return `<form class="form-grid" data-action="profile-name-save">
+    <label>Как к вам обращаться?<input class="input" name="preferred_name" maxlength="50" value="${esc(profile?.preferred_name || '')}" autocomplete="name" /></label>
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
+  </form>`;
+}
+
+export function CurrencyForm(profile: ProfileData | null, saving: boolean, error?: string): string {
+  const current = profile?.currency || 'RUB';
+  const options = profile?.available_currencies?.length ? profile.available_currencies : ['RUB', 'USD', 'EUR'];
+  return `<form class="form-grid" data-action="profile-currency-save">
+    <label>Валюта<select class="select" name="currency">${options.map((code) => `<option value="${esc(code)}" ${code === current ? 'selected' : ''}>${esc(code)}</option>`).join('')}</select></label>
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
+  </form>`;
+}
+
+export function TimezoneForm(profile: ProfileData | null, saving: boolean, error?: string): string {
+  const current = profile?.timezone || profile?.notifications?.timezone || 'Europe/Moscow';
+  const options = profile?.timezone_options || [];
+  return `<form class="form-grid" data-action="profile-timezone-save">
+    <label>Часовой пояс<select class="select" name="timezone_select">
+      ${options.map((item) => `<option value="${esc(item.value)}" ${item.value === current ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+      <option value="custom">Другой IANA</option>
+    </select></label>
+    <label>IANA<input class="input" name="timezone_custom" placeholder="Europe/Moscow" value="${options.some((item) => item.value === current) ? '' : esc(current)}" /></label>
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
+  </form>`;
+}
+
+export function WorkspaceForm(workspace: Workspace | undefined, saving: boolean, error?: string): string {
+  return `<form class="form-grid" data-action="profile-workspace-save" data-id="${esc(workspace?.workspace_id)}">
+    <label>Название<input class="input" name="name" maxlength="120" value="${esc(workspace?.name || '')}" /></label>
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
+  </form>`;
+}
+
+export function QuietHoursForm(prefs: NotificationPreferences | undefined, saving: boolean, error?: string): string {
+  return `<form class="form-grid" data-action="quiet-hours-save">
+    <label class="checkbox-row"><input type="checkbox" name="enabled" ${prefs?.quiet_hours_enabled ? 'checked' : ''} /> Включить тихие часы</label>
+    <label>Начало<input class="input" type="time" name="start" value="${esc(prefs?.quiet_hours_start || '22:30')}" /></label>
+    <label>Конец<input class="input" type="time" name="end" value="${esc(prefs?.quiet_hours_end || '08:00')}" /></label>
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
+  </form>`;
 }
 
 export function AdditionalMenu(profile: ProfileData | null, canAddToHome: boolean): string {

@@ -2,6 +2,7 @@ export type TabKey = 'operations' | 'analytics' | 'home' | 'plans' | 'profile';
 export type ThemeMode = 'telegram' | 'light' | 'dark';
 export type PeriodKey = 'current_month' | 'previous_month' | 'last_30' | 'custom';
 export type OperationType = 'Расходы' | 'Доходы';
+export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'categories' | 'notifications' | 'export-data' | 'premium' | 'help' | 'legal';
 
 export type Workspace = {
   workspace_id: number | 'all' | null;
@@ -174,7 +175,7 @@ export type CategoryOption = {
 };
 
 export type Bootstrap = {
-  user: { id: string; locale: string; currency: string; timezone: string };
+  user: { id: string; locale: string; currency: string; timezone: string; preferred_name?: string | null; display_name?: string };
   workspaces: Workspace[];
   periods: PeriodKey[];
   theme: ThemeMode;
@@ -204,7 +205,9 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'premium' | 'export' | 'menu';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  profileAccordion?: ProfileSection;
+  selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits';
   analyticsFilters?: {
     categoryType: 'expense' | 'income';

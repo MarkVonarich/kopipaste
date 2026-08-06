@@ -14,7 +14,7 @@ import { HomeScreen } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
 import { GoalContributionForm, GoalForm, LimitForm, PlansScreen } from './components/PlansScreen';
-import { AdditionalMenu, InfoPanel, ProfileScreen } from './components/ProfileScreen';
+import { AdditionalMenu, CurrencyForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
 
@@ -146,7 +146,7 @@ function renderPlans(): string {
 }
 
 function renderProfile(): string {
-  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme);
+  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion || 'user');
 }
 
 function renderSheet(): string {
@@ -177,6 +177,22 @@ function renderSheet(): string {
   }
   if (state.sheet === 'export') {
     return BottomSheet('Экспорт и данные', InfoPanel('Экспорт', profile?.export?.privacy_note || 'Экспорт использует существующий Telegram flow.'));
+  }
+  if (state.sheet === 'profile-name') {
+    return BottomSheet('Профиль', PreferredNameForm(profile, state.saving, state.saveError));
+  }
+  if (state.sheet === 'profile-currency') {
+    return BottomSheet('Валюта', CurrencyForm(profile, state.saving, state.saveError));
+  }
+  if (state.sheet === 'profile-timezone') {
+    return BottomSheet('Часовой пояс', TimezoneForm(profile, state.saving, state.saveError));
+  }
+  if (state.sheet === 'profile-workspace') {
+    const workspace = profile?.workspaces?.find((item) => item.workspace_id === state.selectedWorkspaceId);
+    return BottomSheet('Пространство', WorkspaceForm(workspace, state.saving, state.saveError));
+  }
+  if (state.sheet === 'quiet-hours') {
+    return BottomSheet('Тихие часы', QuietHoursForm(profile?.notifications, state.saving, state.saveError));
   }
   if (state.sheet === 'menu') {
     const nav = navigator as Navigator & { standalone?: boolean };
@@ -359,6 +375,7 @@ function closeSheet(): void {
   selectedOperation = null;
   selectedGoal = null;
   selectedLimit = null;
+  state.selectedWorkspaceId = undefined;
   state.saveError = undefined;
   state.saving = false;
   state.dirty = false;
@@ -624,6 +641,24 @@ function wireEvents(): void {
     state.tab = 'operations';
     await loadScreen();
   });
+  app.querySelector<HTMLButtonElement>('[data-action="home-challenge"]')?.addEventListener('click', async () => {
+    await api.track('mini_app_home_challenge_opened', { kind: overview?.challenge?.completed ? 'completed' : 'active', source: 'mini_app' });
+    state.tab = 'plans';
+    state.plansMode = 'limits';
+    await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-focus"]')?.addEventListener('click', async (event) => {
+    const mode = (event.currentTarget as HTMLButtonElement).dataset.mode === 'limits' ? 'limits' : 'goals';
+    await api.track('mini_app_home_focus_opened', { kind: mode, source: 'mini_app' });
+    state.tab = 'plans';
+    state.plansMode = mode;
+    await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.addEventListener('click', async () => {
+    await api.track('mini_app_home_insight_opened', { kind: overview?.insight?.kind || 'fallback', source: 'mini_app' });
+    state.tab = 'analytics';
+    await loadScreen();
+  });
   app.querySelector<HTMLButtonElement>('[data-action="goal-create"]')?.addEventListener('click', () => {
     state.sheet = 'goal-create';
     state.goalCreateIdempotencyKey = requestId();
@@ -711,6 +746,61 @@ function wireEvents(): void {
     state.sheet = 'export';
     render();
   });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="profile-section"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const section = button.dataset.section || 'user';
+      state.profileAccordion = section as AppState['profileAccordion'];
+      persistState(state);
+      await api.track('mini_app_profile_section_opened', { section, source: 'mini_app' });
+      render();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="profile-name-open"]')?.addEventListener('click', () => {
+    state.sheet = 'profile-name';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="profile-currency-open"]')?.addEventListener('click', () => {
+    state.sheet = 'profile-currency';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="profile-timezone-open"]')?.addEventListener('click', () => {
+    state.sheet = 'profile-timezone';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="profile-active-workspace-open"]')?.addEventListener('click', () => {
+    state.profileAccordion = 'workspaces';
+    persistState(state);
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="profile-active-workspace-set"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = Number(button.dataset.id);
+      if (!id) return;
+      const response = await api.setActiveWorkspace(id);
+      if (profile) profile = { ...profile, workspaces: response.workspaces };
+      if (state.boot) state.boot = { ...state.boot, workspaces: state.boot.workspaces.map((workspace) => workspace.workspace_id === 'all' ? workspace : { ...workspace, active: workspace.workspace_id === id }) };
+      state.workspaceId = id;
+      showToast('Пространство выбрано');
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="profile-workspace-open"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = Number(button.dataset.id);
+      state.selectedWorkspaceId = id;
+      state.sheet = 'profile-workspace';
+      state.saveError = undefined;
+      render();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="quiet-hours-open"]')?.addEventListener('click', () => {
+    state.sheet = 'quiet-hours';
+    state.saveError = undefined;
+    render();
+  });
   app.querySelectorAll<HTMLButtonElement>('[data-action="notification-toggle"]').forEach((button) => {
     button.addEventListener('click', async () => {
       try {
@@ -723,11 +813,6 @@ function wireEvents(): void {
         render();
       }
     });
-  });
-  app.querySelector<HTMLButtonElement>('[data-action="notification-quiet"]')?.addEventListener('click', async () => {
-    const notifications = await api.updateNotificationPreferences({ action: 'quiet_toggle' });
-    if (profile) profile = { ...profile, notifications };
-    render();
   });
   app.querySelector<HTMLButtonElement>('[data-action="share-app"]')?.addEventListener('click', async () => {
     if (navigator.share) await navigator.share({ title: 'Finuchet', text: 'КопиPaste для учёта финансов' }).catch(() => undefined);
@@ -1030,6 +1115,125 @@ function wireEvents(): void {
     applyTheme(theme);
     await api.setTheme(theme);
     render();
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="profile-name-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const data = new FormData(event.currentTarget as HTMLFormElement);
+      const response = await api.setPreferredName(String(data.get('preferred_name') || '').trim());
+      if (profile) profile = { ...profile, preferred_name: response.preferred_name, display_name: response.display_name };
+      if (state.boot) state.boot = { ...state.boot, user: { ...state.boot.user, preferred_name: response.preferred_name, display_name: response.display_name } };
+      closeSheet();
+      showToast('Имя сохранено');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="profile-currency-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const data = new FormData(event.currentTarget as HTMLFormElement);
+      const response = await api.setCurrency(String(data.get('currency') || 'RUB'));
+      if (profile) profile = { ...profile, currency: response.currency };
+      if (state.boot) state.boot = { ...state.boot, user: { ...state.boot.user, currency: response.currency } };
+      closeSheet();
+      showToast('Валюта сохранена');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="profile-timezone-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const data = new FormData(event.currentTarget as HTMLFormElement);
+      const selected = String(data.get('timezone_select') || '');
+      const timezone = selected === 'custom' ? String(data.get('timezone_custom') || '').trim() : selected;
+      const response = await api.setTimezone(timezone);
+      if (profile) profile = { ...profile, timezone: response.timezone, notifications: response.notifications };
+      if (state.boot) state.boot = { ...state.boot, user: { ...state.boot.user, timezone: response.timezone } };
+      closeSheet();
+      showToast('Часовой пояс сохранён');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="profile-workspace-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    const id = Number(form.dataset.id);
+    if (!id) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const data = new FormData(form);
+      const response = await api.renameWorkspace(id, String(data.get('name') || '').trim());
+      if (profile) profile = { ...profile, workspaces: response.workspaces };
+      if (state.boot) {
+        state.boot = {
+          ...state.boot,
+          workspaces: state.boot.workspaces.map((workspace) => workspace.workspace_id === id ? { ...workspace, name: response.workspace.name } : workspace)
+        };
+      }
+      closeSheet();
+      showToast('Пространство обновлено');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="quiet-hours-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const data = new FormData(event.currentTarget as HTMLFormElement);
+      const notifications = await api.updateNotificationPreferences({
+        action: 'quiet_hours_update',
+        enabled: data.get('enabled') === 'on',
+        start: String(data.get('start') || '22:30'),
+        end: String(data.get('end') || '08:00'),
+      });
+      if (profile) profile = { ...profile, notifications };
+      closeSheet();
+      showToast('Тихие часы сохранены');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
 }
 

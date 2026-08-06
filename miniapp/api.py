@@ -19,6 +19,7 @@ from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency, get_user_locale
 from services.budgeting import list_general_limits
 from services.categories import list_managed_categories, normalized_category_key
+from services.challenges import ChallengeCard, upsert_assignments
 from services.goal_planning import (
     FREQUENCY_MONTHLY,
     FREQUENCY_NONE,
@@ -68,12 +69,14 @@ from services.notification_preferences import (
     TOGGLE_FIELDS,
     get_notification_preferences,
     set_notification_timezone,
+    set_quiet_hours,
     set_quiet_hours_time,
     toggle_notification_preference,
     toggle_quiet_hours,
 )
-from services.user_time import user_local_date, user_timezone_name
-from services.workspaces import WRITE_ROLES, WorkspaceContext, can_edit_operation, list_accessible_workspaces
+from services.user_profile import ALLOWED_CURRENCIES, display_name_from_parts, get_user_preferred_name, set_user_currency, set_user_preferred_name
+from services.user_time import TIMEZONE_CHOICES, user_local_date, user_timezone_name
+from services.workspaces import WRITE_ROLES, WorkspaceContext, can_edit_operation, list_accessible_workspaces, rename_workspace, set_active_workspace
 from utils.money import MoneyParseError, format_money, to_decimal_money
 
 log = logging.getLogger(__name__)
@@ -108,6 +111,9 @@ class MiniAppRequest:
     user_id: int
     request_id: str
     locale: str | None = None
+    telegram_first_name: str | None = None
+    telegram_last_name: str | None = None
+    telegram_username: str | None = None
 
 
 def serialize(value: Any) -> Any:
@@ -138,8 +144,32 @@ class MiniAppAPI:
     def __init__(self) -> None:
         self.version = os.getenv("MINIAPP_VERSION", "mvp-pr2")
 
-    def request(self, user_id: int, *, request_id: str | None = None, locale: str | None = None) -> MiniAppRequest:
-        return MiniAppRequest(user_id=int(user_id), request_id=request_id or str(uuid4()), locale=locale)
+    def request(
+        self,
+        user_id: int,
+        *,
+        request_id: str | None = None,
+        locale: str | None = None,
+        telegram_first_name: str | None = None,
+        telegram_last_name: str | None = None,
+        telegram_username: str | None = None,
+    ) -> MiniAppRequest:
+        return MiniAppRequest(
+            user_id=int(user_id),
+            request_id=request_id or str(uuid4()),
+            locale=locale,
+            telegram_first_name=telegram_first_name,
+            telegram_last_name=telegram_last_name,
+            telegram_username=telegram_username,
+        )
+
+    def _display_name(self, req: MiniAppRequest, preferred_name: str | None = None) -> str:
+        return display_name_from_parts(
+            preferred_name,
+            first_name=req.telegram_first_name,
+            last_name=req.telegram_last_name,
+            username=req.telegram_username,
+        )
 
     def _track(self, req: MiniAppRequest, event_name: str, *, workspace_id: int | None = None, status: str = "success", properties: dict | None = None) -> None:
         try:
@@ -326,9 +356,10 @@ class MiniAppAPI:
         workspaces = self._workspace_rows(req.user_id)
         theme = self._profile_theme(req.user_id)
         timezone_name, _reason = user_timezone_name(req.user_id)
+        preferred_name = get_user_preferred_name(req.user_id)
         self._track(req, "mini_app_opened", properties={"surface": "telegram_webapp"})
         return success({
-            "user": {"id": str(req.user_id), "locale": get_user_locale(req.user_id), "currency": get_user_currency(req.user_id), "timezone": timezone_name},
+            "user": {"id": str(req.user_id), "locale": get_user_locale(req.user_id), "currency": get_user_currency(req.user_id), "timezone": timezone_name, "preferred_name": preferred_name, "display_name": self._display_name(req, preferred_name)},
             "workspaces": [{"workspace_id": "all", "name": "Все пространства", "kind": "all", "role": "viewer", "active": False, "read_only": True}, *workspaces],
             "periods": ["current_month", "previous_month", "last_30", "custom"],
             "theme": theme,
@@ -628,7 +659,7 @@ class MiniAppAPI:
                 bucket["expense"] = to_decimal_money(total)
             bucket["count"] = int(bucket["count"]) + int(count or 0)
         aggregation_available = len(totals) <= 1
-        recent = self.operations(req, {**params, "limit": 7, "offset": 0})["data"]["items"]
+        recent = self.operations(req, {**params, "limit": 3, "offset": 0})["data"]["items"][:3]
         info = None
         if not totals:
             info = {"kind": "welcome", "text": "Добавьте первую операцию, чтобы увидеть динамику периода."}
@@ -643,7 +674,151 @@ class MiniAppAPI:
             "totals_by_currency": totals,
             "recent_operations": recent,
             "info": info,
+            "challenge": self._home_challenge(req),
+            "focus": self._home_focus(req, params, all_scope),
+            "insight": self._home_insight(req, workspace_ids, start, end, period_key, totals),
         }, request_id=req.request_id)
+
+    def _home_challenge(self, req: MiniAppRequest) -> dict | None:
+        try:
+            cards = upsert_assignments(req.user_id, "today")
+        except Exception as exc:
+            log.info("miniapp_home_challenge_unavailable reason=%s", type(exc).__name__)
+            return None
+        if not cards:
+            return None
+        active = [card for card in cards if not card.completed]
+        card = active[0] if active else cards[0]
+        return self._challenge_dict(card)
+
+    def _challenge_dict(self, card: ChallengeCard) -> dict:
+        return {
+            "key": card.definition.key,
+            "title": card.definition.title,
+            "description": card.definition.description,
+            "progress": min(card.progress, card.target),
+            "target": card.target,
+            "completed": bool(card.completed),
+            "cta_label": card.definition.cta_label,
+            "period_key": card.period_key,
+            "period_end": card.period_end,
+        }
+
+    def _home_focus(self, req: MiniAppRequest, params: dict[str, Any], all_scope: bool) -> dict | None:
+        if all_scope:
+            return {"kind": "empty", "title": "Выберите пространство", "description": "Фокус доступен для одного пространства.", "read_only": True}
+        candidates: list[dict] = []
+        try:
+            goals = self.goals(req, params)["data"].get("items", [])
+            for goal in goals:
+                percent = int(goal.get("percent") or 0)
+                days_left = None
+                if goal.get("deadline"):
+                    try:
+                        days_left = (date.fromisoformat(str(goal["deadline"])) - user_local_date(req.user_id)).days
+                    except ValueError:
+                        days_left = None
+                urgent = days_left is not None and days_left <= 14 and percent < 100
+                score = (180 if urgent else 100) + min(percent, 100)
+                candidates.append({
+                    "score": score,
+                    "kind": "goal",
+                    "id": goal.get("id"),
+                    "title": goal.get("title") or "Цель",
+                    "description": goal.get("next_action") or "Проверьте план цели.",
+                    "percent": percent,
+                    "status": "urgent" if urgent else goal.get("status") or "active",
+                    "cta_label": "Открыть цели",
+                    "target_mode": "goals",
+                })
+        except Exception as exc:
+            log.info("miniapp_home_focus_goals_unavailable reason=%s", type(exc).__name__)
+        try:
+            limits = self.limits(req, params)["data"].get("items", [])
+            for limit in limits:
+                percent = int(limit.get("percent") or 0)
+                if percent >= 100:
+                    score = 300 + min(percent, 200)
+                    status = "exceeded"
+                    description = "Лимит превышен. Проверьте расходы периода."
+                elif percent >= 90:
+                    score = 220 + percent
+                    status = "warning"
+                    description = "Лимит почти исчерпан."
+                else:
+                    score = 80 + percent
+                    status = limit.get("status") or "normal"
+                    description = "Лимит в рабочем режиме."
+                candidates.append({
+                    "score": score,
+                    "kind": "limit",
+                    "id": limit.get("id"),
+                    "title": limit.get("title") or "Лимит",
+                    "description": description,
+                    "percent": percent,
+                    "status": status,
+                    "cta_label": "Открыть лимиты",
+                    "target_mode": "limits",
+                })
+        except Exception as exc:
+            log.info("miniapp_home_focus_limits_unavailable reason=%s", type(exc).__name__)
+        if not candidates:
+            return {"kind": "empty", "title": "Фокус свободен", "description": "Добавьте цель или лимит, чтобы видеть главный приоритет.", "target_mode": "goals"}
+        candidates.sort(key=lambda item: (-int(item["score"]), str(item["kind"]), str(item.get("id") or "")))
+        item = dict(candidates[0])
+        item.pop("score", None)
+        return item
+
+    def _home_insight(
+        self,
+        req: MiniAppRequest,
+        workspace_ids: list[int | None],
+        start: date,
+        end: date,
+        period_key: str,
+        totals: dict[str, dict[str, Decimal | int]],
+    ) -> dict:
+        if not totals:
+            return {"kind": "fallback", "tone": "neutral", "title": "Данных пока мало", "text": "Добавьте операции, и здесь появится сравнение периода."}
+        if len(totals) > 1:
+            return {"kind": "currency_mix", "tone": "neutral", "title": "Несколько валют", "text": "Сравнение не складывает разные валюты без конвертации."}
+        currency = next(iter(totals))
+        prev_start, prev_end, _prev_key = self._previous_period(start, end, period_key)
+        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
+        try:
+            rows = pg_fetchall(
+                f"""
+                SELECT type, COALESCE(SUM(amount),0)
+                  FROM public.operations
+                 WHERE {where}
+                   AND op_date BETWEEN %s AND %s
+                   AND COALESCE(currency, %s)=%s
+                   AND COALESCE(type,'') IN ('Расходы','Доходы')
+                   AND COALESCE(category,'') <> 'Без операций'
+                 GROUP BY type
+                """,
+                (*wparams, prev_start, prev_end, get_user_currency(req.user_id), currency),
+            )
+        except Exception as exc:
+            log.info("miniapp_home_insight_unavailable reason=%s", type(exc).__name__)
+            return {"kind": "fallback", "tone": "neutral", "title": "Сравнение недоступно", "text": "Период показан без автоматического вывода."}
+        previous = {"income": Decimal("0.00"), "expense": Decimal("0.00")}
+        for typ, total in rows:
+            if typ == "Доходы":
+                previous["income"] = to_decimal_money(total)
+            elif typ == "Расходы":
+                previous["expense"] = to_decimal_money(total)
+        current_expense = to_decimal_money(totals[currency].get("expense", 0))
+        previous_expense = previous["expense"]
+        if previous_expense <= 0:
+            return {"kind": "previous_empty", "tone": "neutral", "title": "Есть текущий период", "text": "Для сравнения нужен предыдущий период с расходами."}
+        delta = current_expense - previous_expense
+        pct = int((abs(delta) / previous_expense * Decimal("100")).to_integral_value()) if previous_expense else 0
+        if delta < 0:
+            return {"kind": "expense_down", "tone": "positive", "title": "Расходы ниже", "text": f"На {pct}% меньше, чем в прошлом сопоставимом периоде.", "currency": currency}
+        if delta > 0:
+            return {"kind": "expense_up", "tone": "warning", "title": "Расходы выше", "text": f"На {pct}% больше, чем в прошлом сопоставимом периоде.", "currency": currency}
+        return {"kind": "expense_flat", "tone": "neutral", "title": "Расходы без изменений", "text": "Период совпадает с прошлым по расходам.", "currency": currency}
 
     def operations(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
@@ -1510,10 +1685,15 @@ class MiniAppAPI:
         except Exception as exc:
             log.info("miniapp_profile_categories_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
             categories = {"expense": [], "income": []}
+        preferred_name = get_user_preferred_name(req.user_id)
         return success({
             "theme": self._profile_theme(req.user_id),
+            "preferred_name": preferred_name,
+            "display_name": self._display_name(req, preferred_name),
             "currency": get_user_currency(req.user_id),
+            "available_currencies": sorted(ALLOWED_CURRENCIES),
             "timezone": timezone_name,
+            "timezone_options": [{"label": label, "value": value} for label, value in TIMEZONE_CHOICES],
             "workspaces": self._workspace_rows(req.user_id),
             "categories": categories,
             "notifications": notifications,
@@ -1537,6 +1717,57 @@ class MiniAppAPI:
     def notification_preferences(self, req: MiniAppRequest) -> dict:
         return success(get_notification_preferences(req.user_id), request_id=req.request_id)
 
+    def set_profile_preferred_name(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            preferred_name = set_user_preferred_name(req.user_id, body.get("preferred_name"))
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_preferred_name", "Invalid preferred name.") from exc
+        self._track(req, "mini_app_profile_setting_changed", properties={"setting": "preferred_name", "result": "success", "source": "mini_app"})
+        return success({"preferred_name": preferred_name, "display_name": self._display_name(req, preferred_name)}, request_id=req.request_id)
+
+    def set_profile_currency(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            currency = set_user_currency(req.user_id, str(body.get("currency") or ""))
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.") from exc
+        self._track(req, "mini_app_profile_setting_changed", properties={"setting": "currency", "result": "success", "source": "mini_app"})
+        return success({"currency": currency}, request_id=req.request_id)
+
+    def set_profile_timezone(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            notifications = set_notification_timezone(req.user_id, str(body.get("timezone") or body.get("value") or ""))
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_timezone", "Invalid timezone.") from exc
+        self._track(req, "mini_app_profile_setting_changed", properties={"setting": "timezone", "result": "success", "source": "mini_app"})
+        return success({"timezone": notifications.get("timezone"), "notifications": notifications}, request_id=req.request_id)
+
+    def set_profile_active_workspace(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            workspace_id = int(body.get("workspace_id"))
+        except (TypeError, ValueError) as exc:
+            raise MiniAppError(400, "bad_workspace", "Invalid workspace.") from exc
+        if not set_active_workspace(req.user_id, workspace_id):
+            raise MiniAppError(403, "workspace_access_denied", "Workspace is not available.")
+        self._track(req, "mini_app_profile_setting_changed", workspace_id=workspace_id, properties={"setting": "active_workspace", "result": "success", "source": "mini_app"})
+        return success({"workspaces": self._workspace_rows(req.user_id), "active_workspace_id": workspace_id}, request_id=req.request_id)
+
+    def update_workspace(self, req: MiniAppRequest, workspace_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            row = rename_workspace(req.user_id, int(workspace_id), str(body.get("name") or ""))
+        except PermissionError as exc:
+            raise MiniAppError(403, "workspace_rename_denied", "You cannot rename this workspace.") from exc
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_workspace_name", "Invalid workspace name.") from exc
+        if not row:
+            raise MiniAppError(404, "workspace_not_found", "Workspace was not found.")
+        self._track(req, "mini_app_profile_setting_changed", workspace_id=int(workspace_id), properties={"setting": "workspace_name", "result": "success", "source": "mini_app"})
+        return success({"workspace": row, "workspaces": self._workspace_rows(req.user_id)}, request_id=req.request_id)
+
     def update_notification_preferences(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
         action = str(body.get("action") or "toggle")
@@ -1553,6 +1784,14 @@ class MiniAppAPI:
             elif action == "quiet_time":
                 set_quiet_hours_time(req.user_id, key, str(body.get("value") or ""))
                 self._track(req, "mini_app_notification_setting_changed", properties={"action": "quiet_hours_time", "result": "success", "source": "mini_app"})
+            elif action == "quiet_hours_update":
+                set_quiet_hours(
+                    req.user_id,
+                    enabled=bool(body.get("enabled")),
+                    start=str(body.get("start") or body.get("quiet_hours_start") or "22:30"),
+                    end=str(body.get("end") or body.get("quiet_hours_end") or "08:00"),
+                )
+                self._track(req, "mini_app_profile_setting_changed", properties={"setting": "quiet_hours", "result": "success", "source": "mini_app"})
             elif action == "timezone":
                 set_notification_timezone(req.user_id, str(body.get("value") or ""))
                 self._track(req, "mini_app_notification_setting_changed", properties={"action": "timezone", "result": "success", "source": "mini_app"})
@@ -1624,10 +1863,15 @@ class MiniAppAPI:
             "mini_app_analytics_chart_filter_changed",
             "mini_app_premium_opened",
             "mini_app_export_opened",
+            "mini_app_home_challenge_opened",
+            "mini_app_home_focus_opened",
+            "mini_app_home_insight_opened",
+            "mini_app_profile_section_opened",
+            "mini_app_profile_setting_changed",
         }
         if event not in allowed:
             raise MiniAppError(400, "bad_event", "Invalid analytics event.")
-        props = {k: v for k, v in (body.get("properties") or {}).items() if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "result", "source"}}
+        props = {k: v for k, v in (body.get("properties") or {}).items() if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "result", "source", "kind", "setting", "section"}}
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)
 

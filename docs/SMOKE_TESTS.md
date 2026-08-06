@@ -185,6 +185,21 @@ Run after deployment and restart.
 ## Telegram Mini App PR 1
 
 - Open the Mini App from Telegram and confirm it reaches Home first.
+- Confirm Home shows income with Add income in the left column and expenses with Add expense in the right column.
+- Confirm Home shows no more than three recent operations and `Все операции` opens the Operations tab.
+- Confirm the daily challenge card shows progress and opens a handled Mini App route/plan surface.
+- Confirm the focus card opens Goals or Limits according to the displayed card.
+- Confirm the period insight is neutral/positive/warning and mixed-currency periods are not summed.
+- Confirm Profile opens with the User accordion expanded and only one accordion section open at a time.
+- Confirm Preferred name saves and a later bot confirmation uses that name.
+- Confirm Currency saves for future defaults without altering existing operation history.
+- Confirm Timezone saves a preset and a valid custom IANA value, and rejects an invalid value.
+- Confirm Active workspace selection changes the default workspace and owner/admin workspace rename works.
+- Confirm notification rows are switches, challenge notification preference remains available in Settings/Profile, and Quiet hours opens an editor instead of toggling directly.
+- Confirm quiet-hours enabled/start/end save in one action and cross-midnight values still defer challenge notifications.
+- Disable quiet hours after setting `23:00–09:00`, reopen the editor, and confirm `23:00–09:00` is still shown before enabling again.
+- Confirm Telegram menu button `Открыть приложение` opens the Mini App when `MINIAPP_PUBLIC_URL` is HTTPS.
+- Confirm `/app` still shows the inline WebApp button.
 - Confirm the bottom navigation has exactly Operations, Analytics, Home, Plans and Profile.
 - Confirm Home is the centered tab.
 - Confirm every visible bottom tab opens a handled screen.

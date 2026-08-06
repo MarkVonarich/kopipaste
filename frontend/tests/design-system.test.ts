@@ -84,8 +84,8 @@ describe('mini app design system semantics', () => {
 
     expect(parsed.querySelector('[data-testid="hero-financial-result"]')?.textContent).toContain('Финансовый результат');
     expect(parsed.querySelector('[data-testid="hero-financial-result"]')?.textContent).toContain('Валюты показаны отдельно');
-    expect(parsed.querySelector('[data-testid="income-expense-pair"]')?.textContent).toContain('Доходы');
-    expect(parsed.querySelector('[data-testid="income-expense-pair"]')?.textContent).toContain('Расходы');
+    expect(parsed.querySelector('[data-testid="income-column"]')?.textContent).toContain('Доходы');
+    expect(parsed.querySelector('[data-testid="expense-column"]')?.textContent).toContain('Расходы');
     expect(parsed.querySelector('button[data-kind="expense"]')?.textContent).toContain('Добавить расход');
     expect(parsed.querySelector('button[data-kind="income"]')?.textContent).toContain('Добавить доход');
   });

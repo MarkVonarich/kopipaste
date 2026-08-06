@@ -6,7 +6,7 @@ import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
 import { GoalForm, PlansScreen } from '../src/components/PlansScreen';
 import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
-import { AdditionalMenu, ProfileScreen } from '../src/components/ProfileScreen';
+import { AdditionalMenu, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
 
 const overview = {
   period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-04' },
@@ -24,6 +24,36 @@ describe('acceptance components', () => {
     expect(html).toContain('Последние операции');
     expect(html).toContain('data-action="open-actions"');
     expect(html).toContain('Все операции');
+  });
+
+  it('renders aligned Home action columns and at most three recent operations', () => {
+    const recent = [1, 2, 3, 4].map((id) => ({
+      id,
+      op_date: '2026-08-04',
+      type: 'Расходы' as const,
+      category: `Food ${id}`,
+      amount: '100.00',
+      amount_text: '100 ₽',
+      currency: 'RUB',
+      description: 'Lunch',
+      workspace_id: 10,
+    }));
+    const html = HomeScreen({
+      ...overview,
+      challenge: { key: 'daily', title: 'Две записи', description: 'Запишите две операции', progress: 1, target: 2, completed: false, cta_label: 'Добавить', period_key: '2026-08-04' },
+      focus: { kind: 'limit', title: 'Food', description: 'Лимит почти исчерпан', target_mode: 'limits', percent: 90 },
+      insight: { kind: 'expense_down', tone: 'positive', title: 'Расходы ниже', text: 'На 10% меньше' },
+    }, recent, 'RUB', true);
+    const incomeColumn = html.slice(html.indexOf('data-testid="income-column"'), html.indexOf('data-testid="expense-column"'));
+    const expenseColumn = html.slice(html.indexOf('data-testid="expense-column"'), html.indexOf('data-testid="smart-home-grid"'));
+    expect(incomeColumn).toContain('Доходы');
+    expect(incomeColumn).toContain('data-kind="income"');
+    expect(expenseColumn).toContain('Расходы');
+    expect(expenseColumn).toContain('data-kind="expense"');
+    expect(html).toContain('Челлендж дня');
+    expect(html).toContain('Фокус');
+    expect(html).toContain('Инсайт периода');
+    expect(html).not.toContain('Food 4');
   });
 
   it('renders multiple currencies without false aggregation', () => {
@@ -247,14 +277,15 @@ describe('acceptance components', () => {
   });
 
   it('does not render invalid repository profile document links', () => {
-    const html = ProfileScreen({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test', links: { privacy: null, terms: null } }, [], 'telegram');
+    const html = ProfileScreen({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test', links: { privacy: null, terms: null } }, [], 'telegram', 'legal');
     expect(html).toContain('Документ пока недоступен');
     expect(html).not.toContain('docs/MINI_APP_AUTH.md');
   });
 
-  it('renders full profile sections and hides unsupported add-to-home', () => {
+  it('renders accordion profile sections and hides closed controls', () => {
     const html = ProfileScreen({
       theme: 'telegram',
+      preferred_name: 'Мария',
       currency: 'RUB',
       timezone: 'Europe/Moscow',
       version: 'test',
@@ -277,13 +308,123 @@ describe('acceptance components', () => {
       premium: { available: false, title: 'Premium', status: 'info_only', description: 'Информационный раздел', features: [] },
       export: { available: true, status: 'ready', presets: ['month'], privacy_note: 'Существующий flow' },
       categories: { expense: [], income: [] },
-    }, [], 'telegram');
+    }, [], 'telegram', 'user');
+    expect(html).toContain('aria-expanded="true" aria-controls="profile-panel-user"');
+    expect(html).toContain('id="profile-panel-notifications" hidden');
+    expect(html).toContain('Как к вам обращаться?');
     expect(html).toContain('Уведомления');
     expect(html).toContain('Premium');
     expect(html).toContain('Экспорт и данные');
+    expect(html).toContain('profile-name-open');
+  });
+
+  it('keeps notification switches in settings and quiet hours as editor row', () => {
+    const html = ProfileScreen({
+      theme: 'telegram',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+      notifications: {
+        morning_enabled: true,
+        evening_enabled: true,
+        limit_alerts_enabled: true,
+        budget_alerts_enabled: true,
+        weekly_reports_enabled: true,
+        monthly_reports_enabled: true,
+        challenge_notifications_enabled: true,
+        goal_notifications_enabled: false,
+        morning_time: '08:30',
+        evening_time: '20:30',
+        quiet_hours_enabled: true,
+        quiet_hours_start: '22:30',
+        quiet_hours_end: '08:00',
+        timezone: 'Europe/Moscow',
+      },
+      categories: { expense: [], income: [] },
+      premium: { available: false, title: 'Premium', status: 'info_only', description: 'Информационный раздел', features: [] },
+      export: { available: true, status: 'ready', presets: ['month'], privacy_note: 'Существующий flow' },
+    }, [], 'telegram', 'notifications');
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('data-key="challenges"');
+    expect(html).toContain('data-action="quiet-hours-open"');
+    expect(html).not.toContain('data-action="notification-quiet"');
 
     const menu = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, false);
     expect(menu).toContain('Поделиться Finuchet');
     expect(menu).not.toContain('Добавить на главный экран');
+  });
+
+  it('shows Telegram display name before preferred name, then returns to it after clear', () => {
+    const telegramName = ProfileScreen({
+      theme: 'telegram',
+      preferred_name: null,
+      display_name: 'Максим',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+    }, [], 'telegram', 'user');
+    expect(telegramName).toContain('Как к вам обращаться?');
+    expect(telegramName).toContain('Максим');
+
+    const preferred = ProfileScreen({
+      theme: 'telegram',
+      preferred_name: 'Леонель Месси',
+      display_name: 'Леонель Месси',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+    }, [], 'telegram', 'user');
+    expect(preferred).toContain('Леонель Месси');
+
+    const cleared = ProfileScreen({
+      theme: 'telegram',
+      preferred_name: null,
+      display_name: 'Максим',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+    }, [], 'telegram', 'user');
+    expect(cleared).toContain('Максим');
+    expect(cleared).not.toContain('Леонель Месси');
+  });
+
+  it('quiet-hours editor preserves displayed times while disabled and re-enabled', () => {
+    const disabled = QuietHoursForm({
+      morning_enabled: true,
+      evening_enabled: true,
+      limit_alerts_enabled: true,
+      budget_alerts_enabled: true,
+      weekly_reports_enabled: true,
+      monthly_reports_enabled: true,
+      challenge_notifications_enabled: true,
+      goal_notifications_enabled: false,
+      morning_time: '08:30',
+      evening_time: '20:30',
+      quiet_hours_enabled: false,
+      quiet_hours_start: '23:00',
+      quiet_hours_end: '09:00',
+      timezone: 'Europe/Moscow',
+    }, false);
+    const enabled = QuietHoursForm({
+      morning_enabled: true,
+      evening_enabled: true,
+      limit_alerts_enabled: true,
+      budget_alerts_enabled: true,
+      weekly_reports_enabled: true,
+      monthly_reports_enabled: true,
+      challenge_notifications_enabled: true,
+      goal_notifications_enabled: false,
+      morning_time: '08:30',
+      evening_time: '20:30',
+      quiet_hours_enabled: true,
+      quiet_hours_start: '23:00',
+      quiet_hours_end: '09:00',
+      timezone: 'Europe/Moscow',
+    }, false);
+
+    expect(disabled).toContain('value="23:00"');
+    expect(disabled).toContain('value="09:00"');
+    expect(enabled).toContain('value="23:00"');
+    expect(enabled).toContain('value="09:00"');
   });
 });
