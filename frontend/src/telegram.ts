@@ -14,6 +14,11 @@ export type TelegramWebApp = {
     onClick: (callback: () => void) => void;
     offClick?: (callback: () => void) => void;
   };
+  HapticFeedback?: {
+    selectionChanged?: () => void;
+    impactOccurred?: (style: 'light' | 'medium' | 'heavy' | 'rigid' | 'soft') => void;
+    notificationOccurred?: (type: 'error' | 'success' | 'warning') => void;
+  };
 };
 
 const TELEGRAM_LAUNCH_MESSAGE = 'Откройте приложение через кнопку в Telegram-боте';
@@ -51,4 +56,36 @@ export function initTelegramShell(): TelegramWebApp | null {
 
 export function initData(): string {
   return getTelegramWebApp()?.initData ?? '';
+}
+
+export function hapticSelection(): void {
+  try {
+    getTelegramWebApp()?.HapticFeedback?.selectionChanged?.();
+  } catch {
+    // Haptics are optional; Telegram host differences must not affect UI flow.
+  }
+}
+
+export function hapticSuccess(): void {
+  try {
+    getTelegramWebApp()?.HapticFeedback?.notificationOccurred?.('success');
+  } catch {
+    // Haptics are optional; Telegram host differences must not affect UI flow.
+  }
+}
+
+export function hapticError(): void {
+  try {
+    getTelegramWebApp()?.HapticFeedback?.notificationOccurred?.('error');
+  } catch {
+    // Haptics are optional; Telegram host differences must not affect UI flow.
+  }
+}
+
+export function hapticDestructive(): void {
+  try {
+    getTelegramWebApp()?.HapticFeedback?.impactOccurred?.('medium');
+  } catch {
+    // Haptics are optional; Telegram host differences must not affect UI flow.
+  }
 }
