@@ -186,6 +186,32 @@ def set_quiet_hours_time(user_id: int, field: str, value: str) -> dict:
         conn.close()
 
 
+def set_quiet_hours(user_id: int, *, enabled: bool, start: str | None = None, end: str | None = None) -> dict:
+    start_time = parse_hhmm(start or "22:30")
+    end_time = parse_hhmm(end or "08:00")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.notification_preferences (user_id, quiet_hours_start, quiet_hours_end)
+                VALUES (%s, CASE WHEN %s THEN %s ELSE NULL END, CASE WHEN %s THEN %s ELSE NULL END)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET quiet_hours_start=CASE WHEN %s THEN EXCLUDED.quiet_hours_start ELSE NULL END,
+                       quiet_hours_end=CASE WHEN %s THEN EXCLUDED.quiet_hours_end ELSE NULL END,
+                       updated_at=now()
+                """,
+                (user_id, bool(enabled), start_time, bool(enabled), end_time, bool(enabled), bool(enabled)),
+            )
+        conn.commit()
+        return get_notification_preferences(user_id)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def set_notification_timezone(user_id: int, timezone_name: str) -> dict:
     name = str(timezone_name or "").strip()
     if not is_valid_timezone_name(name):

@@ -1,6 +1,6 @@
 # Mini App Deployment
 
-PR 1 introduced the Mini App foundation migrations. PR 2 completes the MVP UI/API surface and does not add a production migration.
+PR 1 introduced the Mini App foundation migrations. PR 2 completes the MVP UI/API surface. The smart Home/profile release adds a preferred-name column and does not apply it automatically in production.
 
 ## Migration
 
@@ -10,6 +10,7 @@ Production command, when approved:
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_016_miniapp_foundation.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_017_miniapp_acceptance_hardening.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_018_miniapp_transactional_idempotency.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260806_019_user_preferred_name.sql
 ```
 
 Rollback for the new Mini App tables only:
@@ -101,7 +102,16 @@ The frontend includes the official Telegram WebApp SDK in `frontend/index.html`.
 The SDK must load before the Vite module entrypoint so `window.Telegram.WebApp`,
 `ready()`, `expand()` and signed `initData` are available before API bootstrap.
 
-The `/app` command shows a WebApp button only when `MINIAPP_PUBLIC_URL` is configured. If absent, the bot replies that Mini App is unavailable. BotFather menu-button configuration is a separate manual production step and is not performed by tests or deploy scripts.
+The `/app` command shows a WebApp button only when `MINIAPP_PUBLIC_URL` is configured. If absent, the bot replies that Mini App is unavailable.
+
+On bot startup, the application registers Telegram's persistent chat menu button with `MenuButtonWebApp` when `MINIAPP_PUBLIC_URL` is present and HTTPS. Registration is idempotent and startup continues on temporary Telegram API errors.
+
+BotFather Main Mini App still needs a manual production check:
+
+- open BotFather for the production bot;
+- verify the Main Mini App URL matches the public HTTPS Mini App URL;
+- verify the button label is `Открыть приложение` or an approved shorter label;
+- do not paste tokens or secrets into BotFather notes or deployment logs.
 
 Dry-run documentation command:
 
@@ -116,3 +126,10 @@ Production browser smoke should be performed inside Telegram Desktop and on a
 mobile Telegram client. Opening the URL directly in a normal browser must show
 the safe message asking the user to open the application through the Telegram
 bot button, and it must not call Mini App API bootstrap without `initData`.
+
+Menu-button smoke:
+
+- restart a staging bot with HTTPS `MINIAPP_PUBLIC_URL`;
+- confirm startup logs contain successful menu-button registration without secret values;
+- open the bot chat and press the persistent menu button;
+- confirm `/app` still renders the inline WebApp button and command list still includes `/start`, `/settings`, `/help`, `/app` when the Mini App URL is configured.

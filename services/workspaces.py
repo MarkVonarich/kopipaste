@@ -162,6 +162,13 @@ def can_manage_workspace(ctx: WorkspaceContext) -> bool:
     return ctx.is_configured and ctx.role in ADMIN_ROLES
 
 
+def validate_workspace_name(name: str | None) -> str:
+    value = str(name or "").strip()
+    if not value or len(value) > 120 or "\n" in value or "\r" in value:
+        raise ValueError("invalid_workspace_name")
+    return value
+
+
 def can_edit_operation(ctx: WorkspaceContext, operation_actor_user_id: int | None) -> bool:
     if ctx.role in ADMIN_ROLES:
         return True
@@ -234,6 +241,47 @@ def set_active_workspace(user_id: int, workspace_id: int) -> bool:
             )
         conn.commit()
         return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def rename_workspace(user_id: int, workspace_id: int, name: str) -> dict | None:
+    value = validate_workspace_name(name)
+    rows = pg_fetchall(
+        """
+        SELECT m.role
+          FROM public.workspace_members m
+          JOIN public.workspaces w ON w.id=m.workspace_id
+         WHERE m.user_id=%s AND m.workspace_id=%s AND m.status='active' AND w.archived_at IS NULL
+         LIMIT 1
+        """,
+        (user_id, workspace_id),
+    )
+    if not rows:
+        return None
+    role = rows[0][0]
+    if role not in ADMIN_ROLES:
+        raise PermissionError("workspace_rename_denied")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.workspaces
+                   SET name=%s, updated_at=now()
+                 WHERE id=%s AND archived_at IS NULL
+                RETURNING id, name, kind
+                """,
+                (value, workspace_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return None
+        return {"workspace_id": int(row[0]), "name": row[1], "kind": row[2], "role": role}
     except Exception:
         conn.rollback()
         raise

@@ -42,6 +42,7 @@ from services.posthog_exporter import export_status_counts
 async def on_startup(app):
     from cache.global_dict import load_global_cache
     from services.currency import update_fx_rates
+    from services.miniapp_menu import register_miniapp_menu_button
 
     load_global_cache()
     update_fx_rates()
@@ -53,6 +54,7 @@ async def on_startup(app):
     if MINIAPP_PUBLIC_URL:
         public_commands.append(BotCommand('app', 'Mini App'))
     await app.bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
+    await register_miniapp_menu_button(app.bot)
 
     admin_commands = public_commands + [
         BotCommand('admin_reminders_preview', 'Диагностика напоминаний (admin)'),

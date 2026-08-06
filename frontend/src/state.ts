@@ -1,4 +1,4 @@
-import type { AppState, PeriodState, TabKey, ThemeMode, Workspace } from './types';
+import type { AppState, PeriodState, ProfileSection, TabKey, ThemeMode, Workspace } from './types';
 
 const STORAGE_KEY = 'finuchet-miniapp-state-v1';
 
@@ -6,6 +6,7 @@ type PersistedState = {
   theme?: ThemeMode;
   workspaceId?: number | 'all' | null;
   period?: PeriodState;
+  profileAccordion?: ProfileSection;
 };
 
 export const TAB_ORDER: TabKey[] = ['operations', 'analytics', 'home', 'plans', 'profile'];
@@ -22,7 +23,8 @@ export function persistState(state: AppState): void {
   const persisted: PersistedState = {
     theme: state.theme,
     workspaceId: state.workspaceId,
-    period: state.period
+    period: state.period,
+    profileAccordion: state.profileAccordion
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 }
@@ -39,6 +41,7 @@ export function initialState(): AppState {
     saving: false,
     dirty: false,
     sheet: null,
+    profileAccordion: persisted.profileAccordion || 'user',
     plansMode: 'goals',
     analyticsFilters: { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }
   };
