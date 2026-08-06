@@ -6,7 +6,7 @@ import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
 import { GoalForm, PlansScreen } from '../src/components/PlansScreen';
 import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
-import { AdditionalMenu, ProfileScreen } from '../src/components/ProfileScreen';
+import { AdditionalMenu, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
 
 const overview = {
   period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-04' },
@@ -352,5 +352,79 @@ describe('acceptance components', () => {
     const menu = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, false);
     expect(menu).toContain('Поделиться Finuchet');
     expect(menu).not.toContain('Добавить на главный экран');
+  });
+
+  it('shows Telegram display name before preferred name, then returns to it after clear', () => {
+    const telegramName = ProfileScreen({
+      theme: 'telegram',
+      preferred_name: null,
+      display_name: 'Максим',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+    }, [], 'telegram', 'user');
+    expect(telegramName).toContain('Как к вам обращаться?');
+    expect(telegramName).toContain('Максим');
+
+    const preferred = ProfileScreen({
+      theme: 'telegram',
+      preferred_name: 'Леонель Месси',
+      display_name: 'Леонель Месси',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+    }, [], 'telegram', 'user');
+    expect(preferred).toContain('Леонель Месси');
+
+    const cleared = ProfileScreen({
+      theme: 'telegram',
+      preferred_name: null,
+      display_name: 'Максим',
+      currency: 'RUB',
+      timezone: 'Europe/Moscow',
+      version: 'test',
+    }, [], 'telegram', 'user');
+    expect(cleared).toContain('Максим');
+    expect(cleared).not.toContain('Леонель Месси');
+  });
+
+  it('quiet-hours editor preserves displayed times while disabled and re-enabled', () => {
+    const disabled = QuietHoursForm({
+      morning_enabled: true,
+      evening_enabled: true,
+      limit_alerts_enabled: true,
+      budget_alerts_enabled: true,
+      weekly_reports_enabled: true,
+      monthly_reports_enabled: true,
+      challenge_notifications_enabled: true,
+      goal_notifications_enabled: false,
+      morning_time: '08:30',
+      evening_time: '20:30',
+      quiet_hours_enabled: false,
+      quiet_hours_start: '23:00',
+      quiet_hours_end: '09:00',
+      timezone: 'Europe/Moscow',
+    }, false);
+    const enabled = QuietHoursForm({
+      morning_enabled: true,
+      evening_enabled: true,
+      limit_alerts_enabled: true,
+      budget_alerts_enabled: true,
+      weekly_reports_enabled: true,
+      monthly_reports_enabled: true,
+      challenge_notifications_enabled: true,
+      goal_notifications_enabled: false,
+      morning_time: '08:30',
+      evening_time: '20:30',
+      quiet_hours_enabled: true,
+      quiet_hours_start: '23:00',
+      quiet_hours_end: '09:00',
+      timezone: 'Europe/Moscow',
+    }, false);
+
+    expect(disabled).toContain('value="23:00"');
+    expect(disabled).toContain('value="09:00"');
+    expect(enabled).toContain('value="23:00"');
+    expect(enabled).toContain('value="09:00"');
   });
 });

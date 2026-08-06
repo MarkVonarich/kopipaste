@@ -56,7 +56,14 @@ def _init_data(environ) -> str:
 def _request(environ, request_id: str):
     max_age = int(os.getenv("MINIAPP_INITDATA_MAX_AGE_SECONDS", "86400") or "86400")
     user = verify_telegram_init_data(_init_data(environ), bot_token=TELEGRAM_TOKEN, max_age_seconds=max_age)
-    return api.request(user.user_id, request_id=request_id, locale=user.language_code)
+    return api.request(
+        user.user_id,
+        request_id=request_id,
+        locale=user.language_code,
+        telegram_first_name=user.first_name,
+        telegram_last_name=user.last_name,
+        telegram_username=user.username,
+    )
 
 
 def application(environ, start_response):

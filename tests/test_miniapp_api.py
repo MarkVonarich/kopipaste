@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from miniapp.api import MiniAppAPI, MiniAppError
+from miniapp.auth import MiniAppUser
 from services.challenges import ChallengeCard, ChallengeDefinition
 from services.operations import RecordedOperation
 from services.workspaces import WorkspaceContext
@@ -393,6 +394,80 @@ def test_profile_setters_and_quiet_hours_update(monkeypatch):
 
     assert data["quiet_hours_enabled"] is True
     assert events[-1][0] == "mini_app_profile_setting_changed"
+
+
+def test_miniapp_display_name_uses_verified_telegram_first_name(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [])
+    monkeypatch.setattr(api, "_profile_theme", lambda _user_id: "telegram")
+    monkeypatch.setattr("miniapp.api.user_timezone_name", lambda _user_id: ("Europe/Moscow", "user"))
+    req = api.request(42, telegram_first_name=" Максим ")
+
+    data = api.bootstrap(req)["data"]
+
+    assert data["user"]["display_name"] == "Максим"
+
+
+def test_miniapp_display_name_combines_first_and_last(monkeypatch):
+    api = _api(monkeypatch)
+    req = api.request(42, telegram_first_name="Максим", telegram_last_name="Иванов")
+
+    assert api._display_name(req, None) == "Максим Иванов"
+
+
+def test_miniapp_preferred_name_has_priority_over_telegram_name(monkeypatch):
+    api = _api(monkeypatch)
+    req = api.request(42, telegram_first_name="Максим", telegram_username="fin")
+
+    assert api._display_name(req, " Леонель Месси ") == "Леонель Месси"
+
+
+def test_miniapp_display_name_uses_username_then_neutral_fallback(monkeypatch):
+    api = _api(monkeypatch)
+
+    assert api._display_name(api.request(42, telegram_username="fin_user"), None) == "fin_user"
+    assert api._display_name(api.request(42), None) == "Пользователь"
+
+
+def test_clearing_preferred_name_returns_telegram_display_name(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.set_user_preferred_name", lambda _user_id, _value: None)
+    req = api.request(42, telegram_first_name="Максим")
+
+    data = api.set_profile_preferred_name(req, {"preferred_name": ""})["data"]
+
+    assert data["preferred_name"] is None
+    assert data["display_name"] == "Максим"
+
+
+def test_http_request_uses_only_verified_initdata_names(monkeypatch):
+    from miniapp import http
+
+    monkeypatch.setattr(
+        http,
+        "verify_telegram_init_data",
+        lambda *_args, **_kwargs: MiniAppUser(
+            user_id=42,
+            auth_date=1000,
+            first_name="Verified",
+            last_name="User",
+            username="verified_user",
+            language_code="ru",
+        ),
+    )
+
+    req = http._request(
+        {
+            "HTTP_AUTHORIZATION": "tma signed",
+            "QUERY_STRING": "first_name=Fake&username=fake",
+            "wsgi.input": None,
+        },
+        "req-1",
+    )
+
+    assert req.telegram_first_name == "Verified"
+    assert req.telegram_last_name == "User"
+    assert req.telegram_username == "verified_user"
 
 
 def test_product_event_failures_do_not_fail_request(monkeypatch):

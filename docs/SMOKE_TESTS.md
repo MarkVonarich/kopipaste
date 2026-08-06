@@ -197,6 +197,7 @@ Run after deployment and restart.
 - Confirm Active workspace selection changes the default workspace and owner/admin workspace rename works.
 - Confirm notification rows are switches, challenge notification preference remains available in Settings/Profile, and Quiet hours opens an editor instead of toggling directly.
 - Confirm quiet-hours enabled/start/end save in one action and cross-midnight values still defer challenge notifications.
+- Disable quiet hours after setting `23:00–09:00`, reopen the editor, and confirm `23:00–09:00` is still shown before enabling again.
 - Confirm Telegram menu button `Открыть приложение` opens the Mini App when `MINIAPP_PUBLIC_URL` is HTTPS.
 - Confirm `/app` still shows the inline WebApp button.
 - Confirm the bottom navigation has exactly Operations, Analytics, Home, Plans and Profile.

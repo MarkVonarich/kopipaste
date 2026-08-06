@@ -64,7 +64,8 @@ def quiet_hours_window(user_id: int) -> QuietHoursWindow:
     try:
         rows = pg_fetchall(
             """
-            SELECT to_char(quiet_hours_start, 'HH24:MI'),
+            SELECT COALESCE(quiet_hours_enabled, false),
+                   to_char(quiet_hours_start, 'HH24:MI'),
                    to_char(quiet_hours_end, 'HH24:MI')
               FROM public.notification_preferences
              WHERE user_id=%s
@@ -72,11 +73,26 @@ def quiet_hours_window(user_id: int) -> QuietHoursWindow:
             """,
             (user_id,),
         )
+    except errors.UndefinedColumn:
+        try:
+            rows = pg_fetchall(
+                """
+                SELECT quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL,
+                       to_char(quiet_hours_start, 'HH24:MI'),
+                       to_char(quiet_hours_end, 'HH24:MI')
+                  FROM public.notification_preferences
+                 WHERE user_id=%s
+                 LIMIT 1
+                """,
+                (user_id,),
+            )
+        except (errors.UndefinedTable, errors.UndefinedColumn):
+            rows = []
     except (errors.UndefinedTable, errors.UndefinedColumn):
         rows = []
-    if not rows or not rows[0][0] or not rows[0][1]:
+    if not rows or not rows[0][0] or not rows[0][1] or not rows[0][2]:
         return QuietHoursWindow(False, None, None, tz_name, fallback_reason)
-    return QuietHoursWindow(True, parse_hhmm(rows[0][0]), parse_hhmm(rows[0][1]), tz_name, fallback_reason)
+    return QuietHoursWindow(True, parse_hhmm(rows[0][1]), parse_hhmm(rows[0][2]), tz_name, fallback_reason)
 
 
 def is_quiet_local(local_dt: datetime, start: time, end: time) -> bool:

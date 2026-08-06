@@ -21,9 +21,9 @@ TOGGLE_FIELDS = {
 }
 
 
-def get_notification_preferences(user_id: int) -> dict:
+def _preferences_rows(user_id: int):
     try:
-        rows = pg_fetchall(
+        return pg_fetchall(
             """
             SELECT COALESCE(morning_enabled, true), COALESCE(evening_enabled, true),
                    COALESCE(limit_alerts_enabled, true), COALESCE(budget_alerts_enabled, true),
@@ -33,6 +33,7 @@ def get_notification_preferences(user_id: int) -> dict:
                    COALESCE(goal_notifications_enabled, false),
                    COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
                    COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
+                   COALESCE(quiet_hours_enabled, false),
                    to_char(quiet_hours_start, 'HH24:MI'),
                    to_char(quiet_hours_end, 'HH24:MI'),
                    COALESCE(NULLIF(timezone, ''), %s)
@@ -42,6 +43,32 @@ def get_notification_preferences(user_id: int) -> dict:
             """,
             (DEFAULT_TIMEZONE, user_id),
         )
+    except errors.UndefinedColumn:
+        return pg_fetchall(
+            """
+            SELECT COALESCE(morning_enabled, true), COALESCE(evening_enabled, true),
+                   COALESCE(limit_alerts_enabled, true), COALESCE(budget_alerts_enabled, true),
+                   COALESCE(subscription_alerts_enabled, true), COALESCE(recurring_spend_alerts_enabled, true),
+                   COALESCE(weekly_reports_enabled, true), COALESCE(monthly_reports_enabled, true),
+                   COALESCE(challenge_notifications_enabled, false),
+                   COALESCE(goal_notifications_enabled, false),
+                   COALESCE(to_char(morning_time, 'HH24:MI'), '08:30'),
+                   COALESCE(to_char(evening_time, 'HH24:MI'), '20:30'),
+                   quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL,
+                   to_char(quiet_hours_start, 'HH24:MI'),
+                   to_char(quiet_hours_end, 'HH24:MI'),
+                   COALESCE(NULLIF(timezone, ''), %s)
+              FROM public.notification_preferences
+             WHERE user_id=%s
+             LIMIT 1
+            """,
+            (DEFAULT_TIMEZONE, user_id),
+        )
+
+
+def get_notification_preferences(user_id: int) -> dict:
+    try:
+        rows = _preferences_rows(user_id)
     except (errors.UndefinedTable, errors.UndefinedColumn):
         rows = []
     if not rows:
@@ -77,10 +104,10 @@ def get_notification_preferences(user_id: int) -> dict:
         "goal_notifications_enabled": bool(r[9]),
         "morning_time": r[10],
         "evening_time": r[11],
-        "quiet_hours_enabled": bool(r[12] and r[13]),
-        "quiet_hours_start": r[12],
-        "quiet_hours_end": r[13],
-        "timezone": r[14] or DEFAULT_TIMEZONE,
+        "quiet_hours_enabled": bool(r[12]),
+        "quiet_hours_start": r[13],
+        "quiet_hours_end": r[14],
+        "timezone": r[15] or DEFAULT_TIMEZONE,
     }
 
 
@@ -126,27 +153,48 @@ def toggle_quiet_hours(user_id: int) -> bool:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO public.notification_preferences (user_id, quiet_hours_start, quiet_hours_end)
-                VALUES (%s, '22:30'::time, '08:00'::time)
-                ON CONFLICT (user_id) DO UPDATE
-                   SET quiet_hours_start = CASE
-                           WHEN public.notification_preferences.quiet_hours_start IS NULL
-                             OR public.notification_preferences.quiet_hours_end IS NULL
-                           THEN COALESCE(public.notification_preferences.quiet_hours_start, '22:30'::time)
-                           ELSE NULL
-                       END,
-                       quiet_hours_end = CASE
-                           WHEN public.notification_preferences.quiet_hours_start IS NULL
-                             OR public.notification_preferences.quiet_hours_end IS NULL
-                           THEN COALESCE(public.notification_preferences.quiet_hours_end, '08:00'::time)
-                           ELSE NULL
-                       END
-                RETURNING quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL
-                """,
-                (user_id,),
-            )
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO public.notification_preferences (user_id, quiet_hours_enabled, quiet_hours_start, quiet_hours_end)
+                    VALUES (%s, true, '22:30'::time, '08:00'::time)
+                    ON CONFLICT (user_id) DO UPDATE
+                       SET quiet_hours_enabled = NOT COALESCE(
+                               public.notification_preferences.quiet_hours_enabled,
+                               public.notification_preferences.quiet_hours_start IS NOT NULL
+                                 AND public.notification_preferences.quiet_hours_end IS NOT NULL,
+                               false
+                           ),
+                           quiet_hours_start = COALESCE(public.notification_preferences.quiet_hours_start, '22:30'::time),
+                           quiet_hours_end = COALESCE(public.notification_preferences.quiet_hours_end, '08:00'::time),
+                           updated_at=now()
+                    RETURNING quiet_hours_enabled
+                    """,
+                    (user_id,),
+                )
+            except errors.UndefinedColumn:
+                conn.rollback()
+                cur.execute(
+                    """
+                    INSERT INTO public.notification_preferences (user_id, quiet_hours_start, quiet_hours_end)
+                    VALUES (%s, '22:30'::time, '08:00'::time)
+                    ON CONFLICT (user_id) DO UPDATE
+                       SET quiet_hours_start = CASE
+                               WHEN public.notification_preferences.quiet_hours_start IS NULL
+                                 OR public.notification_preferences.quiet_hours_end IS NULL
+                               THEN COALESCE(public.notification_preferences.quiet_hours_start, '22:30'::time)
+                               ELSE NULL
+                           END,
+                           quiet_hours_end = CASE
+                               WHEN public.notification_preferences.quiet_hours_start IS NULL
+                                 OR public.notification_preferences.quiet_hours_end IS NULL
+                               THEN COALESCE(public.notification_preferences.quiet_hours_end, '08:00'::time)
+                               ELSE NULL
+                           END
+                    RETURNING quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL
+                    """,
+                    (user_id,),
+                )
             enabled = bool(cur.fetchone()[0])
         conn.commit()
         return enabled
@@ -167,16 +215,31 @@ def set_quiet_hours_time(user_id: int, field: str, value: str) -> dict:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                INSERT INTO public.notification_preferences (user_id, {column}, {other})
-                VALUES (%s, %s, %s::time)
-                ON CONFLICT (user_id) DO UPDATE
-                   SET {column}=EXCLUDED.{column},
-                       {other}=COALESCE(public.notification_preferences.{other}, EXCLUDED.{other})
-                """,
-                (user_id, parsed, default_other),
-            )
+            try:
+                cur.execute(
+                    f"""
+                    INSERT INTO public.notification_preferences (user_id, quiet_hours_enabled, {column}, {other})
+                    VALUES (%s, true, %s, %s::time)
+                    ON CONFLICT (user_id) DO UPDATE
+                       SET quiet_hours_enabled=true,
+                           {column}=EXCLUDED.{column},
+                           {other}=COALESCE(public.notification_preferences.{other}, EXCLUDED.{other}),
+                           updated_at=now()
+                    """,
+                    (user_id, parsed, default_other),
+                )
+            except errors.UndefinedColumn:
+                conn.rollback()
+                cur.execute(
+                    f"""
+                    INSERT INTO public.notification_preferences (user_id, {column}, {other})
+                    VALUES (%s, %s, %s::time)
+                    ON CONFLICT (user_id) DO UPDATE
+                       SET {column}=EXCLUDED.{column},
+                           {other}=COALESCE(public.notification_preferences.{other}, EXCLUDED.{other})
+                    """,
+                    (user_id, parsed, default_other),
+                )
         conn.commit()
         return get_notification_preferences(user_id)
     except Exception:
@@ -187,21 +250,32 @@ def set_quiet_hours_time(user_id: int, field: str, value: str) -> dict:
 
 
 def set_quiet_hours(user_id: int, *, enabled: bool, start: str | None = None, end: str | None = None) -> dict:
-    start_time = parse_hhmm(start or "22:30")
-    end_time = parse_hhmm(end or "08:00")
+    start_time = parse_hhmm(start) if start is not None else None
+    end_time = parse_hhmm(end) if end is not None else None
+    insert_start = start_time if start_time is not None else (time(22, 30) if enabled else None)
+    insert_end = end_time if end_time is not None else (time(8, 0) if enabled else None)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO public.notification_preferences (user_id, quiet_hours_start, quiet_hours_end)
-                VALUES (%s, CASE WHEN %s THEN %s ELSE NULL END, CASE WHEN %s THEN %s ELSE NULL END)
+                INSERT INTO public.notification_preferences (user_id, quiet_hours_enabled, quiet_hours_start, quiet_hours_end)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE
-                   SET quiet_hours_start=CASE WHEN %s THEN EXCLUDED.quiet_hours_start ELSE NULL END,
-                       quiet_hours_end=CASE WHEN %s THEN EXCLUDED.quiet_hours_end ELSE NULL END,
+                   SET quiet_hours_enabled=EXCLUDED.quiet_hours_enabled,
+                       quiet_hours_start=CASE
+                           WHEN %s THEN EXCLUDED.quiet_hours_start
+                           WHEN EXCLUDED.quiet_hours_enabled THEN COALESCE(public.notification_preferences.quiet_hours_start, '22:30'::time)
+                           ELSE public.notification_preferences.quiet_hours_start
+                       END,
+                       quiet_hours_end=CASE
+                           WHEN %s THEN EXCLUDED.quiet_hours_end
+                           WHEN EXCLUDED.quiet_hours_enabled THEN COALESCE(public.notification_preferences.quiet_hours_end, '08:00'::time)
+                           ELSE public.notification_preferences.quiet_hours_end
+                       END,
                        updated_at=now()
                 """,
-                (user_id, bool(enabled), start_time, bool(enabled), end_time, bool(enabled), bool(enabled)),
+                (user_id, bool(enabled), insert_start, insert_end, start is not None, end is not None),
             )
         conn.commit()
         return get_notification_preferences(user_id)

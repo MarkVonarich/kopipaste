@@ -269,9 +269,9 @@ def test_default_challenge_preference_is_false_for_missing_rows(monkeypatch):
 
 def test_challenge_preference_sql_resolves_null_to_false():
     import inspect
-    from services.notification_preferences import get_notification_preferences
+    from services.notification_preferences import _preferences_rows
 
-    source = inspect.getsource(get_notification_preferences)
+    source = inspect.getsource(_preferences_rows)
     assert "COALESCE(challenge_notifications_enabled, false)" in source
 
 

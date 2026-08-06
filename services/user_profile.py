@@ -58,16 +58,39 @@ def set_user_preferred_name(user_id: int, value: str | None) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
-def get_user_display_name(user_id: int, telegram_user: Any | None = None) -> str:
-    saved = get_user_preferred_name(user_id)
+def display_name_from_parts(
+    preferred_name: str | None = None,
+    *,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    username: str | None = None,
+) -> str:
+    saved = validate_preferred_name(preferred_name)
     if saved:
         return saved
-    if telegram_user is not None:
-        for attr in ("full_name", "first_name", "username"):
-            value = getattr(telegram_user, attr, None)
-            if value:
-                return str(value)
+    first = str(first_name or "").strip()
+    last = str(last_name or "").strip()
+    full = " ".join(part for part in (first, last) if part).strip()
+    if full:
+        return full
+    handle = str(username or "").strip()
+    if handle:
+        return handle
     return "Пользователь"
+
+
+def get_user_display_name(user_id: int, telegram_user: Any | None = None) -> str:
+    saved = get_user_preferred_name(user_id)
+    first = last = username = None
+    if telegram_user is not None:
+        first = getattr(telegram_user, "first_name", None)
+        last = getattr(telegram_user, "last_name", None)
+        username = getattr(telegram_user, "username", None)
+        if not first and not last:
+            full_name = getattr(telegram_user, "full_name", None)
+            if full_name:
+                first = str(full_name)
+    return display_name_from_parts(saved, first_name=first, last_name=last, username=username)
 
 
 def set_user_currency(user_id: int, currency: str) -> str:

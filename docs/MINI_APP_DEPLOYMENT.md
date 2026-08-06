@@ -11,6 +11,7 @@ psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_016_miniapp_fo
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_017_miniapp_acceptance_hardening.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_018_miniapp_transactional_idempotency.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260806_019_user_preferred_name.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260806_020_quiet_hours_enabled.sql
 ```
 
 Rollback for the new Mini App tables only:
@@ -66,6 +67,8 @@ Optional:
 
 Do not modify PostHog, systemd unit files or production secrets as part of PR 1.
 Do not modify PostHog, systemd unit files or production secrets as part of PR 2.
+
+Apply migration `20260806_020_quiet_hours_enabled.sql` before deploying the quiet-hours editor code. It backfills `quiet_hours_enabled` from existing start/end values and preserves saved times when users disable quiet hours.
 
 ## Release Checks
 

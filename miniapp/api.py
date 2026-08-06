@@ -74,7 +74,7 @@ from services.notification_preferences import (
     toggle_notification_preference,
     toggle_quiet_hours,
 )
-from services.user_profile import ALLOWED_CURRENCIES, get_user_preferred_name, set_user_currency, set_user_preferred_name
+from services.user_profile import ALLOWED_CURRENCIES, display_name_from_parts, get_user_preferred_name, set_user_currency, set_user_preferred_name
 from services.user_time import TIMEZONE_CHOICES, user_local_date, user_timezone_name
 from services.workspaces import WRITE_ROLES, WorkspaceContext, can_edit_operation, list_accessible_workspaces, rename_workspace, set_active_workspace
 from utils.money import MoneyParseError, format_money, to_decimal_money
@@ -111,6 +111,9 @@ class MiniAppRequest:
     user_id: int
     request_id: str
     locale: str | None = None
+    telegram_first_name: str | None = None
+    telegram_last_name: str | None = None
+    telegram_username: str | None = None
 
 
 def serialize(value: Any) -> Any:
@@ -141,8 +144,32 @@ class MiniAppAPI:
     def __init__(self) -> None:
         self.version = os.getenv("MINIAPP_VERSION", "mvp-pr2")
 
-    def request(self, user_id: int, *, request_id: str | None = None, locale: str | None = None) -> MiniAppRequest:
-        return MiniAppRequest(user_id=int(user_id), request_id=request_id or str(uuid4()), locale=locale)
+    def request(
+        self,
+        user_id: int,
+        *,
+        request_id: str | None = None,
+        locale: str | None = None,
+        telegram_first_name: str | None = None,
+        telegram_last_name: str | None = None,
+        telegram_username: str | None = None,
+    ) -> MiniAppRequest:
+        return MiniAppRequest(
+            user_id=int(user_id),
+            request_id=request_id or str(uuid4()),
+            locale=locale,
+            telegram_first_name=telegram_first_name,
+            telegram_last_name=telegram_last_name,
+            telegram_username=telegram_username,
+        )
+
+    def _display_name(self, req: MiniAppRequest, preferred_name: str | None = None) -> str:
+        return display_name_from_parts(
+            preferred_name,
+            first_name=req.telegram_first_name,
+            last_name=req.telegram_last_name,
+            username=req.telegram_username,
+        )
 
     def _track(self, req: MiniAppRequest, event_name: str, *, workspace_id: int | None = None, status: str = "success", properties: dict | None = None) -> None:
         try:
@@ -329,9 +356,10 @@ class MiniAppAPI:
         workspaces = self._workspace_rows(req.user_id)
         theme = self._profile_theme(req.user_id)
         timezone_name, _reason = user_timezone_name(req.user_id)
+        preferred_name = get_user_preferred_name(req.user_id)
         self._track(req, "mini_app_opened", properties={"surface": "telegram_webapp"})
         return success({
-            "user": {"id": str(req.user_id), "locale": get_user_locale(req.user_id), "currency": get_user_currency(req.user_id), "timezone": timezone_name, "preferred_name": get_user_preferred_name(req.user_id), "display_name": get_user_preferred_name(req.user_id) or "Пользователь"},
+            "user": {"id": str(req.user_id), "locale": get_user_locale(req.user_id), "currency": get_user_currency(req.user_id), "timezone": timezone_name, "preferred_name": preferred_name, "display_name": self._display_name(req, preferred_name)},
             "workspaces": [{"workspace_id": "all", "name": "Все пространства", "kind": "all", "role": "viewer", "active": False, "read_only": True}, *workspaces],
             "periods": ["current_month", "previous_month", "last_30", "custom"],
             "theme": theme,
@@ -1657,10 +1685,11 @@ class MiniAppAPI:
         except Exception as exc:
             log.info("miniapp_profile_categories_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
             categories = {"expense": [], "income": []}
+        preferred_name = get_user_preferred_name(req.user_id)
         return success({
             "theme": self._profile_theme(req.user_id),
-            "preferred_name": get_user_preferred_name(req.user_id),
-            "display_name": get_user_preferred_name(req.user_id) or "Пользователь",
+            "preferred_name": preferred_name,
+            "display_name": self._display_name(req, preferred_name),
             "currency": get_user_currency(req.user_id),
             "available_currencies": sorted(ALLOWED_CURRENCIES),
             "timezone": timezone_name,
@@ -1695,7 +1724,7 @@ class MiniAppAPI:
         except ValueError as exc:
             raise MiniAppError(400, "bad_preferred_name", "Invalid preferred name.") from exc
         self._track(req, "mini_app_profile_setting_changed", properties={"setting": "preferred_name", "result": "success", "source": "mini_app"})
-        return success({"preferred_name": preferred_name, "display_name": preferred_name or "Пользователь"}, request_id=req.request_id)
+        return success({"preferred_name": preferred_name, "display_name": self._display_name(req, preferred_name)}, request_id=req.request_id)
 
     def set_profile_currency(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
