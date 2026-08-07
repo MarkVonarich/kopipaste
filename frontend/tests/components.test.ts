@@ -56,6 +56,16 @@ describe('acceptance components', () => {
     expect(html).not.toContain('Food 4');
   });
 
+  it('renders focus projected risk without replacing actual progress', () => {
+    const html = HomeScreen({
+      ...overview,
+      focus: { kind: 'limit', title: 'Food', description: 'При текущем темпе лимит может быть превышен.', target_mode: 'limits', percent: 60, projected_percent: 145 },
+    }, [], 'RUB', true);
+
+    expect(html).toContain('aria-valuenow="60"');
+    expect(html).toContain('Прогноз к концу периода: 145%');
+  });
+
   it('renders multiple currencies without false aggregation', () => {
     const html = HomeScreen({
       ...overview,
@@ -203,7 +213,7 @@ describe('acceptance components', () => {
   });
 
   it('renders money radar long labels, collapsed details and activity heatmap', () => {
-    const longCategory = 'Фиксированные расходы';
+    const longCategory = 'Фиксированные расходы на коммунальные услуги';
     const html = AnalyticsScreen({
       period: overview.period,
       overview,
@@ -238,7 +248,7 @@ describe('acceptance components', () => {
           { category: 'Такси', current_amount: '3000.00', previous_amount: '2500.00' },
         ],
       },
-      activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-03', max_count: 4, days: [{ date: '2026-08-01', count: 0 }, { date: '2026-08-02', count: 2 }, { date: '2026-08-03', count: 4 }] },
+      activity_calendar: { start_date: '2026-07-31', end_date: '2026-08-03', max_count: 4, days: [{ date: '2026-07-31', count: 0 }, { date: '2026-08-01', count: 2 }, { date: '2026-08-02', count: 4 }, { date: '2026-08-03', count: 1 }] },
       top_expense_categories: [],
     }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_month', operation_type: 'expense', category: 'all' });
 
@@ -246,11 +256,70 @@ describe('acceptance components', () => {
     expect(html).toContain('<tspan');
     expect(html).toContain('Фиксированные');
     expect(html).toContain('расходы');
-    expect(html).not.toContain('Фиксирован...');
+    expect(html).toContain('коммунальные');
+    expect(html).toContain('услуги');
+    expect(html).toContain(`<title>${longCategory}: текущий период 15000.00 RUB`);
+    expect(html).not.toContain('...');
     expect(html).toContain('5к');
     expect(html).toContain('Текущий период');
+    expect(html).toContain('Пн');
+    expect(html).toContain('Пт');
+    expect(html).toContain('июл');
+    expect(html).toContain('авг');
     expect(html).toContain('activity-calendar');
-    expect(html).toContain('2026-08-03 — 4 операций');
+    expect(html).toContain('1 августа — 2 операций');
+    expect(html).toContain('data-weekday-row="5"');
+    expect(html).toContain('activity-scroll');
+  });
+
+  it('aligns activity calendar Monday and Friday starts', () => {
+    const base = {
+      period: overview.period,
+      overview,
+      aggregation_available: true,
+      available_currencies: ['RUB'],
+      radar_available_currencies: [],
+      selected_currency: null,
+      currency_groups: {},
+      summary: {
+        aggregation_available: true,
+        available_currencies: ['RUB'],
+        currency_groups: {},
+        totals_by_currency: {},
+        result_by_currency: {},
+      },
+      category_structure: { type: 'expense' as const, top_n: 5, currency_groups: {}, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+      radar: {
+        type: 'expense' as const,
+        currency: null,
+        aggregation_available: true,
+        current_period: overview.period,
+        previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
+        metric: 'absolute_amount',
+        max_axes: 6,
+        scale: { max: '0.00', step: '0.00', ticks: ['0.00'] },
+        insufficient_data: true,
+        explanation: 'Недостаточно данных',
+        axes: [],
+      },
+      top_expense_categories: [],
+    };
+    const monday = AnalyticsScreen({
+      ...base,
+      activity_calendar: { start_date: '2026-08-03', end_date: '2026-08-04', max_count: 1, days: [{ date: '2026-08-03', count: 1 }, { date: '2026-08-04', count: 0 }] },
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_week', operation_type: 'all', category: 'all' });
+    const friday = AnalyticsScreen({
+      ...base,
+      activity_calendar: { start_date: '2026-08-07', end_date: '2026-08-08', max_count: 1, days: [{ date: '2026-08-07', count: 1 }, { date: '2026-08-08', count: 0 }] },
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'custom', operation_type: 'all', category: 'all' });
+
+    expect(monday).toContain('3 августа — 1 операций');
+    expect(monday).toContain('data-weekday-row="1"');
+    expect(friday).toContain('7 августа — 1 операций');
+    expect(friday).toContain('data-weekday-row="5"');
+    const beforeFriday = friday.slice(0, friday.indexOf('7 августа'));
+    expect((beforeFriday.match(/activity-cell empty/g) || [])).toHaveLength(4);
   });
 
   it('renders mixed-currency analytics with explicit currency selector', () => {

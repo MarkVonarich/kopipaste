@@ -63,14 +63,14 @@ function wrapLabel(label: string): string[] {
     }
   }
   if (current) lines.push(current);
-  return lines.slice(0, 3);
+  return lines;
 }
 
 function radarSvg(axes: RadarMoneyAxis[], scale: RadarScale | undefined, currency: string | null | undefined): string {
   if (axes.length < 2) return '';
-  const cx = 140;
-  const cy = 132;
-  const radius = 82;
+  const cx = 170;
+  const cy = 150;
+  const radius = 88;
   const scaleMax = Math.max(1, Number(scale?.max || 0));
   const ticks = (scale?.ticks || []).map((tick) => Number(tick)).filter((tick) => tick > 0);
   const points = (key: 'current_amount' | 'previous_amount') => axes.map((axis, index) => {
@@ -90,12 +90,13 @@ function radarSvg(axes: RadarMoneyAxis[], scale: RadarScale | undefined, currenc
     const angle = (Math.PI * 2 * index) / axes.length - Math.PI / 2;
     const x = cx + Math.cos(angle) * radius;
     const y = cy + Math.sin(angle) * radius;
-    const lx = cx + Math.cos(angle) * (radius + 38);
-    const ly = cy + Math.sin(angle) * (radius + 32);
+    const lx = cx + Math.cos(angle) * (radius + 58);
+    const ly = cy + Math.sin(angle) * (radius + 48);
     const anchor = Math.abs(Math.cos(angle)) < 0.25 ? 'middle' : Math.cos(angle) > 0 ? 'start' : 'end';
     const lines = wrapLabel(axis.category);
-    return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" />` +
-      `<text class="radar-label" x="${lx}" y="${ly}" text-anchor="${anchor}">${lines.map((line, lineIndex) => `<tspan x="${lx}" dy="${lineIndex === 0 ? 0 : 13}">${esc(line)}</tspan>`).join('')}</text>`;
+    const title = `${axis.category}: текущий период ${axis.current_amount} ${currency || ''}, предыдущий ${axis.previous_amount} ${currency || ''}`;
+    return `<g><title>${esc(title)}</title><line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" />` +
+      `<text class="radar-label" x="${lx}" y="${ly}" text-anchor="${anchor}">${lines.map((line, lineIndex) => `<tspan x="${lx}" dy="${lineIndex === 0 ? 0 : 13}">${esc(line)}</tspan>`).join('')}</text></g>`;
   }).join('');
   const dots = (key: 'current_amount' | 'previous_amount', klass: string) => axes.map((axis, index) => {
     const angle = (Math.PI * 2 * index) / axes.length - Math.PI / 2;
@@ -103,7 +104,7 @@ function radarSvg(axes: RadarMoneyAxis[], scale: RadarScale | undefined, currenc
     return `<circle class="${klass}" cx="${cx + Math.cos(angle) * radius * value}" cy="${cy + Math.sin(angle) * radius * value}" r="3" />`;
   }).join('');
   return `
-    <svg class="radar" viewBox="0 0 280 264" role="img" aria-label="Radar ${esc(currency || '')}">
+    <svg class="radar" viewBox="0 0 340 320" role="img" aria-label="Radar ${esc(currency || '')}">
       ${rings}
       ${spokes}
       <polygon class="radar-prev" points="${points('previous_amount')}" />
@@ -122,14 +123,41 @@ function activityIntensity(count: number, max: number): number {
 function activityCalendar(calendar: ActivityCalendar | undefined): string {
   if (!calendar?.days?.length) return EmptyPanel('Нет активности', 'За выбранный период операций не было.');
   const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-  const cells = calendar.days.map((day) => {
-    const date = new Date(`${day.date}T00:00:00`);
-    const weekday = Number.isNaN(date.getTime()) ? '' : weekdays[(date.getDay() + 6) % 7];
-    return `<span class="activity-cell level-${activityIntensity(day.count, calendar.max_count)}" role="img" aria-label="${esc(day.date)} — ${day.count} операций" title="${esc(day.date)} — ${day.count} операций"><small>${esc(weekday)}</small></span>`;
+  const monthFmt = new Intl.DateTimeFormat('ru-RU', { month: 'short' });
+  const dateFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' });
+  const first = new Date(`${calendar.days[0].date}T00:00:00`);
+  const firstOffset = Number.isNaN(first.getTime()) ? 0 : (first.getDay() + 6) % 7;
+  const padded: Array<{ kind: 'empty' } | { kind: 'day'; date: string; count: number }> = [
+    ...Array.from({ length: firstOffset }, () => ({ kind: 'empty' as const })),
+    ...calendar.days.map((day) => ({ kind: 'day' as const, date: day.date, count: day.count }))
+  ];
+  const weekCount = Math.max(1, Math.ceil(padded.length / 7));
+  while (padded.length < weekCount * 7) padded.push({ kind: 'empty' });
+  const monthLabels = Array.from({ length: weekCount }, (_value, weekIndex) => {
+    const weekDays = padded.slice(weekIndex * 7, weekIndex * 7 + 7).filter((item): item is { kind: 'day'; date: string; count: number } => item.kind === 'day');
+    const monthStart = weekDays.find((item) => new Date(`${item.date}T00:00:00`).getDate() === 1);
+    const labelDay = monthStart || (weekIndex === 0 ? weekDays[0] : undefined);
+    if (!labelDay) return '<span></span>';
+    const current = new Date(`${labelDay.date}T00:00:00`);
+    const previousDay = padded.slice(0, weekIndex * 7).reverse().find((item) => item.kind === 'day');
+    const previous = previousDay && previousDay.kind === 'day' ? new Date(`${previousDay.date}T00:00:00`) : null;
+    const changedMonth = !previous || previous.getMonth() !== current.getMonth() || previous.getFullYear() !== current.getFullYear() || Boolean(monthStart);
+    return `<span>${changedMonth ? esc(monthFmt.format(current).replace('.', '')) : ''}</span>`;
+  }).join('');
+  const gridCells = padded.map((item) => {
+    if (item.kind === 'empty') return '<span class="activity-cell empty" aria-hidden="true"></span>';
+    const date = new Date(`${item.date}T00:00:00`);
+    const label = `${dateFmt.format(date)} — ${item.count} операций`;
+    const row = Number.isNaN(date.getTime()) ? 1 : ((date.getDay() + 6) % 7) + 1;
+    return `<span class="activity-cell level-${activityIntensity(item.count, calendar.max_count)}" data-weekday-row="${row}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
   }).join('');
   return `
     <div class="activity-scroll">
-      <div class="activity-calendar">${cells}</div>
+      <div class="activity-layout" style="--activity-weeks:${weekCount}">
+        <div class="activity-months" aria-hidden="true">${monthLabels}</div>
+        <div class="activity-weekdays" aria-hidden="true">${weekdays.map((day) => `<span>${esc(day)}</span>`).join('')}</div>
+        <div class="activity-calendar">${gridCells}</div>
+      </div>
     </div>
     <div class="activity-legend"><span>меньше</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><i class="level-4"></i><span>больше</span></div>
   `;

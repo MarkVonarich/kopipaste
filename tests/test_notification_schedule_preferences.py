@@ -11,6 +11,18 @@ def test_morning_disabled_is_not_due(monkeypatch):
     assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 9, 0), prefs)
 
 
+def test_morning_due_uses_full_hhmm_window():
+    from jobs.daily import is_notification_due
+
+    prefs = {"morning_enabled": True, "morning_time": "08:30", "quiet_hours_enabled": False}
+
+    assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 5), prefs)
+    assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 29), prefs)
+    assert is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 30), prefs)
+    assert is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 34), prefs)
+    assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 35), prefs)
+
+
 def test_evening_disabled_is_not_due(monkeypatch):
     from jobs.daily import is_notification_due
 
@@ -22,12 +34,25 @@ def test_evening_disabled_is_not_due(monkeypatch):
 def test_evening_pref_time_beats_legacy_reminder_hour(monkeypatch):
     from jobs import daily
 
-    prefs = {"evening_enabled": True, "evening_time": "20:00", "quiet_hours_enabled": False}
-    monkeypatch.setattr(daily, "pg_fetchall", lambda *_args, **_kwargs: [("20:00",)])
+    prefs = {"evening_enabled": True, "evening_time": "20:30", "quiet_hours_enabled": False}
+    monkeypatch.setattr(daily, "pg_fetchall", lambda *_args, **_kwargs: [("20:30",)])
     monkeypatch.setattr(daily, "_user_tz_and_hour", lambda _user_id: (0, 11))
 
     assert not daily.is_notification_due(42, "evening", datetime(2026, 8, 7, 11, 0), prefs)
-    assert daily.is_notification_due(42, "evening", datetime(2026, 8, 7, 20, 0), prefs)
+    assert not daily.is_notification_due(42, "evening", datetime(2026, 8, 7, 20, 0), prefs)
+    assert daily.is_notification_due(42, "evening", datetime(2026, 8, 7, 20, 30), prefs)
+    assert daily.is_notification_due(42, "evening", datetime(2026, 8, 7, 20, 34), prefs)
+    assert not daily.is_notification_due(42, "evening", datetime(2026, 8, 7, 20, 35), prefs)
+
+
+def test_due_window_handles_cross_hour_edge():
+    from jobs.daily import notification_due_in_window
+
+    configured = time(23, 58)
+
+    assert notification_due_in_window(datetime(2026, 8, 7, 23, 59), configured)
+    assert notification_due_in_window(datetime(2026, 8, 8, 0, 2), configured)
+    assert not notification_due_in_window(datetime(2026, 8, 8, 0, 3), configured)
 
 
 def test_evening_template_105_is_not_in_morning_pool():

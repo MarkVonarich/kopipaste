@@ -651,6 +651,22 @@ class MiniAppAPI:
             return "normal", pct
         return alert_status_for_band(band), int(min(999, (spent / amount * 100).to_integral_value())) if amount > 0 else 0
 
+    def _limit_projection_percent(self, *, spent: Decimal, amount: Decimal, period: str, today: date) -> int | None:
+        if amount <= 0 or spent <= 0:
+            return None
+        if period == "week":
+            period_start = today - timedelta(days=today.weekday())
+            period_end = period_start + timedelta(days=6)
+        else:
+            period_start = today.replace(day=1)
+            period_end = (period_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        elapsed_days = (today - period_start).days + 1
+        total_days = (period_end - period_start).days + 1
+        if elapsed_days < 2 or total_days <= 0:
+            return None
+        projected_end = spent / Decimal(elapsed_days) * Decimal(total_days)
+        return int((projected_end / amount * Decimal("100")).to_integral_value())
+
     def _limit_dict(
         self,
         *,
@@ -828,18 +844,32 @@ class MiniAppAPI:
                 if tx.category and limit.get("category") and limit.get("category") != tx.category:
                     continue
                 percent = int(limit.get("percent") or 0)
+                projected_percent: int | None = None
+                try:
+                    projected_percent = self._limit_projection_percent(
+                        spent=to_decimal_money(limit.get("spent") or 0),
+                        amount=to_decimal_money(limit.get("amount") or 0),
+                        period=str(limit.get("period") or "month"),
+                        today=today,
+                    )
+                except Exception:
+                    projected_percent = None
                 if percent >= 100:
                     severity = "critical"
                     status = "exceeded"
                     description = "Лимит превышен. Проверьте расходы периода."
-                elif percent >= 90:
+                elif percent >= 90 or (projected_percent is not None and projected_percent >= 115):
                     severity = "high"
                     status = "warning"
-                    description = "Лимит почти исчерпан."
-                elif percent >= 80:
+                    description = "При текущем темпе лимит может быть превышен." if percent < 90 else "Лимит почти исчерпан."
+                elif percent >= 80 or (projected_percent is not None and projected_percent >= 100):
                     severity = "medium"
                     status = "risk"
                     description = "Темп расходов требует внимания."
+                elif projected_percent is not None and projected_percent >= 90:
+                    severity = "normal"
+                    status = "attention"
+                    description = "Прогноз близок к лимиту."
                 elif percent >= 50:
                     severity = "normal"
                     status = limit.get("status") or "normal"
@@ -859,6 +889,7 @@ class MiniAppAPI:
                     "title": limit.get("title") or "Лимит",
                     "description": description,
                     "percent": percent,
+                    "projected_percent": projected_percent if projected_percent is not None and projected_percent >= 90 else None,
                     "status": status,
                     "cta_label": "Открыть лимиты",
                     "target_mode": "limits",

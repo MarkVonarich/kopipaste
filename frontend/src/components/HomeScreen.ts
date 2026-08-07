@@ -123,6 +123,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
           <strong>${esc(focus?.title || 'Фокус свободен')}</strong>
           <small>${esc(focus?.description || 'Цели и лимиты появятся здесь')}</small>
           ${focus?.percent !== undefined ? progressBar(focus.percent) : ''}
+          ${focus?.projected_percent ? `<small>Прогноз к концу периода: ${esc(focus.projected_percent)}%</small>` : ''}
         </button>
         <button class="smart-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
           <span>Инсайт периода</span>

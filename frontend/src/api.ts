@@ -37,7 +37,7 @@ export type Overview = {
   recent_operations: Operation[];
   info?: { kind: string; text: string } | null;
   challenge?: { key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_key: string; period_end?: string | null } | null;
-  focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
+  focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
   insight?: { kind: string; tone: string; title: string; text: string; currency?: string } | null;
   reminder?: HomeReminderSummary | null;
 };

@@ -474,6 +474,133 @@ def test_home_focus_priority_is_stable(monkeypatch):
     assert item["target_mode"] == "limits"
 
 
+def _focus_tx(category=None):
+    return TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 7), "current_week", "all", category, "", ())
+
+
+def test_home_focus_limit_month_pace_projection_high_risk(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:Food",
+        "title": "Food",
+        "category": "Food",
+        "percent": 60,
+        "spent": Decimal("18000.00"),
+        "amount": Decimal("30000.00"),
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10, "period": "previous_month"}, _focus_tx())
+
+    assert item["severity"] == "high"
+    assert item["projected_percent"] > 100
+    assert item["percent"] == 60
+
+
+def test_home_focus_limit_week_pace_projection_risk(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 4))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:week:Taxi",
+        "title": "Taxi",
+        "category": "Taxi",
+        "percent": 60,
+        "spent": "6000.00",
+        "amount": "10000.00",
+        "period": "week",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "high"
+    assert item["projected_percent"] >= 115
+
+
+def test_home_focus_limit_first_day_no_unstable_projection(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 1))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:Food",
+        "title": "Food",
+        "category": "Food",
+        "percent": 60,
+        "spent": "18000.00",
+        "amount": "30000.00",
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "normal"
+    assert item["projected_percent"] is None
+
+
+def test_home_focus_limit_low_percent_near_period_end_stays_normal(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 30))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:Food",
+        "title": "Food",
+        "category": "Food",
+        "percent": 40,
+        "spent": "12000.00",
+        "amount": "30000.00",
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "normal"
+    assert item["projected_percent"] is None
+
+
+def test_home_focus_limit_actual_thresholds_win(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 30))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [
+        {"id": "high", "title": "High", "percent": 95, "spent": "950.00", "amount": "1000.00", "period": "month"},
+        {"id": "critical", "title": "Critical", "percent": 101, "spent": "1010.00", "amount": "1000.00", "period": "month"},
+    ]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "critical"
+    assert item["id"] == "critical"
+
+
+def test_global_category_focus_relevance_does_not_recompute_limit_spent(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    calls = []
+
+    def _limits(_req, params):
+        calls.append(params)
+        return {"data": {"items": [{
+            "id": "category:month:Food",
+            "title": "Food",
+            "category": "Food",
+            "percent": 60,
+            "spent": "18000.00",
+            "amount": "30000.00",
+            "period": "month",
+        }]}}
+
+    monkeypatch.setattr(api, "limits", _limits)
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10, "period": "current_week", "operation_type": "expense", "category": "Food"}, _focus_tx("Food"))
+
+    assert item["id"] == "category:month:Food"
+    assert item["percent"] == 60
+    assert calls[0]["period"] == "current_week"
+
+
 def test_home_insight_does_not_mix_currencies():
     api = MiniAppAPI()
     tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "all", None, "", ())

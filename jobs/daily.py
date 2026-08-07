@@ -11,7 +11,7 @@ jobs/daily.py — персонализированные напоминания
 
 import logging
 import random
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, time, timedelta, timezone, date
 
 from telegram.error import Forbidden, BadRequest
 from psycopg2 import OperationalError
@@ -25,7 +25,7 @@ from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
 from services.activity import has_financial_activity_today
 from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
-from services.notification_preferences import get_notification_preferences
+from services.notification_preferences import get_notification_preferences, parse_hhmm
 from services.notification_engine import preferences_from_dict, should_send_now
 from services.user_time import resolve_user_timezone, user_local_date, user_local_now
 
@@ -253,17 +253,18 @@ def _user_tz_and_hour(user_id: int) -> tuple[int, int]:
     return int(row[0]), int(row[1])
 
 
-def _parse_pref_hour(value: str | None, fallback_hour: int) -> int:
+def _parse_pref_time(value: str | None, fallback_hour: int, fallback_minute: int = 0) -> time:
     try:
-        hour = int(str(value or "").split(":", 1)[0])
+        return parse_hhmm(str(value or ""))
     except (TypeError, ValueError):
-        hour = int(fallback_hour)
-    return max(0, min(23, hour))
+        hour = max(0, min(23, int(fallback_hour)))
+        minute = max(0, min(59, int(fallback_minute)))
+        return time(hour, minute)
 
 
-def _notification_hour(user_id: int, prefs: dict, kind: str) -> int:
+def _notification_time(user_id: int, prefs: dict, kind: str) -> time:
     if kind == "morning":
-        return _parse_pref_hour(prefs.get("morning_time"), 8)
+        return _parse_pref_time(prefs.get("morning_time"), 8, 30)
     try:
         rows = pg_fetchall(
             """
@@ -277,9 +278,21 @@ def _notification_hour(user_id: int, prefs: dict, kind: str) -> int:
     except Exception:
         rows = []
     if rows and rows[0][0]:
-        return _parse_pref_hour(rows[0][0], 20)
+        return _parse_pref_time(rows[0][0], 20, 30)
     _off_min, legacy_hour = _user_tz_and_hour(user_id)
-    return _parse_pref_hour(str(legacy_hour), legacy_hour)
+    return _parse_pref_time(f"{legacy_hour}:00", legacy_hour)
+
+
+def notification_due_in_window(local_dt: datetime, configured_time: time, *, window_minutes: int = 5) -> bool:
+    if window_minutes <= 0:
+        return False
+    local = local_dt.replace(second=0, microsecond=0)
+    start = datetime.combine(local.date(), configured_time, tzinfo=local.tzinfo).replace(second=0, microsecond=0)
+    window = timedelta(minutes=window_minutes)
+    if local < start:
+        previous_start = start - timedelta(days=1)
+        return previous_start <= local < previous_start + window
+    return start <= local < start + window
 
 
 def is_notification_due(user_id: int, kind: str, local_dt: datetime, prefs: dict) -> bool:
@@ -289,7 +302,7 @@ def is_notification_due(user_id: int, kind: str, local_dt: datetime, prefs: dict
         return False
     if not should_send_now(local_dt, preferences_from_dict(prefs)):
         return False
-    return local_dt.hour == _notification_hour(user_id, prefs, kind)
+    return notification_due_in_window(local_dt, _notification_time(user_id, prefs, kind))
 
 def _local_now(user_id: int) -> datetime:
     return user_local_now(user_id)
