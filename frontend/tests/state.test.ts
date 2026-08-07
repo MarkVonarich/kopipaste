@@ -15,4 +15,14 @@ describe('app state', () => {
       { workspace_id: 7, name: 'Семья', kind: 'group', role: 'member', active: true }
     ], undefined)).toBe(7);
   });
+
+  it('migrates persisted last_30 to current_week global filters', () => {
+    localStorage.setItem('finuchet-miniapp-state-v1', JSON.stringify({ period: { period: 'last_30' } }));
+
+    const state = initialState();
+
+    expect(state.globalFilters.period).toBe('current_week');
+    expect(state.globalFilters.operation_type).toBe('all');
+    expect(state.globalFilters.category).toBe('all');
+  });
 });

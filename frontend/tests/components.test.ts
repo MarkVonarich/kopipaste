@@ -56,6 +56,16 @@ describe('acceptance components', () => {
     expect(html).not.toContain('Food 4');
   });
 
+  it('renders focus projected risk without replacing actual progress', () => {
+    const html = HomeScreen({
+      ...overview,
+      focus: { kind: 'limit', title: 'Food', description: 'При текущем темпе лимит может быть превышен.', target_mode: 'limits', percent: 60, projected_percent: 145 },
+    }, [], 'RUB', true);
+
+    expect(html).toContain('aria-valuenow="60"');
+    expect(html).toContain('Прогноз к концу периода: 145%');
+  });
+
   it('renders multiple currencies without false aggregation', () => {
     const html = HomeScreen({
       ...overview,
@@ -185,19 +195,131 @@ describe('acceptance components', () => {
         aggregation_available: true,
         current_period: overview.period,
         previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
-        metric: 'normalized_category_share_percent',
+        metric: 'absolute_amount',
         max_axes: 6,
+        scale: { max: '0.00', step: '0.00', ticks: ['0.00'] },
         insufficient_data: true,
-        explanation: 'Значения нормализованы',
+        explanation: 'Недостаточно данных',
         axes: [],
       },
+      activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 2, days: [{ date: '2026-08-01', count: 0 }, { date: '2026-08-02', count: 1 }, { date: '2026-08-03', count: 2 }, { date: '2026-08-04', count: 1 }] },
       top_expense_categories: [],
-    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' });
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_month', operation_type: 'all', category: 'all' });
 
     expect(html).toContain('categoryChart');
     expect(html).toContain('dynamicsChart');
     expect(html).toContain('data-chart="category"');
     expect(html).toContain('Недостаточно данных');
+  });
+
+  it('renders money radar long labels, collapsed details and activity heatmap', () => {
+    const longCategory = 'Фиксированные расходы на коммунальные услуги';
+    const html = AnalyticsScreen({
+      period: overview.period,
+      overview,
+      aggregation_available: true,
+      available_currencies: ['RUB'],
+      radar_available_currencies: ['RUB'],
+      selected_currency: 'RUB',
+      currency_groups: {},
+      summary: {
+        aggregation_available: true,
+        available_currencies: ['RUB'],
+        currency_groups: { RUB: { income: '0.00', expense: '22000.00', result: '-22000.00', count: 4 } },
+        totals_by_currency: { RUB: { income: '0.00', expense: '22000.00', count: 4 } },
+        result_by_currency: { RUB: '-22000.00' },
+      },
+      category_structure: { type: 'expense', top_n: 5, currency_groups: {}, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+      radar: {
+        type: 'expense',
+        currency: 'RUB',
+        aggregation_available: true,
+        current_period: overview.period,
+        previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
+        metric: 'absolute_amount',
+        max_axes: 6,
+        scale: { max: '20000.00', step: '5000.00', ticks: ['0.00', '5000.00', '10000.00', '15000.00', '20000.00'] },
+        insufficient_data: false,
+        explanation: 'Radar сравнивает абсолютные суммы категорий в выбранной валюте.',
+        axes: [
+          { category: longCategory, current_amount: '15000.00', previous_amount: '12000.00' },
+          { category: 'Заведения', current_amount: '7000.00', previous_amount: '10000.00' },
+          { category: 'Такси', current_amount: '3000.00', previous_amount: '2500.00' },
+        ],
+      },
+      activity_calendar: { start_date: '2026-07-31', end_date: '2026-08-03', max_count: 4, days: [{ date: '2026-07-31', count: 0 }, { date: '2026-08-01', count: 2 }, { date: '2026-08-02', count: 4 }, { date: '2026-08-03', count: 1 }] },
+      top_expense_categories: [],
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_month', operation_type: 'expense', category: 'all' });
+
+    expect(html).toContain('<details class="chart-details">');
+    expect(html).toContain('<tspan');
+    expect(html).toContain('Фиксированные');
+    expect(html).toContain('расходы');
+    expect(html).toContain('коммунальные');
+    expect(html).toContain('услуги');
+    expect(html).toContain(`<title>${longCategory}: текущий период 15000.00 RUB`);
+    expect(html).not.toContain('...');
+    expect(html).toContain('5к');
+    expect(html).toContain('Текущий период');
+    expect(html).toContain('Пн');
+    expect(html).toContain('Пт');
+    expect(html).toContain('июл');
+    expect(html).toContain('авг');
+    expect(html).toContain('activity-calendar');
+    expect(html).toContain('1 августа — 2 операций');
+    expect(html).toContain('data-weekday-row="5"');
+    expect(html).toContain('activity-scroll');
+  });
+
+  it('aligns activity calendar Monday and Friday starts', () => {
+    const base = {
+      period: overview.period,
+      overview,
+      aggregation_available: true,
+      available_currencies: ['RUB'],
+      radar_available_currencies: [],
+      selected_currency: null,
+      currency_groups: {},
+      summary: {
+        aggregation_available: true,
+        available_currencies: ['RUB'],
+        currency_groups: {},
+        totals_by_currency: {},
+        result_by_currency: {},
+      },
+      category_structure: { type: 'expense' as const, top_n: 5, currency_groups: {}, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+      radar: {
+        type: 'expense' as const,
+        currency: null,
+        aggregation_available: true,
+        current_period: overview.period,
+        previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
+        metric: 'absolute_amount',
+        max_axes: 6,
+        scale: { max: '0.00', step: '0.00', ticks: ['0.00'] },
+        insufficient_data: true,
+        explanation: 'Недостаточно данных',
+        axes: [],
+      },
+      top_expense_categories: [],
+    };
+    const monday = AnalyticsScreen({
+      ...base,
+      activity_calendar: { start_date: '2026-08-03', end_date: '2026-08-04', max_count: 1, days: [{ date: '2026-08-03', count: 1 }, { date: '2026-08-04', count: 0 }] },
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_week', operation_type: 'all', category: 'all' });
+    const friday = AnalyticsScreen({
+      ...base,
+      activity_calendar: { start_date: '2026-08-07', end_date: '2026-08-08', max_count: 1, days: [{ date: '2026-08-07', count: 1 }, { date: '2026-08-08', count: 0 }] },
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'custom', operation_type: 'all', category: 'all' });
+
+    expect(monday).toContain('3 августа — 1 операций');
+    expect(monday).toContain('data-weekday-row="1"');
+    expect(friday).toContain('7 августа — 1 операций');
+    expect(friday).toContain('data-weekday-row="5"');
+    const beforeFriday = friday.slice(0, friday.indexOf('7 августа'));
+    expect((beforeFriday.match(/activity-cell empty/g) || [])).toHaveLength(4);
   });
 
   it('renders mixed-currency analytics with explicit currency selector', () => {
@@ -237,15 +359,17 @@ describe('acceptance components', () => {
         aggregation_available: false,
         current_period: overview.period,
         previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
-        metric: 'normalized_category_share_percent',
+        metric: 'absolute_amount',
         max_axes: 6,
+        scale: { max: '0.00', step: '0.00', ticks: ['0.00'] },
         insufficient_data: true,
         reason: 'mixed_currencies',
         explanation: 'mixed',
         axes: [],
       },
+      activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 0, days: [] },
       top_expense_categories: [],
-    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', categoryCurrency: 'EUR', dynamicsCurrency: 'RUB', radarCurrency: 'RUB' });
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', categoryCurrency: 'EUR', dynamicsCurrency: 'RUB', radarCurrency: 'RUB' }, { period: 'current_month', operation_type: 'all', category: 'all' });
 
     expect(html).toContain('Валюты показаны отдельно. Автоматическая конвертация не выполняется.');
     expect(html).toContain('data-action="chart-currency"');

@@ -5,7 +5,7 @@ import asyncio
 
 from telegram import MenuButtonWebApp
 
-from services.miniapp_menu import register_miniapp_menu_button, valid_miniapp_public_url
+from services.miniapp_menu import normalize_miniapp_url, register_miniapp_menu_button, valid_miniapp_public_url
 
 
 class FakeBot:
@@ -33,8 +33,13 @@ def test_register_miniapp_menu_button_sets_webapp_button():
     assert ok is True
     button = bot.calls[0]["menu_button"]
     assert isinstance(button, MenuButtonWebApp)
-    assert button.text == "Открыть приложение"
+    assert button.text == "Открыть"
     assert button.web_app.url == "https://example.com/app"
+
+
+def test_miniapp_url_normalization_ignores_trailing_slash():
+    assert normalize_miniapp_url("https://app.kopipaste.ru/") == "https://app.kopipaste.ru"
+    assert normalize_miniapp_url("https://app.kopipaste.ru") == "https://app.kopipaste.ru"
 
 
 def test_register_miniapp_menu_button_skips_invalid_and_tolerates_errors(caplog):

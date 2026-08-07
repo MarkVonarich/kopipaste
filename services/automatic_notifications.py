@@ -165,6 +165,60 @@ def suppress_stale_timezone_sensitive_notifications(user_id: int, *, reason: str
         conn.close()
 
 
+def suppress_pending_preference_notifications(user_id: int, preference_key: str, *, reason: str = "preference_disabled") -> int:
+    notification_types = {
+        "morning": ("day_nudge",),
+        "evening": ("evening_reminder",),
+    }.get(preference_key)
+    if not notification_types:
+        return 0
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.automatic_notifications
+                   SET status='skipped',
+                       skip_reason=%s,
+                       locked_at=NULL,
+                       locked_by=NULL,
+                       updated_at=now()
+                 WHERE user_id=%s
+                   AND notification_type = ANY(%s)
+                   AND status IN ('pending','claimed')
+                """,
+                (reason, int(user_id), list(notification_types)),
+            )
+            changed = int(cur.rowcount or 0)
+        conn.commit()
+        return changed
+    except (errors.UndefinedTable, errors.UndefinedColumn):
+        conn.rollback()
+        return 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _automatic_type_preference_enabled(user_id: int, notification_type: str) -> bool:
+    if notification_type not in {"day_nudge", "evening_reminder"}:
+        return True
+    try:
+        from services.notification_preferences import get_notification_preferences
+
+        prefs = get_notification_preferences(user_id)
+    except Exception as exc:
+        log.info("automatic_notification_preference_check_failed type=%s reason=%s", notification_type, type(exc).__name__)
+        return True
+    if notification_type == "day_nudge":
+        return bool(prefs.get("morning_enabled", True))
+    if notification_type == "evening_reminder":
+        return bool(prefs.get("evening_enabled", True))
+    return True
+
+
 def _insert_deferred(
     *,
     user_id: int,
@@ -386,6 +440,11 @@ async def dispatch_automatic_notification(
     disable_web_page_preview: bool | None = None,
     force_immediate: bool = False,
 ) -> DispatchResult:
+    if not _automatic_type_preference_enabled(user_id, notification_type):
+        created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="preference_disabled")
+        if created is False:
+            return DispatchResult("duplicate", reason="dedupe")
+        return DispatchResult("skipped", reason="preference_disabled")
     window, now_utc, quiet = quiet_context(user_id, now_utc=original_scheduled_at)
     if force_immediate:
         quiet = False
@@ -665,6 +724,10 @@ async def process_due_notifications(context: ContextTypes.DEFAULT_TYPE, *, limit
     counts = {"claimed": len(rows), "sent": 0, "retrying": 0, "dead_letter": 0, "skipped": 0}
     for row in rows:
         try:
+            if not _automatic_type_preference_enabled(row["user_id"], row["notification_type"]):
+                mark_notification_skipped(row["id"], "preference_disabled")
+                counts["skipped"] += 1
+                continue
             text, markup = render_deferred_notification(row)
             parse_mode = (row.get("payload") or {}).get("parse_mode")
             await context.bot.send_message(chat_id=row["user_id"], text=text, reply_markup=markup, parse_mode=parse_mode)

@@ -111,10 +111,21 @@ On bot startup, the application registers Telegram's persistent chat menu button
 
 BotFather Main Mini App still needs a manual production check:
 
-- open BotFather for the production bot;
-- verify the Main Mini App URL matches the public HTTPS Mini App URL;
-- verify the button label is `Открыть приложение` or an approved shorter label;
-- do not paste tokens or secrets into BotFather notes or deployment logs.
+Main Mini App production setup:
+
+1. Open `@BotFather`.
+2. Select the production bot `@uchet_finbot`.
+3. Configure the Main Mini App.
+4. URL: `https://app.kopipaste.ru`.
+5. Name: `КопиPaste`.
+6. Launch/Open label: `Открыть`, if the Telegram UI allows choosing the label.
+7. Verify the launch button in the bot profile.
+8. Verify the Apps/Search surface that Telegram shows for Main Mini Apps.
+9. Verify Telegram Desktop, Android and iOS.
+
+The exact placement of Telegram's system launch button is controlled by the Telegram client. The Python Bot API cannot force Telegram to render a Main Mini App button in a particular chat-list position. Keep the persistent `MenuButtonWebApp` and `/app` command as supported entry points.
+
+Do not paste tokens or secrets into BotFather notes or deployment logs.
 
 Dry-run documentation command:
 
@@ -135,4 +146,5 @@ Menu-button smoke:
 - restart a staging bot with HTTPS `MINIAPP_PUBLIC_URL`;
 - confirm startup logs contain successful menu-button registration without secret values;
 - open the bot chat and press the persistent menu button;
+- confirm the persistent menu button label is `Открыть`;
 - confirm `/app` still renders the inline WebApp button and command list still includes `/start`, `/settings`, `/help`, `/app` when the Mini App URL is configured.

@@ -1,5 +1,5 @@
 import { formatMoneyString, subtractMoneyStrings } from '../money';
-import type { Operation } from '../types';
+import type { GlobalFinancialFilters, HomeReminderSummary, Operation } from '../types';
 import type { Overview } from '../api';
 import { TransactionList } from './TransactionList';
 import { EmptyPanel, SectionHeader, esc, icon } from './ui';
@@ -22,7 +22,55 @@ function totalLines(overview: Overview | null, type: 'income' | 'expense', fallb
   return currencies.map((currency) => formatMoneyString(totals[currency][type], currency)).join(' · ');
 }
 
-export function HomeScreen(overview: Overview | null, recent: Operation[], fallbackCurrency: string, canWrite: boolean): string {
+function heroTitle(filters: GlobalFinancialFilters): string {
+  if (filters.category && filters.category !== 'all') return filters.category;
+  if (filters.operation_type === 'expense') return 'Расходы за период';
+  if (filters.operation_type === 'income') return 'Доходы за период';
+  return 'Финансовый результат';
+}
+
+function heroSubtitle(filters: GlobalFinancialFilters): string {
+  if (filters.category && filters.category !== 'all') {
+    if (filters.operation_type === 'expense') return 'Расходы за период';
+    if (filters.operation_type === 'income') return 'Доходы за период';
+    return 'Доходы / Расходы / результат';
+  }
+  if (filters.operation_type === 'expense') return 'Сумма расходов без доходов';
+  if (filters.operation_type === 'income') return 'Сумма доходов без расходов';
+  return 'Доходы − Расходы';
+}
+
+function heroAmount(overview: Overview | null, filters: GlobalFinancialFilters, fallbackCurrency: string): string {
+  if (filters.operation_type === 'expense') return totalLines(overview, 'expense', fallbackCurrency);
+  if (filters.operation_type === 'income') return totalLines(overview, 'income', fallbackCurrency);
+  return resultLines(overview, fallbackCurrency);
+}
+
+function progressBar(percent?: number): string {
+  const value = Math.max(0, Math.min(100, Number(percent || 0)));
+  return `<div class="progress-line" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><span style="width:${value}%"></span></div><small>${value}%</small>`;
+}
+
+function reminderCard(reminder: HomeReminderSummary | null | undefined): string {
+  const state = reminder?.state || 'empty';
+  const title = reminder?.title || 'Нет запланированных событий';
+  const amount = reminder?.amount_text ? ` · ${reminder.amount_text}` : '';
+  const date = reminder?.event_date || '';
+  const status = reminder?.status_text || 'Добавьте напоминание в боте.';
+  const next = reminder?.next_event_date ? `<small>Следующее: ${esc(reminder.next_event_date)}</small>` : '';
+  const label = state === 'overdue' ? 'Просрочено' : state === 'completed_today' ? 'Выполнено' : 'Ближайшее напоминание';
+  return `
+    <button class="smart-card reminder-card ${esc(state)}" data-action="home-reminder" type="button">
+      <span>${esc(label)}</span>
+      <strong>${esc(title)}${esc(amount)}</strong>
+      ${date ? `<small>${esc(date)}</small>` : ''}
+      <small>${esc(status)}</small>
+      ${next}
+    </button>
+  `;
+}
+
+export function HomeScreen(overview: Overview | null, recent: Operation[], fallbackCurrency: string, canWrite: boolean, filters: GlobalFinancialFilters = { period: 'current_month', operation_type: 'all', category: 'all' }): string {
   const period = overview?.period ? `${overview.period.start_date} — ${overview.period.end_date}` : '';
   const emptyAction = canWrite ? `<button class="button primary" data-action="open-add" data-kind="expense">${icon('expense')}Добавить первую операцию</button>` : '';
   const challenge = overview?.challenge;
@@ -31,13 +79,18 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
   return `
     <section class="screen home-screen">
       <div class="hero-metric" data-testid="hero-financial-result" aria-label="Доходы − Расходы">
-        <span class="eyebrow">Финансовый результат</span>
-        <strong>${esc(resultLines(overview, fallbackCurrency))}</strong>
+        <span class="eyebrow">${esc(heroTitle(filters))}</span>
+        <strong>${esc(heroAmount(overview, filters, fallbackCurrency))}</strong>
         ${period ? `<p>${esc(period)}</p>` : ''}
+        <p>${esc(heroSubtitle(filters))}</p>
         <div class="currency-lines" aria-label="Финансовый результат по валютам">
           ${Object.keys(overview?.totals_by_currency || {}).map((currency) => {
             const totals = overview?.totals_by_currency[currency];
-            const result = totals ? subtractMoneyStrings(totals.income, totals.expense) : '0.00';
+            const result = filters.operation_type === 'expense'
+              ? totals?.expense || '0.00'
+              : filters.operation_type === 'income'
+                ? totals?.income || '0.00'
+                : totals ? subtractMoneyStrings(totals.income, totals.expense) : '0.00';
             return `<span>${esc(currency)} · ${esc(formatMoneyString(result, currency))}</span>`;
           }).join('') || `<span>${esc(formatMoneyString('0.00', fallbackCurrency))}</span>`}
         </div>
@@ -69,12 +122,15 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
           <span>Фокус</span>
           <strong>${esc(focus?.title || 'Фокус свободен')}</strong>
           <small>${esc(focus?.description || 'Цели и лимиты появятся здесь')}</small>
+          ${focus?.percent !== undefined ? progressBar(focus.percent) : ''}
+          ${focus?.projected_percent ? `<small>Прогноз к концу периода: ${esc(focus.projected_percent)}%</small>` : ''}
         </button>
         <button class="smart-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
           <span>Инсайт периода</span>
           <strong>${esc(insight?.title || overview?.info?.text || 'Период')}</strong>
           <small>${esc(insight?.text || overview?.info?.text || 'Данные обновятся после операций')}</small>
         </button>
+        ${reminderCard(overview?.reminder)}
       </div>
       ${SectionHeader(
         'Последние операции',

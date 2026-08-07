@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from miniapp.api import MiniAppAPI, MiniAppError
+from miniapp.api import MiniAppAPI, MiniAppError, TransactionFilters
 from miniapp.auth import MiniAppUser
 from services.challenges import ChallengeCard, ChallengeDefinition
 from services.operations import RecordedOperation
@@ -35,6 +35,118 @@ def test_bootstrap_starts_home_ready_workspace_context(monkeypatch):
     assert data["workspaces"][0]["workspace_id"] == "all"
     assert data["workspaces"][1]["workspace_id"] == 10
     assert data["theme"] == "telegram"
+
+
+def test_bootstrap_exposes_current_week_not_last_30(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [])
+    monkeypatch.setattr(api, "_profile_theme", lambda _user_id: "telegram")
+    monkeypatch.setattr("miniapp.api.user_timezone_name", lambda _user_id: ("Europe/Moscow", "user"))
+
+    periods = api.bootstrap(api.request(42))["data"]["periods"]
+
+    assert "current_week" in periods
+    assert "last_30" not in periods
+
+
+def test_current_week_period_uses_local_monday(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+
+    start, end, key = api._period(api.request(42), {"period": "current_week"}, 10)
+
+    assert key == "current_week"
+    assert start == date(2026, 8, 3)
+    assert end == date(2026, 8, 7)
+
+
+def test_legacy_last_30_period_is_mapped_to_current_week(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+
+    start, _end, key = api._period(api.request(42), {"period": "last_30"}, 10)
+
+    assert key == "current_week"
+    assert start == date(2026, 8, 3)
+
+
+def test_transaction_filter_sql_is_parameterized(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_read_scope", lambda _req, _workspace_id: ([10], False))
+    monkeypatch.setattr(api, "_workspace_filter_sql", lambda _ids, _user_id, alias="": ("o.workspace_id = ANY(%s)", ([10],)))
+
+    tx = api._transaction_filters(api.request(42), {"workspace_id": 10, "period": "current_month", "operation_type": "expense", "category": "Food'); DROP TABLE operations; --"}, alias="o")
+
+    assert "DROP TABLE" not in tx.where_sql
+    assert tx.category in tx.params
+    assert "o.category=%s" in tx.where_sql
+
+
+def test_radar_returns_absolute_amounts_and_scale(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters(
+        workspace_ids=[10],
+        all_scope=False,
+        start=date(2026, 8, 1),
+        end=date(2026, 8, 7),
+        period_key="current_week",
+        operation_type="expense",
+        category=None,
+        where_sql="workspace_id = ANY(%s) AND op_date BETWEEN %s AND %s AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций' AND type=%s",
+        params=([10], date(2026, 8, 1), date(2026, 8, 7), "Расходы"),
+    )
+    monkeypatch.setattr(api, "_workspace_filter_sql", lambda _ids, _user_id: ("workspace_id = ANY(%s)", ([10],)))
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda _sql, _params: [
+        ("current", "Продукты", Decimal("15000.00")),
+        ("previous", "Продукты", Decimal("12000.00")),
+        ("current", "Заведения", Decimal("7000.00")),
+        ("previous", "Заведения", Decimal("10000.00")),
+    ])
+
+    radar = api._radar(api.request(42), tx, date(2026, 7, 25), date(2026, 7, 31), "previous_equal_period", "Расходы", currency="RUB", available_currencies=["RUB"])
+
+    assert radar["metric"] == "absolute_amount"
+    assert radar["axes"][0]["current_amount"] == Decimal("15000.00")
+    assert "current" not in radar["axes"][0]
+    assert Decimal(radar["scale"]["max"]) >= Decimal("15000.00")
+
+
+def test_activity_calendar_counts_operations_not_amount(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters(
+        workspace_ids=[10],
+        all_scope=False,
+        start=date(2026, 8, 1),
+        end=date(2026, 8, 3),
+        period_key="custom",
+        operation_type="all",
+        category=None,
+        where_sql="workspace_id = ANY(%s) AND op_date BETWEEN %s AND %s",
+        params=([10], date(2026, 8, 1), date(2026, 8, 3)),
+    )
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda _sql, _params: [(date(2026, 8, 1), 2), (date(2026, 8, 3), 1)])
+
+    calendar = api._activity_calendar(api.request(42), tx)
+
+    assert calendar["max_count"] == 2
+    assert [day["count"] for day in calendar["days"]] == [2, 0, 1]
+
+
+def test_home_reminder_completed_today_uses_existing_events(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_timezone_name", lambda _user_id: ("Europe/Moscow", None))
+
+    def _fetch(sql, _params):
+        if "event_type='recorded'" in sql:
+            return [(5, "Интернет", "Подписки", Decimal("800.00"), "RUB", date(2026, 8, 7), date(2026, 9, 7), "monthly", True, None)]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    reminder = api._home_reminder(api.request(42))
+
+    assert reminder["state"] == "completed_today"
+    assert reminder["next_event_date"] == date(2026, 9, 7)
 
 
 def test_create_operation_uses_authenticated_actor_and_decimal_amount(monkeypatch):
@@ -325,6 +437,7 @@ def test_overview_recent_operations_are_limited_to_three(monkeypatch):
     monkeypatch.setattr(api, "_home_challenge", lambda _req: None)
     monkeypatch.setattr(api, "_home_focus", lambda *_args: None)
     monkeypatch.setattr(api, "_home_insight", lambda *_args: {"kind": "fallback", "tone": "neutral", "title": "x", "text": "x"})
+    monkeypatch.setattr(api, "_home_reminder", lambda _req: {"state": "empty"})
 
     data = api.overview(api.request(42), {"workspace_id": 10})["data"]
 
@@ -353,21 +466,147 @@ def test_home_focus_priority_is_stable(monkeypatch):
         {"id": "warn", "title": "Warning limit", "percent": 90},
     ]}})
 
-    item = api._home_focus(api.request(42), {"workspace_id": 10}, False)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 4), "current_month", "all", None, "", ())
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, tx)
 
     assert item["kind"] == "limit"
     assert item["id"] == "warn"
     assert item["target_mode"] == "limits"
 
 
+def _focus_tx(category=None):
+    return TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 7), "current_week", "all", category, "", ())
+
+
+def test_home_focus_limit_month_pace_projection_high_risk(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:Food",
+        "title": "Food",
+        "category": "Food",
+        "percent": 60,
+        "spent": Decimal("18000.00"),
+        "amount": Decimal("30000.00"),
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10, "period": "previous_month"}, _focus_tx())
+
+    assert item["severity"] == "high"
+    assert item["projected_percent"] > 100
+    assert item["percent"] == 60
+
+
+def test_home_focus_limit_week_pace_projection_risk(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 4))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:week:Taxi",
+        "title": "Taxi",
+        "category": "Taxi",
+        "percent": 60,
+        "spent": "6000.00",
+        "amount": "10000.00",
+        "period": "week",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "high"
+    assert item["projected_percent"] >= 115
+
+
+def test_home_focus_limit_first_day_no_unstable_projection(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 1))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:Food",
+        "title": "Food",
+        "category": "Food",
+        "percent": 60,
+        "spent": "18000.00",
+        "amount": "30000.00",
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "normal"
+    assert item["projected_percent"] is None
+
+
+def test_home_focus_limit_low_percent_near_period_end_stays_normal(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 30))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:Food",
+        "title": "Food",
+        "category": "Food",
+        "percent": 40,
+        "spent": "12000.00",
+        "amount": "30000.00",
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "normal"
+    assert item["projected_percent"] is None
+
+
+def test_home_focus_limit_actual_thresholds_win(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 30))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [
+        {"id": "high", "title": "High", "percent": 95, "spent": "950.00", "amount": "1000.00", "period": "month"},
+        {"id": "critical", "title": "Critical", "percent": 101, "spent": "1010.00", "amount": "1000.00", "period": "month"},
+    ]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["severity"] == "critical"
+    assert item["id"] == "critical"
+
+
+def test_global_category_focus_relevance_does_not_recompute_limit_spent(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    calls = []
+
+    def _limits(_req, params):
+        calls.append(params)
+        return {"data": {"items": [{
+            "id": "category:month:Food",
+            "title": "Food",
+            "category": "Food",
+            "percent": 60,
+            "spent": "18000.00",
+            "amount": "30000.00",
+            "period": "month",
+        }]}}
+
+    monkeypatch.setattr(api, "limits", _limits)
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10, "period": "current_week", "operation_type": "expense", "category": "Food"}, _focus_tx("Food"))
+
+    assert item["id"] == "category:month:Food"
+    assert item["percent"] == 60
+    assert calls[0]["period"] == "current_week"
+
+
 def test_home_insight_does_not_mix_currencies():
     api = MiniAppAPI()
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "all", None, "", ())
     data = api._home_insight(
         api.request(42),
-        [10],
-        date(2026, 8, 1),
-        date(2026, 8, 5),
-        "current_month",
+        tx,
         {
             "RUB": {"income": Decimal("0.00"), "expense": Decimal("100.00"), "count": 1},
             "USD": {"income": Decimal("0.00"), "expense": Decimal("10.00"), "count": 1},

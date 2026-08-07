@@ -16,6 +16,13 @@ def valid_miniapp_public_url(url: str | None = None) -> bool:
     return parsed.scheme == "https" and bool(parsed.netloc)
 
 
+def normalize_miniapp_url(url: str | None) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    return value.rstrip("/")
+
+
 async def register_miniapp_menu_button(bot, url: str | None = None) -> bool:
     value = str(url if url is not None else MINIAPP_PUBLIC_URL or "").strip()
     if not valid_miniapp_public_url(value):
@@ -24,7 +31,7 @@ async def register_miniapp_menu_button(bot, url: str | None = None) -> bool:
     try:
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
-                text="Открыть приложение",
+                text="Открыть",
                 web_app=WebAppInfo(url=value),
             )
         )

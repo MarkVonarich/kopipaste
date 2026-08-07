@@ -63,13 +63,14 @@ describe('mini app design system semantics', () => {
       tab: 'analytics',
       theme: 'telegram',
       workspaceId: null,
-      period: { period: 'last_30' },
+      period: { period: 'current_week' },
+      globalFilters: { period: 'current_week', operation_type: 'all', category: 'all' },
       loading: false,
       search: '',
       saving: false,
       dirty: false,
       sheet: null,
-      boot: { user: { id: '1', locale: 'ru', currency: 'RUB', timezone: 'Europe/Moscow' }, workspaces: [{ workspace_id: null, name: 'Личное', kind: 'personal', role: 'owner' }], periods: ['last_30'], theme: 'telegram', version: 'test' },
+      boot: { user: { id: '1', locale: 'ru', currency: 'RUB', timezone: 'Europe/Moscow' }, workspaces: [{ workspace_id: null, name: 'Личное', kind: 'personal', role: 'owner' }], periods: ['current_week'], theme: 'telegram', version: 'test' },
     } satisfies AppState;
     const parsed = doc(AppShell(state, '<div class="toolbar"><select></select></div>', '<section class="screen"><h2>Body</h2></section>'));
 

@@ -5,7 +5,7 @@ import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { AppState, BudgetLimit, CategoryOption, Goal, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
+import type { AppState, BudgetLimit, CategoryOption, GlobalFinancialFilters, Goal, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
@@ -32,6 +32,7 @@ let selectedOperation: Operation | null = null;
 let selectedGoal: Goal | null = null;
 let selectedLimit: BudgetLimit | null = null;
 let categoryOptions: CategoryOption[] = [];
+let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 let chartInstances: Chart[] = [];
 
@@ -95,6 +96,15 @@ function canWrite(): boolean {
   return Boolean(workspace && workspace.workspace_id !== 'all' && !workspace.read_only);
 }
 
+function activeFilters(): GlobalFinancialFilters {
+  return state.globalFilters;
+}
+
+function setGlobalFilters(next: GlobalFinancialFilters): void {
+  state.globalFilters = next;
+  state.period = next;
+}
+
 function operationAmount(op: Operation): string {
   return op.amount_text || formatMoneyString(op.amount, op.currency);
 }
@@ -104,22 +114,35 @@ function renderTopbar(): string {
     .map((workspace) => `<option value="${esc(workspace.workspace_id)}" ${workspace.workspace_id === state.workspaceId ? 'selected' : ''}>${esc(workspaceLabel(workspace))}</option>`)
     .join('');
   const periodOptions: Array<[PeriodKey, string]> = [
+    ['current_week', 'Текущая неделя'],
     ['current_month', 'Этот месяц'],
     ['previous_month', 'Прошлый месяц'],
-    ['last_30', '30 дней'],
     ['custom', 'Период']
   ];
+  const filters = activeFilters();
+  const categoryOptionsHtml = [
+    `<option value="all" ${filters.category === 'all' ? 'selected' : ''}>Все категории</option>`,
+    ...globalCategoryOptions.map((category) => `<option value="${esc(category.name)}" ${filters.category === category.name ? 'selected' : ''}>${esc(category.name)}</option>`)
+  ].join('');
   return `
     <div class="toolbar" aria-label="Период и пространство">
       <label class="toolbar-field"><span>Пространство</span><select class="select compact" data-action="workspace" aria-label="Пространство">${workspaceOptions}</select></label>
       <label class="toolbar-field"><span>Период</span><select class="select compact" data-action="period" aria-label="Период">
-        ${periodOptions.map(([key, label]) => `<option value="${key}" ${state.period.period === key ? 'selected' : ''}>${label}</option>`).join('')}
+        ${periodOptions.map(([key, label]) => `<option value="${key}" ${filters.period === key ? 'selected' : ''}>${label}</option>`).join('')}
       </select></label>
     </div>
-    ${state.period.period === 'custom' ? `
+    <div class="toolbar filter-toolbar" aria-label="Финансовые фильтры">
+      <label class="toolbar-field"><span>Тип</span><select class="select compact" data-action="operation-type" aria-label="Тип операции">
+        <option value="all" ${filters.operation_type === 'all' ? 'selected' : ''}>Все операции</option>
+        <option value="expense" ${filters.operation_type === 'expense' ? 'selected' : ''}>Расходы</option>
+        <option value="income" ${filters.operation_type === 'income' ? 'selected' : ''}>Доходы</option>
+      </select></label>
+      <label class="toolbar-field"><span>Категория</span><select class="select compact" data-action="category-filter" aria-label="Категория">${categoryOptionsHtml}</select></label>
+    </div>
+    ${filters.period === 'custom' ? `
       <div class="toolbar custom-period">
-        <label class="toolbar-field"><span>Начало</span><input class="input compact" type="date" data-action="start-date" value="${esc(state.period.start_date || '')}" /></label>
-        <label class="toolbar-field"><span>Конец</span><input class="input compact" type="date" data-action="end-date" value="${esc(state.period.end_date || '')}" /></label>
+        <label class="toolbar-field"><span>Начало</span><input class="input compact" type="date" data-action="start-date" value="${esc(filters.start_date || '')}" /></label>
+        <label class="toolbar-field"><span>Конец</span><input class="input compact" type="date" data-action="end-date" value="${esc(filters.end_date || '')}" /></label>
       </div>
     ` : ''}
   `;
@@ -130,7 +153,7 @@ function renderNav(): string {
 }
 
 function renderHome(): string {
-  return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite());
+  return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite(), activeFilters());
 }
 
 function renderOperations(): string {
@@ -138,7 +161,7 @@ function renderOperations(): string {
 }
 
 function renderAnalytics(): string {
-  return AnalyticsScreen(analytics, state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' });
+  return AnalyticsScreen(analytics, state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, activeFilters());
 }
 
 function renderPlans(): string {
@@ -295,31 +318,35 @@ async function loadScreen(): Promise<void> {
   state.error = undefined;
   render();
   try {
-    if (state.tab === 'home') overview = await api.overview(state.workspaceId, state.period);
-    if (state.tab === 'operations') operations = await api.operations(state.workspaceId, state.period, 0, state.search);
+    const filters = activeFilters();
+    if (state.tab === 'home') overview = await api.overview(state.workspaceId, filters);
+    if (state.tab === 'operations') operations = await api.operations(state.workspaceId, filters, 0, state.search);
     if (state.tab === 'analytics') {
       let response = await api.analytics(state.workspaceId, {
-        ...state.period,
+        ...filters,
         category_type: state.analyticsFilters?.categoryType,
         radar_type: state.analyticsFilters?.radarType,
-        currency: state.analyticsFilters?.radarCurrency
-      } as typeof state.period);
+        currency: state.analyticsFilters?.radarCurrency,
+        grouping: state.analyticsFilters?.grouping || 'auto'
+      });
       if ((response.radar_available_currencies.length > 1 || response.available_currencies.length > 1) && !state.analyticsFilters?.radarCurrency) {
         const firstCurrency = response.radar_available_currencies[0] || response.available_currencies[0];
         state.analyticsFilters = {
           categoryType: state.analyticsFilters?.categoryType || 'expense',
           dynamicsType: state.analyticsFilters?.dynamicsType || 'both',
           radarType: state.analyticsFilters?.radarType || 'expense',
+          grouping: state.analyticsFilters?.grouping,
           categoryCurrency: state.analyticsFilters?.categoryCurrency || response.available_currencies[0],
           dynamicsCurrency: state.analyticsFilters?.dynamicsCurrency || response.available_currencies[0],
           radarCurrency: firstCurrency
         };
         response = await api.analytics(state.workspaceId, {
-          ...state.period,
+          ...filters,
           category_type: state.analyticsFilters.categoryType,
           radar_type: state.analyticsFilters.radarType,
-          currency: firstCurrency
-        } as typeof state.period);
+          currency: firstCurrency,
+          grouping: state.analyticsFilters.grouping || 'auto'
+        });
       }
       overview = response.overview;
       analytics = response;
@@ -351,6 +378,7 @@ async function bootstrap(): Promise<void> {
     state.boot = boot;
     state.theme = state.theme || boot.theme;
     state.workspaceId = pickInitialWorkspace(boot.workspaces, state.workspaceId);
+    await loadFilterCategories();
     await loadScreen();
   } catch (error) {
     state.loading = false;
@@ -432,7 +460,9 @@ function renderCharts(): void {
   const dynamicsItems = dynamicsCurrency ? analytics.time_dynamics.items.filter((item) => item.currency === dynamicsCurrency) : analytics.time_dynamics.items;
   if (dynamicsCanvas && dynamicsItems.length) {
     const labels = dynamicsItems.map((item) => item.date);
-    const mode = state.analyticsFilters?.dynamicsType || 'both';
+    const mode = state.globalFilters.operation_type === 'expense' || state.globalFilters.operation_type === 'income'
+      ? state.globalFilters.operation_type
+      : state.analyticsFilters?.dynamicsType || 'both';
     const datasets = [];
     const expensePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.expense));
     const incomePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.income));
@@ -536,6 +566,30 @@ async function loadCategoriesFor(type: 'expense' | 'income' | 'Расходы' |
   }
 }
 
+async function loadFilterCategories(): Promise<void> {
+  if (!state.boot || state.workspaceId === 'all') {
+    globalCategoryOptions = [];
+    if (state.globalFilters.category !== 'all') setGlobalFilters({ ...state.globalFilters, category: 'all' });
+    return;
+  }
+  const types = state.globalFilters.operation_type === 'all'
+    ? ['expense', 'income'] as const
+    : [state.globalFilters.operation_type] as const;
+  const map = new Map<string, CategoryOption>();
+  for (const type of types) {
+    try {
+      const response = await api.categories(state.workspaceId, type);
+      for (const item of response.items) map.set(item.normalized_name || item.name.toLowerCase(), item);
+    } catch {
+      // Read-only/all scopes simply hide category options.
+    }
+  }
+  globalCategoryOptions = [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  if (state.globalFilters.category !== 'all' && !globalCategoryOptions.some((item) => item.name === state.globalFilters.category)) {
+    setGlobalFilters({ ...state.globalFilters, category: 'all' });
+  }
+}
+
 function wireEvents(): void {
   app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -550,10 +604,16 @@ function wireEvents(): void {
   });
 
   app.querySelector<HTMLButtonElement>('[data-action="retry"]')?.addEventListener('click', () => void reloadActive());
+  app.querySelectorAll<HTMLDetailsElement>('.chart-details').forEach((details) => {
+    details.addEventListener('toggle', async () => {
+      await api.track('mini_app_analytics_details_toggled', { action: details.open ? 'open' : 'close', chart_type: 'analytics', source: 'mini_app' });
+    });
+  });
   app.querySelector<HTMLSelectElement>('[data-action="workspace"]')?.addEventListener('change', async (event) => {
     const value = (event.currentTarget as HTMLSelectElement).value;
     hapticSelection();
     state.workspaceId = value === 'all' ? 'all' : value === 'null' || value === '' ? null : Number(value);
+    await loadFilterCategories();
     await api.track('mini_app_workspace_changed', { scope: String(state.workspaceId) });
     await loadScreen();
   });
@@ -562,11 +622,26 @@ function wireEvents(): void {
     hapticSelection();
     if (period === 'custom') {
       const today = new Date().toISOString().slice(0, 10);
-      state.period = { period, start_date: today, end_date: today };
+      setGlobalFilters({ ...state.globalFilters, period, start_date: today, end_date: today });
     } else {
-      state.period = { period };
+      setGlobalFilters({ operation_type: state.globalFilters.operation_type, category: state.globalFilters.category, period });
     }
-    await api.track('mini_app_period_changed', { period: state.period.period });
+    await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type: state.globalFilters.operation_type, has_category_filter: String(state.globalFilters.category !== 'all'), source: 'mini_app' });
+    await loadScreen();
+  });
+  app.querySelector<HTMLSelectElement>('[data-action="operation-type"]')?.addEventListener('change', async (event) => {
+    const operation_type = (event.currentTarget as HTMLSelectElement).value as GlobalFinancialFilters['operation_type'];
+    hapticSelection();
+    setGlobalFilters({ ...state.globalFilters, operation_type, category: 'all' });
+    await loadFilterCategories();
+    await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type, has_category_filter: 'false', source: 'mini_app' });
+    await loadScreen();
+  });
+  app.querySelector<HTMLSelectElement>('[data-action="category-filter"]')?.addEventListener('change', async (event) => {
+    const category = (event.currentTarget as HTMLSelectElement).value || 'all';
+    hapticSelection();
+    setGlobalFilters({ ...state.globalFilters, category });
+    await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type: state.globalFilters.operation_type, has_category_filter: String(category !== 'all'), source: 'mini_app' });
     await loadScreen();
   });
   app.querySelector<HTMLInputElement>('[data-action="search"]')?.addEventListener('change', async (event) => {
@@ -575,17 +650,17 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="load-more"]')?.addEventListener('click', async () => {
     if (!operations) return;
-    const next = await api.operations(state.workspaceId, state.period, operations.offset + operations.limit, state.search);
+    const next = await api.operations(state.workspaceId, activeFilters(), operations.offset + operations.limit, state.search);
     operations = { ...next, items: [...operations.items, ...next.items] };
     render();
   });
   app.querySelector<HTMLInputElement>('[data-action="start-date"]')?.addEventListener('change', async (event) => {
-    state.period = { ...state.period, start_date: (event.currentTarget as HTMLInputElement).value };
-    if (state.period.end_date) await loadScreen();
+    setGlobalFilters({ ...state.globalFilters, start_date: (event.currentTarget as HTMLInputElement).value });
+    if (state.globalFilters.end_date) await loadScreen();
   });
   app.querySelector<HTMLInputElement>('[data-action="end-date"]')?.addEventListener('change', async (event) => {
-    state.period = { ...state.period, end_date: (event.currentTarget as HTMLInputElement).value };
-    if (state.period.start_date) await loadScreen();
+    setGlobalFilters({ ...state.globalFilters, end_date: (event.currentTarget as HTMLInputElement).value });
+    if (state.globalFilters.start_date) await loadScreen();
   });
   app.querySelectorAll<HTMLSelectElement>('[data-action="chart-filter"]').forEach((select) => {
     select.addEventListener('change', async () => {
@@ -598,6 +673,13 @@ function wireEvents(): void {
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: select.value, source: 'mini_app' });
       await loadScreen();
     });
+  });
+  app.querySelector<HTMLSelectElement>('[data-action="chart-grouping"]')?.addEventListener('change', async (event) => {
+    state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
+    state.analyticsFilters.grouping = (event.currentTarget as HTMLSelectElement).value as 'day' | 'week' | 'month';
+    hapticSelection();
+    await api.track('mini_app_analytics_grouping_changed', { grouping: state.analyticsFilters.grouping, source: 'mini_app' });
+    await loadScreen();
   });
   app.querySelectorAll<HTMLSelectElement>('[data-action="chart-currency"]').forEach((select) => {
     select.addEventListener('change', async () => {
@@ -658,6 +740,9 @@ function wireEvents(): void {
     await api.track('mini_app_home_insight_opened', { kind: overview?.insight?.kind || 'fallback', source: 'mini_app' });
     state.tab = 'analytics';
     await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async () => {
+    await api.track('mini_app_home_reminder_opened', { result: overview?.reminder?.state || 'empty', source: 'mini_app' });
   });
   app.querySelector<HTMLButtonElement>('[data-action="goal-create"]')?.addEventListener('click', () => {
     state.sheet = 'goal-create';

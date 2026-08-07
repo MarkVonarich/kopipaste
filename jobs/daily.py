@@ -11,7 +11,7 @@ jobs/daily.py — персонализированные напоминания
 
 import logging
 import random
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, time, timedelta, timezone, date
 
 from telegram.error import Forbidden, BadRequest
 from psycopg2 import OperationalError
@@ -25,7 +25,7 @@ from db.database import pg_fetchall, pg_exec
 from settings import ENABLE_SMART_MORNING_LIMITS
 from services.activity import has_financial_activity_today
 from services.automatic_notifications import DeliveryPolicy, dispatch_automatic_notification
-from services.notification_preferences import get_notification_preferences
+from services.notification_preferences import get_notification_preferences, parse_hhmm
 from services.notification_engine import preferences_from_dict, should_send_now
 from services.user_time import resolve_user_timezone, user_local_date, user_local_now
 
@@ -252,6 +252,58 @@ def _user_tz_and_hour(user_id: int) -> tuple[int, int]:
     conn.close()
     return int(row[0]), int(row[1])
 
+
+def _parse_pref_time(value: str | None, fallback_hour: int, fallback_minute: int = 0) -> time:
+    try:
+        return parse_hhmm(str(value or ""))
+    except (TypeError, ValueError):
+        hour = max(0, min(23, int(fallback_hour)))
+        minute = max(0, min(59, int(fallback_minute)))
+        return time(hour, minute)
+
+
+def _notification_time(user_id: int, prefs: dict, kind: str) -> time:
+    if kind == "morning":
+        return _parse_pref_time(prefs.get("morning_time"), 8, 30)
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT to_char(evening_time, 'HH24:MI')
+              FROM public.notification_preferences
+             WHERE user_id=%s
+             LIMIT 1
+            """,
+            (user_id,),
+        )
+    except Exception:
+        rows = []
+    if rows and rows[0][0]:
+        return _parse_pref_time(rows[0][0], 20, 30)
+    _off_min, legacy_hour = _user_tz_and_hour(user_id)
+    return _parse_pref_time(f"{legacy_hour}:00", legacy_hour)
+
+
+def notification_due_in_window(local_dt: datetime, configured_time: time, *, window_minutes: int = 5) -> bool:
+    if window_minutes <= 0:
+        return False
+    local = local_dt.replace(second=0, microsecond=0)
+    start = datetime.combine(local.date(), configured_time, tzinfo=local.tzinfo).replace(second=0, microsecond=0)
+    window = timedelta(minutes=window_minutes)
+    if local < start:
+        previous_start = start - timedelta(days=1)
+        return previous_start <= local < previous_start + window
+    return start <= local < start + window
+
+
+def is_notification_due(user_id: int, kind: str, local_dt: datetime, prefs: dict) -> bool:
+    if kind == "morning" and not prefs.get("morning_enabled", True):
+        return False
+    if kind == "evening" and not prefs.get("evening_enabled", True):
+        return False
+    if not should_send_now(local_dt, preferences_from_dict(prefs)):
+        return False
+    return notification_due_in_window(local_dt, _notification_time(user_id, prefs, kind))
+
 def _local_now(user_id: int) -> datetime:
     return user_local_now(user_id)
 
@@ -418,12 +470,8 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
 
         for uid in users:
             prefs = get_notification_preferences(uid)
-            if not prefs.get("morning_enabled", True):
-                continue
             now_loc = _local_now(uid)
-            if not should_send_now(now_loc, preferences_from_dict(prefs)):
-                continue
-            if not (6 <= now_loc.hour < 12):
+            if not is_notification_due(uid, "morning", now_loc, prefs):
                 continue
             if _already_sent_today(uid, "morning"):
                 continue
@@ -470,13 +518,8 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 
         for uid in users:
             prefs = get_notification_preferences(uid)
-            if not prefs.get("evening_enabled", True):
-                continue
-            _off_min, r_hour = _user_tz_and_hour(uid)
             now_loc = _local_now(uid)
-            if not should_send_now(now_loc, preferences_from_dict(prefs)):
-                continue
-            if now_loc.hour != r_hour:
+            if not is_notification_due(uid, "evening", now_loc, prefs):
                 continue
             if _already_sent_today(uid, "evening"):
                 continue
