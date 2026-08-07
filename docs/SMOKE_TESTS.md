@@ -209,9 +209,19 @@ Run after deployment and restart.
 - Confirm `Расходы`, `Доходы` and a concrete category filter update Home, Operations and Analytics consistently.
 - Confirm Radar shows absolute money values, full long category names and adaptive tick labels.
 - Confirm Analytics details under Dynamics and Category Structure are collapsed initially.
-- Confirm Activity calendar changes with period/type/category filters and does not create whole-app horizontal scroll.
+- Confirm Analytics no longer shows the Activity calendar.
+- Confirm Home shows Financial Result and Activity side by side on a regular Telegram mobile width, then stacks safely on very narrow width.
+- Confirm Home Activity heatmap changes with period/type/category filters and uses internal scroll for long custom periods without whole-app horizontal scroll.
+- Confirm Home Activity shows current streak and active days for the selected slice.
 - Confirm Home focus shows a progress bar and prioritizes exceeded/high-risk limits or goals.
-- Confirm Home shows upcoming, overdue or completed-today reminder states from the existing bot reminder flow.
+- Confirm Home shows upcoming or overdue reminder states from the existing bot reminder flow.
+- Confirm tapping Home reminder opens the reminder sheet.
+- Confirm overdue reminder primary action records a real operation, the reminder disappears or advances, and the operation appears in history.
+- Confirm double-tapping reminder record does not create a duplicate operation.
+- Confirm Plans has `Цели`, `Лимиты и бюджеты`, and `Напоминания` modes.
+- Confirm Plans Reminders can create, edit, snooze, toggle, delete and record reminders shared with the Telegram bot.
+- Confirm Plans Limits shows General limits, Category budgets and Category limits without duplicate "Общий лимит" concepts.
+- Confirm category budget create/edit only allows existing expense categories.
 - Confirm the bottom navigation has exactly Operations, Analytics, Home, Plans and Profile.
 - Confirm Home is the centered tab.
 - Confirm every visible bottom tab opens a handled screen.

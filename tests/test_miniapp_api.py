@@ -132,21 +132,52 @@ def test_activity_calendar_counts_operations_not_amount(monkeypatch):
     assert [day["count"] for day in calendar["days"]] == [2, 0, 1]
 
 
-def test_home_reminder_completed_today_uses_existing_events(monkeypatch):
+def test_activity_calendar_summary_counts_streak_for_selected_slice(monkeypatch):
     api = _api(monkeypatch)
-    monkeypatch.setattr("miniapp.api.user_timezone_name", lambda _user_id: ("Europe/Moscow", None))
+    tx = TransactionFilters(
+        workspace_ids=[10],
+        all_scope=False,
+        start=date(2026, 8, 1),
+        end=date(2026, 8, 4),
+        period_key="custom",
+        operation_type="expense",
+        category="Food",
+        where_sql="workspace_id = ANY(%s) AND op_date BETWEEN %s AND %s",
+        params=([10], date(2026, 8, 1), date(2026, 8, 4)),
+    )
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 4))
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda *_args, **_kwargs: [(date(2026, 8, 1), 1), (date(2026, 8, 3), 2), (date(2026, 8, 4), 1)])
 
-    def _fetch(sql, _params):
-        if "event_type='recorded'" in sql:
-            return [(5, "Интернет", "Подписки", Decimal("800.00"), "RUB", date(2026, 8, 7), date(2026, 9, 7), "monthly", True, None)]
-        return []
+    activity = api._activity_calendar(api.request(42), tx)
 
-    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+    assert activity["current_streak"] == 2
+    assert activity["active_days"] == 3
+    assert activity["operations_count"] == 4
+    assert activity["label"] == "Активность · Food"
+
+
+def test_home_reminder_ignores_completed_today_events(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.list_reminders", lambda *_args, **_kwargs: [])
 
     reminder = api._home_reminder(api.request(42))
 
-    assert reminder["state"] == "completed_today"
-    assert reminder["next_event_date"] == date(2026, 9, 7)
+    assert reminder["state"] == "empty"
+    assert reminder["status_text"] == "Добавьте напоминание в Планах."
+
+
+def test_home_reminder_prioritizes_overdue_from_shared_service(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.list_reminders", lambda *_args, **_kwargs: [
+        {"id": 7, "title": "Интернет", "amount": Decimal("800.00"), "currency": "RUB", "category": "Подписки", "event_date": date(2026, 8, 2), "status": "overdue", "repeat_rule": "monthly", "is_active": True},
+        {"id": 8, "title": "Будущее", "amount": Decimal("100.00"), "currency": "RUB", "category": "Прочее", "event_date": date(2026, 8, 5), "status": "upcoming", "repeat_rule": "none", "is_active": True},
+    ])
+
+    reminder = api._home_reminder(api.request(42))
+
+    assert reminder["state"] == "overdue"
+    assert reminder["id"] == 7
+    assert "Нужно было оплатить" in reminder["status_text"]
 
 
 def test_create_operation_uses_authenticated_actor_and_decimal_amount(monkeypatch):
@@ -251,6 +282,58 @@ def test_create_operation_post_commit_hook_failure_does_not_fail_saved_operation
     })
 
     assert response["data"]["operation"]["id"] == 777
+
+
+def test_record_reminder_endpoint_uses_authenticated_workspace_and_post_commit(monkeypatch):
+    api = _api(monkeypatch)
+    ctx = WorkspaceContext(10, -100, 42, "group", "member", "Family", True)
+    recorded = RecordedOperation(
+        operation_id=778,
+        workspace_id=10,
+        actor_user_id=42,
+        user_id=42,
+        chat_id=-100,
+        amount=Decimal("800.00"),
+        currency="RUB",
+        type="Расходы",
+        category="Подписки",
+        operation_date=date(2026, 8, 2),
+        source="reminder",
+        comment="Интернет",
+    )
+    captured = {}
+    post_commit = []
+    monkeypatch.setattr(api, "_write_scope", lambda _req, workspace_id: ctx if workspace_id == 10 else pytest.fail("bad workspace"))
+    monkeypatch.setattr(
+        api,
+        "_record_reminder_atomically",
+        lambda req, ctx, reminder_id, idem, body, expected: captured.update(req=req, ctx=ctx, reminder_id=reminder_id, idem=idem, expected=expected) or (
+            {"result": "recorded", "operation": {"id": 778}, "reminder": {"id": 7}},
+            recorded,
+            True,
+        ),
+    )
+    monkeypatch.setattr("miniapp.api.record_financial_operation_post_commit", lambda *args, **kwargs: post_commit.append((args, kwargs)))
+
+    response = api.record_reminder(api.request(42), 7, {"workspace_id": 10, "idempotency_key": "rem-key", "event_date": "2026-08-02"})
+
+    assert response["data"]["operation"]["id"] == 778
+    assert captured["req"].user_id == 42
+    assert captured["reminder_id"] == 7
+    assert captured["idem"] == "rem-key"
+    assert captured["expected"] == date(2026, 8, 2)
+    assert post_commit
+
+
+def test_record_reminder_replay_does_not_emit_post_commit(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_write_scope", lambda *_args: WorkspaceContext(10, -100, 42, "group", "member", "Family", True))
+    monkeypatch.setattr(api, "_record_reminder_atomically", lambda *_args, **_kwargs: ({"result": "recorded", "operation": {"id": 778}}, None, False))
+    monkeypatch.setattr("miniapp.api.record_financial_operation_post_commit", lambda *_args, **_kwargs: pytest.fail("replay must not emit post-commit side effects"))
+
+    response = api.record_reminder(api.request(42), 7, {"workspace_id": 10, "idempotency_key": "rem-key"})
+
+    assert response["data"]["operation"]["id"] == 778
 
 
 def test_all_workspaces_are_read_only_for_writes(monkeypatch):
@@ -405,6 +488,178 @@ def test_plans_limit_spent_is_workspace_scoped(monkeypatch):
     data = api.plans(api.request(42), {"workspace_id": 10})["data"]
 
     assert data["limits"][0]["spent"] == "250.00"
+
+
+def test_limit_spent_counts_only_matching_currency(monkeypatch):
+    api = _api(monkeypatch)
+    seen = []
+
+    def _fetch(sql, params=()):
+        assert "COALESCE(currency, %s) = %s" in sql
+        seen.append(params[-1])
+        return [(Decimal("1000.00") if params[-1] == "RUB" else Decimal("100.00"),)]
+
+    monkeypatch.setattr(api, "_workspace_filter_sql", lambda _ids, _user_id: ("workspace_id = ANY(%s)", ([10],)))
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    rub = api._limit_spent(42, 10, "month", None, currency="RUB")
+    eur = api._limit_spent(42, 10, "month", None, currency="EUR")
+
+    assert rub == Decimal("1000.00")
+    assert eur == Decimal("100.00")
+    assert seen == ["RUB", "EUR"]
+
+
+def test_category_budget_spent_counts_only_matching_currency(monkeypatch):
+    api = _api(monkeypatch)
+    seen = []
+
+    def _fetch(sql, params=()):
+        assert "category = ANY(%s)" in sql
+        assert "COALESCE(currency, %s) = %s" in sql
+        seen.append(params[-1])
+        return [(Decimal("1000.00") if params[-1] == "RUB" else Decimal("200.00"),)]
+
+    monkeypatch.setattr(api, "_workspace_filter_sql", lambda _ids, _user_id: ("workspace_id = ANY(%s)", ([10],)))
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    rub = api._category_budget_spent(42, 10, "month", ["Food"], "RUB")
+    eur = api._category_budget_spent(42, 10, "month", ["Food"], "EUR")
+
+    assert rub == Decimal("1000.00")
+    assert eur == Decimal("200.00")
+    assert seen == ["RUB", "EUR"]
+
+
+def test_update_category_budget_without_currency_preserves_existing_currency(monkeypatch):
+    api = _api(monkeypatch)
+    current = {
+        "id": 2,
+        "workspace_id": 10,
+        "name": "Food",
+        "amount": Decimal("300.00"),
+        "currency": "EUR",
+        "period_type": "month",
+        "enabled": False,
+        "alerts_enabled": False,
+        "categories": ("Food",),
+    }
+    captured = {}
+    monkeypatch.setattr(api, "_write_scope", lambda _req, _workspace_id: WorkspaceContext(10, -100, 42, "group", "member", "Family", True))
+    monkeypatch.setattr(api, "_managed_categories", lambda *_args, **_kwargs: [{"name": "Food", "normalized_name": "food"}])
+    monkeypatch.setattr("miniapp.api.list_category_budget_groups", lambda *_args, **_kwargs: [current])
+    monkeypatch.setattr("miniapp.api.update_category_budget_group", lambda **kwargs: captured.update(kwargs) or 2)
+    monkeypatch.setattr(api, "_category_budget_spent", lambda *_args, **_kwargs: Decimal("0.00"))
+
+    data = api.update_category_budget(api.request(42), 2, {
+        "workspace_id": 10,
+        "title": "Food updated",
+        "amount": "400.00",
+        "period": "month",
+        "categories": ["Food"],
+    })["data"]
+
+    assert captured["currency"] == "EUR"
+    assert captured["enabled"] is False
+    assert captured["alerts_enabled"] is False
+    assert data["budget"]["currency"] == "EUR"
+    assert data["budget"]["enabled"] is False
+    assert data["budget"]["alerts_enabled"] is False
+
+
+def test_update_reminder_without_currency_does_not_reset_currency(monkeypatch):
+    api = _api(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(api, "_validate_category", lambda _req, _workspace_id, _op_type, category: category)
+
+    def _update(user_id, reminder_id, **fields):
+        captured.update(fields)
+        return {
+            "id": reminder_id,
+            "title": fields["title"],
+            "amount": Decimal("100.00"),
+            "currency": "EUR",
+            "category": fields["category"],
+            "rem_type": "Расходы",
+            "event_date": date(2026, 8, 5),
+            "status": "upcoming",
+            "repeat_rule": "none",
+            "repeat_interval_days": None,
+            "notify_days_before": 1,
+            "is_active": True,
+        }
+
+    monkeypatch.setattr("miniapp.api.update_reminder", _update)
+
+    data = api.update_reminder(api.request(42), 7, {
+        "workspace_id": 10,
+        "title": "Edited",
+        "amount": "100.00",
+        "category": "Food",
+        "rem_type": "expense",
+        "event_date": "2026-08-05",
+        "repeat_rule": "none",
+        "notify_days_before": 1,
+    })["data"]
+
+    assert "currency" not in captured
+    assert data["reminder"]["currency"] == "EUR"
+
+
+def test_plans_separates_general_limits_category_budgets_and_reminders(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_read_scope", lambda _req, _workspace_id: ([10], False))
+    monkeypatch.setattr("miniapp.api.list_goals", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("miniapp.api.list_general_limits", lambda *_args, **_kwargs: [{
+        "id": 1,
+        "workspace_id": 10,
+        "name": "Общий лимит",
+        "amount": Decimal("40000.00"),
+        "currency": "RUB",
+        "period_type": "month",
+        "enabled": True,
+        "alerts_enabled": True,
+    }])
+    monkeypatch.setattr("miniapp.api.list_category_budget_groups", lambda *_args, **_kwargs: [{
+        "id": 2,
+        "workspace_id": 10,
+        "name": "Еда",
+        "amount": Decimal("30000.00"),
+        "currency": "RUB",
+        "period_type": "month",
+        "enabled": True,
+        "alerts_enabled": True,
+        "categories": ("Продукты", "Заведения"),
+    }])
+    monkeypatch.setattr("miniapp.api.list_reminders", lambda *_args, **_kwargs: [{
+        "id": 3,
+        "title": "Интернет",
+        "amount": Decimal("800.00"),
+        "currency": "RUB",
+        "category": "Подписки",
+        "rem_type": "Расходы",
+        "event_date": date(2026, 8, 5),
+        "status": "upcoming",
+        "repeat_rule": "monthly",
+        "notify_days_before": 1,
+        "is_active": True,
+    }])
+
+    def _fetch(sql, _params=()):
+        if "FROM public.category_limits" in sql:
+            return [("month", "Такси", Decimal("5000.00"), "RUB")]
+        if "FROM public.operations" in sql:
+            return [(Decimal("1000.00"),)]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    data = api.plans(api.request(42), {"workspace_id": 10})["data"]
+
+    assert data["general_limits"][0]["kind"] == "general"
+    assert data["category_budgets"][0]["title"] == "Еда"
+    assert data["limits"][0]["kind"] == "category"
+    assert data["reminders"][0]["title"] == "Интернет"
 
 
 def test_overview_keeps_mixed_currencies_unaggregated(monkeypatch):

@@ -18,7 +18,14 @@ from psycopg2.extras import Json
 
 from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency, get_user_locale
-from services.budgeting import list_general_limits
+from services.budgeting import (
+    create_category_budget_group,
+    delete_category_budget_group,
+    list_category_budget_groups,
+    list_general_limits,
+    set_category_budget_group_enabled,
+    update_category_budget_group,
+)
 from services.categories import list_managed_categories, normalized_category_key
 from services.challenges import ChallengeCard, upsert_assignments
 from services.goal_planning import (
@@ -56,6 +63,17 @@ from services.operations import (
     update_financial_operation,
 )
 from services.product_events import ProductEvent, track_product_event
+from services.reminders import (
+    ReminderError,
+    create_reminder,
+    delete_reminder as delete_user_reminder,
+    get_reminder,
+    list_reminders,
+    record_reminder_tx,
+    snooze_reminder,
+    toggle_reminder,
+    update_reminder,
+)
 from services.limit_alerts import alert_status_for_band, threshold_band
 from services.miniapp_limits import (
     MiniAppLimitError,
@@ -65,6 +83,7 @@ from services.miniapp_limits import (
     delete_limit as delete_stored_limit,
     replace_category_limit,
     replace_category_limit_tx,
+    set_general_limit_enabled,
 )
 from services.notification_preferences import (
     TOGGLE_FIELDS,
@@ -651,6 +670,12 @@ class MiniAppAPI:
             return "normal", pct
         return alert_status_for_band(band), int(min(999, (spent / amount * 100).to_integral_value())) if amount > 0 else 0
 
+    def _validated_currency(self, value: Any, *, fallback: str | None = None) -> str:
+        code = str(value or fallback or "RUB").strip().upper()[:8]
+        if code not in ALLOWED_CURRENCIES:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.")
+        return code
+
     def _limit_projection_percent(self, *, spent: Decimal, amount: Decimal, period: str, today: date) -> int | None:
         if amount <= 0 or spent <= 0:
             return None
@@ -681,7 +706,7 @@ class MiniAppAPI:
         workspace_id: int | None,
         alerts_enabled: bool = True,
     ) -> dict:
-        spent = self._limit_spent(user_id, workspace_id, period, category)
+        spent = self._limit_spent(user_id, workspace_id, period, category, currency=currency)
         remaining = amount - spent
         status, percent = self._limit_status(spent, amount)
         return {
@@ -703,7 +728,7 @@ class MiniAppAPI:
         }
 
     def _stored_limit_dict(self, req: MiniAppRequest, stored: StoredLimit) -> dict:
-        return self._limit_dict(
+        data = self._limit_dict(
             user_id=req.user_id,
             kind=stored.kind,
             identifier=stored.identifier,
@@ -715,7 +740,84 @@ class MiniAppAPI:
             workspace_id=stored.workspace_id,
             alerts_enabled=stored.alerts_enabled,
         )
+        if stored.kind == "general":
+            data["enabled"] = stored.enabled
+        return data
 
+    def _general_limit_dict(self, req: MiniAppRequest, item: dict) -> dict:
+        period = str(item.get("period_type") or "month")
+        return self._limit_dict(
+            user_id=req.user_id,
+            kind="general",
+            identifier=f"general:{item['id']}",
+            title=str(item.get("name") or "Общий лимит"),
+            category=None,
+            amount=to_decimal_money(item.get("amount") or 0),
+            currency=str(item.get("currency") or get_user_currency(req.user_id)),
+            period=period,
+            workspace_id=item.get("workspace_id"),
+            alerts_enabled=bool(item.get("alerts_enabled", True)),
+        ) | {"enabled": bool(item.get("enabled", True))}
+
+    def _category_budget_dict(self, req: MiniAppRequest, item: dict) -> dict:
+        period = str(item.get("period_type") or "month")
+        categories = [str(category) for category in item.get("categories") or []]
+        amount = to_decimal_money(item.get("amount") or 0)
+        currency = str(item.get("currency") or get_user_currency(req.user_id))
+        spent = self._category_budget_spent(req.user_id, item.get("workspace_id"), period, categories, currency)
+        remaining = amount - spent
+        status, percent = self._limit_status(spent, amount)
+        return {
+            "id": int(item["id"]),
+            "kind": "category_budget",
+            "title": str(item.get("name") or "Бюджет категорий"),
+            "amount": amount,
+            "currency": currency,
+            "spent": spent,
+            "remaining": remaining,
+            "percent": percent,
+            "period": period,
+            "status": status,
+            "categories": categories,
+            "enabled": bool(item.get("enabled", True)),
+            "alerts_enabled": bool(item.get("alerts_enabled", True)),
+            "workspace_id": item.get("workspace_id"),
+        }
+
+    def _category_budget_spent(self, user_id: int, workspace_id: int | None, period: str, categories: list[str], currency: str) -> Decimal:
+        if not categories:
+            return Decimal("0.00")
+        today = user_local_date(user_id, workspace_id)
+        if period == "week":
+            start = today - timedelta(days=today.weekday())
+            end = start + timedelta(days=6)
+        else:
+            start = today.replace(day=1)
+            end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        where, params = self._workspace_filter_sql([workspace_id], user_id)
+        rows = pg_fetchall(
+            f"""
+            SELECT COALESCE(SUM(amount), 0)
+              FROM public.operations
+             WHERE {where}
+               AND type='Расходы'
+               AND category = ANY(%s)
+               AND op_date BETWEEN %s AND %s
+               AND COALESCE(currency, %s) = %s
+               AND COALESCE(category,'') <> 'Без операций'
+            """,
+            (*params, categories, start, end, get_user_currency(user_id), currency),
+        )
+        return to_decimal_money(rows[0][0] if rows else 0)
+
+    def _activity_label(self, tx: TransactionFilters) -> str:
+        if tx.category:
+            return f"Активность · {tx.category}"
+        if tx.operation_type == "expense":
+            return "Активность · Расходы"
+        if tx.operation_type == "income":
+            return "Активность · Доходы"
+        return "Активность · Все операции"
 
     def overview(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         tx = self._transaction_filters(req, params)
@@ -757,6 +859,7 @@ class MiniAppAPI:
             "focus": self._home_focus(req, params, tx),
             "insight": self._home_insight(req, tx, totals),
             "reminder": self._home_reminder(req),
+            "activity": self._activity_calendar(req, tx),
         }, request_id=req.request_id)
 
     def _home_challenge(self, req: MiniAppRequest) -> dict | None:
@@ -1489,80 +1592,28 @@ class MiniAppAPI:
     def _home_reminder(self, req: MiniAppRequest) -> dict:
         local_today = user_local_date(req.user_id)
         try:
-            completed_rows = pg_fetchall(
-                """
-                SELECT r.id, r.title, r.category, r.amount, r.currency, e.event_date,
-                       r.event_date, r.repeat_rule, r.is_active, e.created_at
-                  FROM public.user_reminder_events e
-                  JOIN public.user_reminders r ON r.id=e.reminder_id AND r.user_id=e.user_id
-                 WHERE e.user_id=%s
-                   AND e.event_type='recorded'
-                   AND (e.created_at AT TIME ZONE %s)::date=%s
-                 ORDER BY e.created_at DESC, e.id DESC
-                 LIMIT 1
-                """,
-                (req.user_id, user_timezone_name(req.user_id)[0], local_today),
-            )
-        except (errors.UndefinedTable, errors.UndefinedColumn):
-            completed_rows = []
-        if completed_rows:
-            rid, title, category, amount, currency, event_date, next_event_date, repeat_rule, is_active, _created_at = completed_rows[0]
-            recurring_next = next_event_date if is_active and repeat_rule != "none" and next_event_date != event_date else None
-            return {
-                "state": "completed_today",
-                "id": int(rid),
-                "title": str(title),
-                "event_date": event_date,
-                "amount_text": format_money(to_decimal_money(amount), currency),
-                "category": str(category),
-                "next_event_date": recurring_next,
-                "status_text": "Оплачено сегодня" if recurring_next else "Завершено сегодня",
-                "overdue_days": 0,
-                "repeat_rule": repeat_rule,
-            }
-        try:
-            overdue_rows = pg_fetchall(
-                """
-                SELECT id, title, category, amount, currency, event_date, repeat_rule
-                  FROM public.user_reminders
-                 WHERE user_id=%s AND is_active=TRUE AND event_date < %s
-                 ORDER BY event_date, id
-                 LIMIT 1
-                """,
-                (req.user_id, local_today),
-            )
-        except (errors.UndefinedTable, errors.UndefinedColumn):
-            overdue_rows = []
-        if overdue_rows:
-            rid, title, category, amount, currency, event_date, repeat_rule = overdue_rows[0]
-            overdue_days = (local_today - event_date).days
+            reminders = list_reminders(req.user_id, active_only=True, today=local_today)
+        except Exception as exc:
+            log.info("miniapp_home_reminders_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
+            reminders = []
+        overdue = next((item for item in reminders if item["status"] == "overdue"), None)
+        if overdue:
+            overdue_days = (local_today - overdue["event_date"]).days
             return {
                 "state": "overdue",
-                "id": int(rid),
-                "title": str(title),
-                "event_date": event_date,
-                "amount_text": format_money(to_decimal_money(amount), currency),
-                "category": str(category),
+                "id": int(overdue["id"]),
+                "title": str(overdue["title"]),
+                "event_date": overdue["event_date"],
+                "amount_text": format_money(to_decimal_money(overdue["amount"]), overdue["currency"]),
+                "category": str(overdue["category"]),
                 "next_event_date": None,
-                "status_text": f"Просрочено на {overdue_days} дн.",
+                "status_text": f"Нужно было оплатить {overdue['event_date'].isoformat()}",
                 "overdue_days": overdue_days,
-                "repeat_rule": repeat_rule,
+                "repeat_rule": overdue["repeat_rule"],
             }
-        try:
-            upcoming_rows = pg_fetchall(
-                """
-                SELECT id, title, category, amount, currency, event_date, repeat_rule
-                  FROM public.user_reminders
-                 WHERE user_id=%s AND is_active=TRUE AND event_date >= %s
-                 ORDER BY event_date, id
-                 LIMIT 1
-                """,
-                (req.user_id, local_today),
-            )
-        except (errors.UndefinedTable, errors.UndefinedColumn):
-            upcoming_rows = []
-        if upcoming_rows:
-            rid, title, category, amount, currency, event_date, repeat_rule = upcoming_rows[0]
+        upcoming = next((item for item in reminders if item["status"] in {"today", "upcoming"}), None)
+        if upcoming:
+            event_date = upcoming["event_date"]
             days = (event_date - local_today).days
             if days == 0:
                 status = "Сегодня"
@@ -1572,15 +1623,15 @@ class MiniAppAPI:
                 status = f"Через {days} дн."
             return {
                 "state": "upcoming",
-                "id": int(rid),
-                "title": str(title),
+                "id": int(upcoming["id"]),
+                "title": str(upcoming["title"]),
                 "event_date": event_date,
-                "amount_text": format_money(to_decimal_money(amount), currency),
-                "category": str(category),
+                "amount_text": format_money(to_decimal_money(upcoming["amount"]), upcoming["currency"]),
+                "category": str(upcoming["category"]),
                 "next_event_date": None,
                 "status_text": status,
                 "overdue_days": 0,
-                "repeat_rule": repeat_rule,
+                "repeat_rule": upcoming["repeat_rule"],
             }
         return {
             "state": "empty",
@@ -1590,7 +1641,7 @@ class MiniAppAPI:
             "amount_text": None,
             "category": None,
             "next_event_date": None,
-            "status_text": "Добавьте напоминание в боте.",
+            "status_text": "Добавьте напоминание в Планах.",
             "overdue_days": 0,
             "repeat_rule": None,
         }
@@ -1606,28 +1657,328 @@ class MiniAppAPI:
             """,
             tx.params,
         )
-        counts = {row[0]: int(row[1] or 0) for row in rows}
+        counts = {}
+        for row in rows:
+            if not isinstance(row[0], date):
+                continue
+            try:
+                counts[row[0]] = int(row[1] or 0)
+            except (TypeError, ValueError):
+                continue
         days = []
         current = tx.start
         max_count = 0
+        active_days = 0
+        operations_count = 0
         while current <= tx.end:
             count = counts.get(current, 0)
             max_count = max(max_count, count)
+            if count > 0:
+                active_days += 1
+                operations_count += count
             days.append({"date": current, "count": count})
             current += timedelta(days=1)
-        return {"start_date": tx.start, "end_date": tx.end, "max_count": max_count, "days": days}
+        today = user_local_date(req.user_id, None if tx.all_scope else tx.workspace_ids[0])
+        streak_cursor = min(today, tx.end)
+        current_streak = 0
+        while streak_cursor >= tx.start and counts.get(streak_cursor, 0) > 0:
+            current_streak += 1
+            streak_cursor -= timedelta(days=1)
+        return {
+            "start_date": tx.start,
+            "end_date": tx.end,
+            "max_count": max_count,
+            "days": days,
+            "current_streak": current_streak,
+            "active_days": active_days,
+            "days_in_period": (tx.end - tx.start).days + 1,
+            "operations_count": operations_count,
+            "label": self._activity_label(tx),
+        }
 
     def plans(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
+        def safe_reminders(workspace_id: int | None = None) -> list[dict]:
+            try:
+                return list_reminders(req.user_id, active_only=False, today=user_local_date(req.user_id, workspace_id))
+            except Exception as exc:
+                log.info("miniapp_plans_reminders_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
+                return []
         if all_scope:
             return success({
                 "read_only": True,
                 "goals": [],
                 "limits": [],
+                "general_limits": [],
+                "category_budgets": [],
+                "reminders": safe_reminders(),
                 "all_scope_note": "Выберите одно пространство, чтобы увидеть цели и лимиты без смешивания данных.",
             }, request_id=req.request_id)
         workspace_id = workspace_ids[0]
-        return success({"read_only": False, "goals": self._goals(req, workspace_id), "limits": self._limits(req, workspace_id), "all_scope_note": None}, request_id=req.request_id)
+        try:
+            general_limit_rows = list_general_limits(req.user_id, workspace_id)
+        except Exception as exc:
+            log.info("miniapp_plans_general_limits_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
+            general_limit_rows = []
+        try:
+            category_budget_rows = list_category_budget_groups(req.user_id, workspace_id)
+        except Exception as exc:
+            log.info("miniapp_plans_category_budgets_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
+            category_budget_rows = []
+        general_limits = [self._general_limit_dict(req, item) for item in general_limit_rows if item.get("period_type") in LIMIT_PERIODS]
+        category_budgets = [self._category_budget_dict(req, item) for item in category_budget_rows if item.get("period_type") in LIMIT_PERIODS]
+        return success({
+            "read_only": False,
+            "goals": self._goals(req, workspace_id),
+            "limits": [item for item in self._limits(req, workspace_id) if item.get("kind") == "category"],
+            "general_limits": general_limits,
+            "category_budgets": category_budgets,
+            "reminders": safe_reminders(workspace_id),
+            "all_scope_note": None,
+        }, request_id=req.request_id)
+
+    def _reminder_dict(self, item: dict[str, Any] | None) -> dict | None:
+        if not item:
+            return None
+        amount = to_decimal_money(item.get("amount") or 0)
+        currency = str(item.get("currency") or "RUB")
+        return {
+            "id": int(item["id"]),
+            "title": str(item.get("title") or ""),
+            "amount": amount,
+            "amount_text": format_money(amount, currency),
+            "currency": currency,
+            "category": str(item.get("category") or "Прочее"),
+            "rem_type": str(item.get("rem_type") or "Расходы"),
+            "event_date": item.get("event_date"),
+            "status": str(item.get("status") or "upcoming"),
+            "repeat_rule": str(item.get("repeat_rule") or "none"),
+            "repeat_interval_days": item.get("repeat_interval_days"),
+            "notify_days_before": int(item.get("notify_days_before") or 0),
+            "next_event_date": item.get("next_event_date"),
+            "is_active": bool(item.get("is_active")),
+        }
+
+    def _reminder_error(self, exc: ReminderError) -> MiniAppError:
+        status = 404 if exc.code == "reminder_not_found" else 403 if exc.code == "reminder_access_denied" else 400
+        messages = {
+            "reminder_not_found": "Напоминание не найдено.",
+            "reminder_inactive": "Напоминание выключено.",
+            "reminder_already_recorded": "Это напоминание уже записано.",
+            "reminder_invalid_date": "Проверьте дату напоминания.",
+            "reminder_invalid_repeat": "Проверьте повтор напоминания.",
+            "reminder_access_denied": "Нет доступа к напоминанию.",
+            "reminder_stale_occurrence": "Напоминание уже изменилось. Обновите экран.",
+            "reminder_title_required": "Введите название напоминания.",
+            "reminder_category_required": "Выберите категорию.",
+        }
+        return MiniAppError(status, exc.code, messages.get(exc.code, "Не получилось обновить напоминание."))
+
+    def _reminder_body(self, req: MiniAppRequest, body: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
+        payload = dict(body)
+        if "currency" in payload:
+            payload["currency"] = self._validated_currency(payload.get("currency"))
+        if "rem_type" in payload or not partial:
+            payload["rem_type"] = OP_TYPES.get(str(payload.get("rem_type") or payload.get("type") or "expense")) or str(payload.get("rem_type") or "")
+        if "category" in payload and payload.get("workspace_id") not in {None, "", "all", "ALL"}:
+            workspace_id = int(payload.get("workspace_id"))
+            op_type = str(payload.get("rem_type") or "Расходы")
+            payload["category"] = self._validate_category(req, workspace_id, op_type, str(payload.get("category") or ""))
+        return payload
+
+    def reminders(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
+        today = user_local_date(req.user_id)
+        self._track(req, "mini_app_plans_reminders_opened", properties={"source": "mini_app", "action": "open"})
+        return success({"items": [self._reminder_dict(item) for item in list_reminders(req.user_id, active_only=False, today=today)]}, request_id=req.request_id)
+
+    def reminder_detail(self, req: MiniAppRequest, reminder_id: int) -> dict:
+        item = get_reminder(req.user_id, int(reminder_id), today=user_local_date(req.user_id))
+        if not item:
+            raise MiniAppError(404, "reminder_not_found", "Напоминание не найдено.")
+        self._track(req, "mini_app_reminder_opened", properties={"source": "mini_app", "reminder_state": str(item.get("status") or "unknown")})
+        return success({"reminder": self._reminder_dict(item)}, request_id=req.request_id)
+
+    def create_reminder(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            item = create_reminder(req.user_id, self._reminder_body(req, body))
+        except ReminderError as exc:
+            raise self._reminder_error(exc) from exc
+        self._track(req, "mini_app_reminder_created", properties={"source": "mini_app", "result": "success", "reminder_state": str(item.get("status") or "upcoming")})
+        return success({"reminder": self._reminder_dict(item)}, request_id=req.request_id)
+
+    def update_reminder(self, req: MiniAppRequest, reminder_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            item = update_reminder(req.user_id, int(reminder_id), **self._reminder_body(req, body, partial=True))
+        except ReminderError as exc:
+            raise self._reminder_error(exc) from exc
+        self._track(req, "mini_app_reminder_updated", properties={"source": "mini_app", "result": "success", "reminder_state": str(item.get("status") or "upcoming")})
+        return success({"reminder": self._reminder_dict(item)}, request_id=req.request_id)
+
+    def delete_reminder(self, req: MiniAppRequest, reminder_id: int) -> dict:
+        self._check_write_rate(req)
+        deleted = delete_user_reminder(req.user_id, int(reminder_id))
+        if not deleted:
+            raise MiniAppError(404, "reminder_not_found", "Напоминание не найдено.")
+        self._track(req, "mini_app_reminder_updated", properties={"source": "mini_app", "result": "deleted", "action": "delete"})
+        return success({"deleted": True, "reminder_id": int(reminder_id)}, request_id=req.request_id)
+
+    def toggle_reminder(self, req: MiniAppRequest, reminder_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            item = toggle_reminder(req.user_id, int(reminder_id), body.get("enabled") if "enabled" in body else None)
+        except ReminderError as exc:
+            raise self._reminder_error(exc) from exc
+        self._track(req, "mini_app_reminder_updated", properties={"source": "mini_app", "result": "enabled" if item.get("is_active") else "disabled", "action": "toggle"})
+        return success({"reminder": self._reminder_dict(item)}, request_id=req.request_id)
+
+    def snooze_reminder(self, req: MiniAppRequest, reminder_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            item = snooze_reminder(req.user_id, int(reminder_id), days=int(body.get("days") or 1))
+        except ReminderError as exc:
+            raise self._reminder_error(exc) from exc
+        self._track(req, "mini_app_reminder_snoozed", properties={"source": "mini_app", "result": "success", "reminder_state": str(item.get("status") or "upcoming")})
+        return success({"reminder": self._reminder_dict(item)}, request_id=req.request_id)
+
+    def record_reminder(self, req: MiniAppRequest, reminder_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        idem = str(body.get("idempotency_key") or "").strip()[:120]
+        if not idem:
+            raise MiniAppError(400, "idempotency_required", "Idempotency key is required.")
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        expected = None
+        if body.get("event_date"):
+            try:
+                expected = date.fromisoformat(str(body.get("event_date")))
+            except ValueError as exc:
+                raise MiniAppError(400, "reminder_invalid_date", "Проверьте дату напоминания.") from exc
+        payload, recorded, created = self._record_reminder_atomically(req, ctx, int(reminder_id), idem, body, expected)
+        if created and recorded:
+            try:
+                record_financial_operation_post_commit(recorded, workspace_kind=ctx.kind, metadata={"source": "reminder"})
+            except Exception as exc:
+                log.info("miniapp_reminder_post_commit_failed operation_id=%s reason=%s", recorded.operation_id, type(exc).__name__)
+            self._track(req, "mini_app_reminder_recorded", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "result": "success", "reminder_state": "recorded"})
+        return success(payload, request_id=req.request_id)
+
+    def _record_reminder_atomically(
+        self,
+        req: MiniAppRequest,
+        ctx: WorkspaceContext,
+        reminder_id: int,
+        idem: str,
+        body: dict[str, Any],
+        expected_event_date: date | None,
+    ) -> tuple[dict, RecordedOperation | None, bool]:
+        key = self._namespaced_idempotency_key("reminder:record", idem)
+        request_hash = self._request_hash(body)
+        conn = get_conn()
+        recorded: RecordedOperation | None = None
+        try:
+            with conn.cursor() as cur:
+                claim = self._claim_idempotency_tx(cur, req.user_id, key, request_hash)
+                if claim["status"] == "completed":
+                    conn.commit()
+                    return claim["response"], None, False
+                if claim["status"] != "claimed":
+                    conn.rollback()
+                    raise MiniAppError(claim["http_status"], claim["status"], claim["message"])
+                try:
+                    result = record_reminder_tx(
+                        cur,
+                        user_id=req.user_id,
+                        reminder_id=reminder_id,
+                        workspace=ctx,
+                        chat_type="group" if ctx.kind == "group" else "private",
+                        expected_event_date=expected_event_date,
+                    )
+                except ReminderError as exc:
+                    raise self._reminder_error(exc) from exc
+                recorded = result.operation
+                operation = self._operation_dict_from_recorded(recorded, workspace_name=ctx.name) if recorded else None
+                response = {"result": result.status, "reminder": self._reminder_dict(result.reminder), "operation": operation}
+                self._complete_idempotency_tx(cur, req.user_id, key, request_hash, response, operation_id=recorded.operation_id if recorded else None)
+            conn.commit()
+            return response, recorded, bool(recorded)
+        except errors.UndefinedTable as exc:
+            conn.rollback()
+            raise MiniAppError(503, "miniapp_not_configured", "Mini App storage is not configured.") from exc
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _category_budget_body(self, req: MiniAppRequest, ctx: WorkspaceContext, body: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
+        period = str(body.get("period") or body.get("period_type") or "month")
+        if period not in LIMIT_PERIODS:
+            raise MiniAppError(400, "bad_budget_period", "Проверьте период бюджета.")
+        raw_categories = body.get("categories") or []
+        if not isinstance(raw_categories, list):
+            raise MiniAppError(400, "budget_invalid_categories", "Выберите категории из списка.")
+        allowed = {item["normalized_name"]: item["name"] for item in self._managed_categories(req, ctx.workspace_id, "Расходы")}
+        selected = []
+        for category in raw_categories:
+            name = str(category or "").strip()[:64]
+            key = normalized_category_key(name)
+            if key not in allowed:
+                raise MiniAppError(400, "budget_invalid_categories", "Выберите категории из списка.")
+            selected.append(allowed[key])
+        if not selected:
+            raise MiniAppError(400, "budget_invalid_categories", "Выберите хотя бы одну категорию.")
+        return {
+            "name": str(body.get("title") or body.get("name") or "Бюджет категорий").strip()[:120],
+            "amount": to_decimal_money(body.get("amount"), positive=True),
+            "currency": self._validated_currency(body.get("currency"), fallback=str((existing or {}).get("currency") or get_user_currency(req.user_id))),
+            "period_type": period,
+            "categories": selected,
+            "enabled": bool(body["enabled"]) if "enabled" in body else bool((existing or {}).get("enabled", True)),
+            "alerts_enabled": bool(body["alerts_enabled"]) if "alerts_enabled" in body else bool((existing or {}).get("alerts_enabled", True)),
+        }
+
+    def create_category_budget(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        payload = self._category_budget_body(req, ctx, body)
+        group_id = create_category_budget_group(user_id=req.user_id, workspace_id=ctx.workspace_id, **payload)
+        item = next((row for row in list_category_budget_groups(req.user_id, ctx.workspace_id) if int(row["id"]) == int(group_id)), None)
+        if not item:
+            raise MiniAppError(404, "budget_not_found", "Бюджет не найден.")
+        self._track(req, "mini_app_budget_created", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "budget_kind": "category_group", "period_kind": payload["period_type"], "result": "success"})
+        return success({"budget": self._category_budget_dict(req, item)}, request_id=req.request_id)
+
+    def update_category_budget(self, req: MiniAppRequest, group_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        if "toggle" in body:
+            try:
+                item = set_category_budget_group_enabled(user_id=req.user_id, workspace_id=ctx.workspace_id, group_id=int(group_id), enabled=bool(body.get("enabled")) if "enabled" in body else None, alerts_enabled=bool(body.get("alerts_enabled")) if "alerts_enabled" in body else None)
+            except LookupError as exc:
+                raise MiniAppError(404, "budget_not_found", "Бюджет не найден.") from exc
+        else:
+            current = next((row for row in list_category_budget_groups(req.user_id, ctx.workspace_id) if int(row["id"]) == int(group_id)), None)
+            if not current:
+                raise MiniAppError(404, "budget_not_found", "Бюджет не найден.")
+            payload = self._category_budget_body(req, ctx, body, existing=current)
+            try:
+                update_category_budget_group(user_id=req.user_id, workspace_id=ctx.workspace_id, group_id=int(group_id), **payload)
+            except LookupError as exc:
+                raise MiniAppError(404, "budget_not_found", "Бюджет не найден.") from exc
+            item = next((row for row in list_category_budget_groups(req.user_id, ctx.workspace_id) if int(row["id"]) == int(group_id)), None)
+            if not item:
+                raise MiniAppError(404, "budget_not_found", "Бюджет не найден.")
+        self._track(req, "mini_app_budget_created", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "budget_kind": "category_group", "action": "update", "result": "success"})
+        return success({"budget": self._category_budget_dict(req, item)}, request_id=req.request_id)
+
+    def delete_category_budget(self, req: MiniAppRequest, group_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        if not delete_category_budget_group(user_id=req.user_id, workspace_id=ctx.workspace_id, group_id=int(group_id)):
+            raise MiniAppError(404, "budget_not_found", "Бюджет не найден.")
+        self._track(req, "mini_app_budget_created", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "budget_kind": "category_group", "action": "delete", "result": "success"})
+        return success({"deleted": True, "budget_id": int(group_id)}, request_id=req.request_id)
 
     def _goals(self, req: MiniAppRequest, workspace_id: int | None, *, status_group: str = "active") -> list[dict]:
         goals = list_goals(req.user_id, workspace_id, status_group=status_group, limit=50)
@@ -1866,7 +2217,7 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")
         amount = to_decimal_money(body.get("amount"), positive=True)
         scope = str(body.get("scope") or "category")
-        currency = str(body.get("currency") or get_user_currency(req.user_id))[:8]
+        currency = self._validated_currency(body.get("currency"), fallback=get_user_currency(req.user_id))
         try:
             if scope == "all_expenses":
                 stored = create_or_update_general_limit_tx(cur, user_id=req.user_id, workspace_id=ctx.workspace_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
@@ -1881,11 +2232,25 @@ class MiniAppAPI:
         self._check_write_rate(req)
         ctx = self._write_scope(req, body.get("workspace_id"))
         decoded = unquote(limit_id)
+        if "toggle" in body and decoded.startswith("general:"):
+            raw_id = int(decoded.split(":", 1)[1])
+            try:
+                stored = set_general_limit_enabled(
+                    user_id=req.user_id,
+                    workspace_id=ctx.workspace_id,
+                    limit_id=raw_id,
+                    enabled=bool(body.get("enabled")) if "enabled" in body else None,
+                    alerts_enabled=bool(body.get("alerts_enabled")) if "alerts_enabled" in body else None,
+                )
+            except MiniAppLimitError as exc:
+                raise MiniAppError(404 if exc.code == "limit_not_found" else 400, exc.code, "Limit could not be updated.") from exc
+            self._track(req, "mini_app_budget_limit_updated", workspace_id=ctx.workspace_id, properties={"action": "toggle", "source": "mini_app"})
+            return success({"limit": self._stored_limit_dict(req, stored), "id": decoded}, request_id=req.request_id)
         period = str(body.get("period") or "month")
         if period not in LIMIT_PERIODS:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")
         amount = to_decimal_money(body.get("amount"), positive=True)
-        currency = str(body.get("currency") or get_user_currency(req.user_id))[:8]
+        currency = self._validated_currency(body.get("currency"), fallback=get_user_currency(req.user_id)) if body.get("currency") else None
         if decoded.startswith("general:"):
             raw_id = int(decoded.split(":", 1)[1])
             try:
@@ -1927,7 +2292,7 @@ class MiniAppAPI:
         self._track(req, "mini_app_budget_limit_deleted", workspace_id=ctx.workspace_id, properties={"action": "delete", "source": "mini_app"})
         return success({"deleted": True, "limit_id": decoded}, request_id=req.request_id)
 
-    def _limit_spent(self, user_id: int, workspace_id: int | None, period: str, category: str | None, today: date | None = None) -> Decimal:
+    def _limit_spent(self, user_id: int, workspace_id: int | None, period: str, category: str | None, today: date | None = None, *, currency: str) -> Decimal:
         today = today or user_local_date(user_id, workspace_id)
         if period == "week":
             start = today - timedelta(days=today.weekday())
@@ -1947,10 +2312,11 @@ class MiniAppAPI:
                AND type='Расходы'
                {category_filter}
                AND op_date BETWEEN %s AND %s
+               AND COALESCE(currency, %s) = %s
                AND COALESCE(type,'') <> 'noop'
                AND COALESCE(category,'') <> 'Без операций'
             """,
-            (*params, *category_params, start, end),
+            (*params, *category_params, start, end, get_user_currency(user_id), currency),
         )
         return to_decimal_money(rows[0][0] if rows else 0)
 
@@ -2146,8 +2512,16 @@ class MiniAppAPI:
             "mini_app_global_filter_opened",
             "mini_app_global_filter_applied",
             "mini_app_activity_calendar_opened",
+            "mini_app_activity_opened",
             "mini_app_analytics_details_toggled",
             "mini_app_analytics_grouping_changed",
+            "mini_app_budget_opened",
+            "mini_app_plans_reminders_opened",
+            "mini_app_reminder_opened",
+            "mini_app_reminder_created",
+            "mini_app_reminder_recorded",
+            "mini_app_reminder_snoozed",
+            "mini_app_reminder_updated",
             "mini_app_home_reminder_opened",
             "mini_app_transaction_add_opened",
             "mini_app_analytics_chart_filter_changed",
@@ -2164,7 +2538,7 @@ class MiniAppAPI:
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section"}
+            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section", "reminder_state", "budget_kind"}
         }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)

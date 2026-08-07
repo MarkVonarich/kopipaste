@@ -72,3 +72,27 @@ def test_delete_financial_operation_tracks_side_effect(monkeypatch):
     assert conn.committed is True
     assert "DELETE FROM public.operations" in conn.cursor_obj.executed[0][0]
     assert events[0].event_name == "operation_deleted"
+
+
+def test_insert_financial_operation_without_currency_uses_default(monkeypatch):
+    from services import operations
+    from services.workspaces import WorkspaceContext
+
+    cur = _Cursor([(77,)])
+    monkeypatch.setattr(operations, "get_user_currency", lambda _user_id: "RUB")
+
+    recorded = operations.insert_financial_operation_tx(
+        cur,
+        chat_id=42,
+        actor_user_id=42,
+        op_date=date(2026, 8, 4),
+        op_type="Расходы",
+        category="Food",
+        amount="100.00",
+        comment="Lunch",
+        workspace=WorkspaceContext(None, 42, 42, "legacy_personal", "owner", "Личное", True),
+    )
+
+    insert_params = cur.executed[0][1]
+    assert recorded.currency == "RUB"
+    assert insert_params[-2] == "RUB"

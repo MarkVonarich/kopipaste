@@ -55,6 +55,12 @@ class _Cursor:
         compact = " ".join(sql.split())
         self._next = None
         self.rowcount = 0
+        if compact.startswith("SELECT currency FROM public.category_limits"):
+            user_id, workspace_id, period, category = params
+            row = self.conn.rows.get((int(user_id), workspace_id, period, category))
+            if row:
+                self._next = (row["currency"],)
+            return
         if compact.startswith("SELECT 1 FROM public.category_limits"):
             user_id, workspace_id, period, category = params
             if (int(user_id), workspace_id, period, category) in self.conn.rows:
@@ -139,3 +145,24 @@ def test_category_limit_foreign_workspace_update_and_missing_delete_are_safe(mon
     assert delete_limit(user_id=42, workspace_id=99, limit_id="category:month:Food") is False
     assert delete_limit(user_id=42, workspace_id=10, limit_id="category:month:Food") is True
     assert delete_limit(user_id=42, workspace_id=10, limit_id="category:month:Food") is False
+
+
+def test_category_limit_update_without_currency_preserves_existing_currency(monkeypatch):
+    db = _LimitDB()
+    db.rows[(42, 10, "month", "Food")]["currency"] = "EUR"
+    monkeypatch.setattr("services.miniapp_limits.get_conn", lambda: _Conn(db))
+
+    stored = replace_category_limit(
+        user_id=42,
+        workspace_id=10,
+        old_period="month",
+        old_category="Food",
+        period="month",
+        category="Food",
+        amount="900.00",
+        currency=None,
+        require_existing=True,
+    )
+
+    assert stored.currency == "EUR"
+    assert db.rows[(42, 10, "month", "Food")]["currency"] == "EUR"

@@ -111,11 +111,11 @@ describe('mini app design system semantics', () => {
   });
 
   it('renders segmented controls and read-only disabled actions', () => {
-    const plans = doc(PlansScreen({ goals: [], limits: [] }, 'goals', true));
+    const plans = doc(PlansScreen({ goals: [], limits: [], general_limits: [], category_budgets: [], reminders: [] }, 'goals', true));
     const readOnlyHome = doc(HomeScreen(overview, [], 'RUB', false));
 
     expect(plans.querySelector('.segmented')?.getAttribute('role')).toBe('tablist');
-    expect(plans.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    expect(plans.querySelectorAll('[role="tab"]')).toHaveLength(3);
     expect(readOnlyHome.querySelector('button[data-action="open-actions"]')?.hasAttribute('disabled')).toBe(true);
     expect(readOnlyHome.querySelector('button[data-kind="expense"]')?.hasAttribute('disabled')).toBe(true);
   });

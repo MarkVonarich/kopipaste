@@ -13,14 +13,14 @@ This inventory is based on the current repository code in `routers/`, `services/
 | Категории: создание custom during flow | Да | Нет | `services.categories.get_or_create_custom_category`; bot callbacks/messages | Bot only | Category lifecycle PR | Mini App currently requires existing category option. |
 | Перенос категорий | Да | Нет | `services.categories.transfer_category`, bot callbacks | Bot only | Category lifecycle PR | No Mini App management UI/API. |
 | Объединение категорий | Да | Нет | `services.categories.rename_category`, duplicate/transfer flows | Bot only | Category lifecycle PR | No Mini App merge/duplicate resolution flow. |
-| Бюджеты | Да | Частично | `db.queries.get_user_budgets`, `services.budgeting`; Mini App Plans limits | Partial | Budget parity PR | Mini App focuses on general/category limits, not every legacy budget screen. |
+| Бюджеты | Да | Да | `services.budgeting`; Mini App Plans limits/category budgets | Parity for general and category-group budgets | Threshold UX polish | Mini App reuses `general_spending_limits` and `category_budget_groups`, not a parallel budget system. |
 | Общие лимиты | Да | Да | `services.budgeting`, `services.miniapp_limits`; `POST/PATCH/DELETE /miniapp/api/limits` with `all_expenses` | Parity | Threshold UX polish | Mini App uses existing limit service and idempotency. |
 | Лимиты категорий | Да | Да | `services.miniapp_limits`, `services.limit_alerts`; `/miniapp/api/limits` | Parity | Category management PR | Usage/status returned by API. |
 | Цели | Да | Да | `services.goals`; `/miniapp/api/goals`, plan preview, contributions, reminders, status | Parity | Goal detail/history PR | Mini App supports preview-before-save and idempotent creates. |
 | Челленджи | Да | Частично | `services.challenges`, bot callbacks, `GET /miniapp/api/overview` | Home card | Mini App challenges PR | Home shows daily challenge progress from existing assignments; full challenge screens stay in bot. |
 | Достижения | Да | Нет | `services.achievements`, challenge/notification flows | Bot only | Mini App challenges PR | No Mini App achievement screen/API. |
-| Напоминания | Да | Частично | `routers.commands.cmd_reminders`, `user_reminders`; Mini App notification preferences | Partial | Reminders PR | Mini App can toggle notifications/quiet hours but not manage reminders. |
-| Регулярные платежи | Да | Нет | `user_reminders`, `services.reminder_totals`, recurring notification facts | Bot only | Reminders PR | No Mini App recurring payment CRUD. |
+| Напоминания | Да | Да | `services.reminders`, `user_reminders`, `user_reminder_events`; `/miniapp/api/reminders` | Parity | Polish/history PR | Mini App and bot share the same reminders table and record/snooze semantics. |
+| Регулярные платежи | Да | Да | `services.reminders`, recurring `repeat_rule` fields | Parity | Polish/history PR | Recording a recurring reminder advances the existing reminder to the next event date. |
 | Недельные отчёты | Да | Нет | `jobs.daily.build_weekly_report_text`, admin/report callbacks | Bot only | Reports PR | Mini App has analytics, not report generation. |
 | Месячные отчёты | Да | Нет | `jobs.daily.build_monthly_report_text`, report callbacks | Bot only | Reports PR | Mini App has analytics, not monthly report delivery. |
 | Excel export | Да | Частично | `services.export_xlsx`; `GET/POST /miniapp/api/profile/export` | Partial | Export PR | Mini App exposes export info/entry to existing Telegram flow, not file download. |
@@ -44,9 +44,12 @@ This inventory is based on the current repository code in `routers/`, `services/
 - Home insight never adds mixed currencies together and falls back safely when previous-period data is unavailable.
 - Global financial filters now cover period, current week, operation type and category across Home, Operations and Analytics.
 - Analytics Radar compares absolute category amounts in one selected currency with adaptive money ticks and full category labels.
-- Analytics includes an activity calendar based on operation counts, not amounts, and keeps Dynamics/Category Structure details collapsed by default.
+- Home includes the activity calendar based on operation counts, not amounts, plus current streak and active-days summary for the selected global filter slice.
+- Analytics keeps Dynamics/Category Structure details collapsed by default and no longer displays the Activity calendar.
 - Home focus uses risk severity for limits and goals and renders the same progress-bar language used by Plans.
-- Home includes the nearest reminder read model from the existing bot reminders and `user_reminder_events`.
+- Home includes the nearest reminder read model from the existing bot reminders; tapping it opens actions and record creates a real financial operation.
+- Plans now has `Цели`, `Лимиты и бюджеты`, and `Напоминания`; reminders support create/edit/toggle/snooze/delete/record through the existing `user_reminders` domain.
+- Plans separates Общие лимиты, Бюджеты категорий and Лимиты категорий. General limits use `general_spending_limits`; category budgets use `category_budget_groups`.
 - Telegram launch supports the persistent menu button label `Открыть`, `/app`, and manual BotFather Main Mini App setup.
 - Profile uses single-open accordion sections for User, Appearance, Workspaces, Categories, Notifications, Export/Data, Premium, Help and Legal.
 - Preferred name is shared with bot confirmations through `public.users.preferred_name`.

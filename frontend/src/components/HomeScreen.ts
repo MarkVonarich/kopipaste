@@ -1,6 +1,7 @@
 import { formatMoneyString, subtractMoneyStrings } from '../money';
 import type { GlobalFinancialFilters, HomeReminderSummary, Operation } from '../types';
 import type { Overview } from '../api';
+import { ActivityCalendarView } from './ActivityCalendar';
 import { TransactionList } from './TransactionList';
 import { EmptyPanel, SectionHeader, esc, icon } from './ui';
 
@@ -58,7 +59,8 @@ function reminderCard(reminder: HomeReminderSummary | null | undefined): string 
   const date = reminder?.event_date || '';
   const status = reminder?.status_text || 'Добавьте напоминание в боте.';
   const next = reminder?.next_event_date ? `<small>Следующее: ${esc(reminder.next_event_date)}</small>` : '';
-  const label = state === 'overdue' ? 'Просрочено' : state === 'completed_today' ? 'Выполнено' : 'Ближайшее напоминание';
+  const label = state === 'overdue' ? 'Просрочено' : 'Ближайшее напоминание';
+  const action = state === 'overdue' ? 'Записать оплату' : state === 'upcoming' ? 'Записать сейчас' : 'Все напоминания';
   return `
     <button class="smart-card reminder-card ${esc(state)}" data-action="home-reminder" type="button">
       <span>${esc(label)}</span>
@@ -66,7 +68,23 @@ function reminderCard(reminder: HomeReminderSummary | null | undefined): string 
       ${date ? `<small>${esc(date)}</small>` : ''}
       <small>${esc(status)}</small>
       ${next}
+      <small class="cta-text">${esc(action)}</small>
     </button>
+  `;
+}
+
+function activityCard(overview: Overview | null): string {
+  const activity = overview?.activity;
+  const streak = activity?.current_streak || 0;
+  const activeDays = activity?.active_days || 0;
+  const days = activity?.days_in_period || activity?.days?.length || 0;
+  return `
+    <section class="hero-activity" data-testid="home-activity-card">
+      <span class="eyebrow">${esc(activity?.label || 'Активность')}</span>
+      <strong>${streak ? `${streak} дней подряд` : 'Нет серии без пропусков'}</strong>
+      <p>${activeDays} активных дней за период${days ? ` из ${days}` : ''}</p>
+      ${ActivityCalendarView(activity, true)}
+    </section>
   `;
 }
 
@@ -78,23 +96,26 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
   const insight = overview?.insight;
   return `
     <section class="screen home-screen">
-      <div class="hero-metric" data-testid="hero-financial-result" aria-label="Доходы − Расходы">
-        <span class="eyebrow">${esc(heroTitle(filters))}</span>
-        <strong>${esc(heroAmount(overview, filters, fallbackCurrency))}</strong>
-        ${period ? `<p>${esc(period)}</p>` : ''}
-        <p>${esc(heroSubtitle(filters))}</p>
-        <div class="currency-lines" aria-label="Финансовый результат по валютам">
-          ${Object.keys(overview?.totals_by_currency || {}).map((currency) => {
-            const totals = overview?.totals_by_currency[currency];
-            const result = filters.operation_type === 'expense'
-              ? totals?.expense || '0.00'
-              : filters.operation_type === 'income'
-                ? totals?.income || '0.00'
-                : totals ? subtractMoneyStrings(totals.income, totals.expense) : '0.00';
-            return `<span>${esc(currency)} · ${esc(formatMoneyString(result, currency))}</span>`;
-          }).join('') || `<span>${esc(formatMoneyString('0.00', fallbackCurrency))}</span>`}
+      <div class="home-hero-grid">
+        <div class="hero-metric" data-testid="hero-financial-result" aria-label="Доходы − Расходы">
+          <span class="eyebrow">${esc(heroTitle(filters))}</span>
+          <strong>${esc(heroAmount(overview, filters, fallbackCurrency))}</strong>
+          ${period ? `<p>${esc(period)}</p>` : ''}
+          <p>${esc(heroSubtitle(filters))}</p>
+          <div class="currency-lines" aria-label="Финансовый результат по валютам">
+            ${Object.keys(overview?.totals_by_currency || {}).map((currency) => {
+              const totals = overview?.totals_by_currency[currency];
+              const result = filters.operation_type === 'expense'
+                ? totals?.expense || '0.00'
+                : filters.operation_type === 'income'
+                  ? totals?.income || '0.00'
+                  : totals ? subtractMoneyStrings(totals.income, totals.expense) : '0.00';
+              return `<span>${esc(currency)} · ${esc(formatMoneyString(result, currency))}</span>`;
+            }).join('') || `<span>${esc(formatMoneyString('0.00', fallbackCurrency))}</span>`}
+          </div>
+          ${overview && !overview.aggregation_available ? '<p class="caption">Валюты показаны отдельно. Разные валюты не складываются.</p>' : ''}
         </div>
-        ${overview && !overview.aggregation_available ? '<p class="caption">Валюты показаны отдельно. Разные валюты не складываются.</p>' : ''}
+        ${activityCard(overview)}
       </div>
       <div class="home-columns" data-testid="income-expense-columns">
         <div class="home-column income" data-testid="income-column">

@@ -95,11 +95,16 @@ export type ActivityCalendar = {
   start_date: string;
   end_date: string;
   max_count: number;
+  current_streak?: number;
+  active_days?: number;
+  days_in_period?: number;
+  operations_count?: number;
+  label?: string;
   days: ActivityDay[];
 };
 
 export type HomeReminderSummary = {
-  state: 'upcoming' | 'overdue' | 'completed_today' | 'empty';
+  state: 'upcoming' | 'overdue' | 'empty';
   id?: number | null;
   title: string;
   event_date?: string | null;
@@ -109,6 +114,25 @@ export type HomeReminderSummary = {
   status_text: string;
   overdue_days: number;
   repeat_rule?: string | null;
+};
+
+export type ReminderStatus = 'overdue' | 'today' | 'upcoming' | 'inactive';
+
+export type Reminder = {
+  id: number;
+  title: string;
+  amount: string;
+  amount_text: string;
+  currency: string;
+  category: string;
+  rem_type: OperationType;
+  event_date: string;
+  status: ReminderStatus;
+  repeat_rule: 'none' | 'weekly' | 'monthly' | 'yearly' | 'custom_days';
+  repeat_interval_days?: number | null;
+  notify_days_before: number;
+  next_event_date?: string | null;
+  is_active: boolean;
 };
 
 export type Goal = {
@@ -175,6 +199,63 @@ export type BudgetLimit = {
   alerts_enabled: boolean;
   workspace_id: number | null;
   icon: string;
+  enabled?: boolean;
+};
+
+export type GeneralSpendingLimit = BudgetLimit & {
+  enabled?: boolean;
+};
+
+export type CategoryBudgetGroup = {
+  id: number;
+  kind: 'category_budget';
+  title: string;
+  amount: string;
+  currency: string;
+  spent: string;
+  remaining: string;
+  percent: number;
+  period: string;
+  status: string;
+  categories: string[];
+  enabled: boolean;
+  alerts_enabled: boolean;
+  workspace_id: number | null;
+};
+
+export type ReminderPayload = {
+  workspace_id: number | 'all' | null;
+  title: string;
+  amount: string;
+  currency?: string;
+  category: string;
+  rem_type: 'expense' | 'income' | OperationType;
+  event_date: string;
+  repeat_rule: Reminder['repeat_rule'];
+  repeat_interval_days?: number | null;
+  notify_days_before: number;
+  is_active?: boolean;
+};
+
+export type ReminderRecordPayload = {
+  workspace_id: number | 'all' | null;
+  idempotency_key: string;
+  event_date?: string;
+};
+
+export type ReminderSnoozePayload = {
+  days?: number;
+};
+
+export type CategoryBudgetPayload = {
+  workspace_id: number | 'all' | null;
+  title: string;
+  amount: string;
+  currency?: string;
+  period: 'week' | 'month';
+  categories: string[];
+  enabled?: boolean;
+  alerts_enabled?: boolean;
 };
 
 export type NotificationPreferences = {
@@ -243,10 +324,10 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
   profileAccordion?: ProfileSection;
   selectedWorkspaceId?: number;
-  plansMode?: 'goals' | 'limits';
+  plansMode?: 'goals' | 'limits' | 'reminders';
   analyticsFilters?: {
     categoryType: 'expense' | 'income';
     dynamicsType: 'expense' | 'income' | 'both';
@@ -258,4 +339,9 @@ export type AppState = {
   };
   selectedGoalId?: number;
   selectedLimitId?: string;
+  selectedReminderId?: number;
+  selectedCategoryBudgetId?: number;
+  reminderIdempotencyKey?: string;
+  limitCreateScope?: 'all_expenses' | 'category';
+  reminderDraft?: Partial<ReminderPayload>;
 };

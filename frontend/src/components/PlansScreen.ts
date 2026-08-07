@@ -1,5 +1,5 @@
 import { formatMoneyString } from '../money';
-import type { BudgetLimit, Goal, GoalPlanPreview } from '../types';
+import type { BudgetLimit, CategoryBudgetGroup, GeneralSpendingLimit, Goal, GoalPlanPreview, Reminder } from '../types';
 import { EmptyPanel, ProgressBar, SectionHeader, esc, icon } from './ui';
 
 type PlansData = {
@@ -7,6 +7,9 @@ type PlansData = {
   read_only?: boolean;
   goals: Goal[];
   limits: BudgetLimit[];
+  general_limits?: GeneralSpendingLimit[];
+  category_budgets?: CategoryBudgetGroup[];
+  reminders?: Reminder[];
 };
 
 function statusLabel(status: string): string {
@@ -50,14 +53,26 @@ function goalCard(goal: Goal): string {
   `;
 }
 
-function limitCard(limit: BudgetLimit): string {
+function periodLabel(period: string): string {
+  return period === 'week' ? 'Неделя' : 'Месяц';
+}
+
+function repeatLabel(reminder: Reminder): string {
+  if (reminder.repeat_rule === 'weekly') return 'еженедельно';
+  if (reminder.repeat_rule === 'monthly') return 'ежемесячно';
+  if (reminder.repeat_rule === 'yearly') return 'ежегодно';
+  if (reminder.repeat_rule === 'custom_days') return `каждые ${reminder.repeat_interval_days || 1} дн.`;
+  return 'не повторять';
+}
+
+function limitCard(limit: BudgetLimit | GeneralSpendingLimit): string {
   const tone = limit.percent >= 100 ? 'danger' : limit.percent >= 90 ? 'danger' : limit.percent >= 80 ? 'warning' : limit.percent >= 50 ? 'accent' : '';
   return `
     <article class="plan-card limit-card ${esc(limit.status)}" data-limit-id="${esc(limit.id)}">
       <div class="entity-head">
         <div>
           <h3>${esc(limit.title)}</h3>
-          <p>${limit.period === 'week' ? 'Неделя' : 'Месяц'} · ${limit.scope === 'all_expenses' ? 'Все расходы' : esc(limit.category)}</p>
+          <p>${periodLabel(limit.period)} · ${limit.scope === 'all_expenses' ? 'Все расходы' : esc(limit.category)}</p>
         </div>
         <span class="pill">${esc(statusLabel(limit.status))}</span>
       </div>
@@ -66,14 +81,64 @@ function limitCard(limit: BudgetLimit): string {
       <div class="detail-row light"><span>Осталось</span><strong>${formatMoneyString(limit.remaining, limit.currency)}</strong></div>
       <div class="actions">
         <button class="button secondary" data-action="limit-edit" data-id="${esc(limit.id)}">Изменить</button>
+        ${limit.kind === 'general' ? `<button class="button text" data-action="limit-toggle" data-id="${esc(limit.id)}">${limit.enabled === false ? 'Включить' : 'Выключить'}</button>` : ''}
         <button class="button danger" data-action="limit-delete" data-id="${esc(limit.id)}">Удалить</button>
       </div>
     </article>
   `;
 }
 
-export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' = 'goals', canWrite = false): string {
-  if (plans?.all_scope_note) {
+function categoryBudgetCard(budget: CategoryBudgetGroup): string {
+  const tone = budget.percent >= 100 ? 'danger' : budget.percent >= 80 ? 'warning' : budget.percent >= 50 ? 'accent' : '';
+  return `
+    <article class="plan-card budget-card ${budget.enabled ? '' : 'inactive'}" data-budget-id="${budget.id}">
+      <div class="entity-head">
+        <div>
+          <h3>${esc(budget.title)}</h3>
+          <p>${periodLabel(budget.period)} · ${budget.categories.length} категорий</p>
+        </div>
+        <span class="pill">${budget.enabled ? esc(statusLabel(budget.status)) : 'выключен'}</span>
+      </div>
+      ${ProgressBar(budget.percent, 'Использовано', tone)}
+      <div class="detail-row light"><span>Потрачено</span><strong>${formatMoneyString(budget.spent, budget.currency)} / ${formatMoneyString(budget.amount, budget.currency)}</strong></div>
+      <div class="detail-row light"><span>Осталось</span><strong>${formatMoneyString(budget.remaining, budget.currency)}</strong></div>
+      <p class="chip-line">${budget.categories.map((category) => `<span class="chip">${esc(category)}</span>`).join('')}</p>
+      <div class="actions">
+        <button class="button secondary" data-action="category-budget-edit" data-id="${budget.id}">Изменить</button>
+        <button class="button text" data-action="category-budget-toggle" data-id="${budget.id}">${budget.enabled ? 'Выключить' : 'Включить'}</button>
+      </div>
+      <button class="button danger" data-action="category-budget-delete" data-id="${budget.id}">Удалить</button>
+    </article>
+  `;
+}
+
+function reminderCard(reminder: Reminder): string {
+  const status = reminder.status === 'overdue' ? 'ПРОСРОЧЕНО' : reminder.status === 'today' ? 'Сегодня' : reminder.status === 'inactive' ? 'Выключено' : 'Будущее';
+  const primary = reminder.status === 'overdue' ? 'Оплачено — записать' : 'Записать операцию';
+  return `
+    <article class="plan-card reminder-item ${esc(reminder.status)}" data-reminder-id="${reminder.id}">
+      <div class="entity-head">
+        <div>
+          <h3>${esc(reminder.title)}</h3>
+          <p>${esc(reminder.category)} · ${esc(reminder.rem_type)}</p>
+        </div>
+        <span class="pill">${esc(status)}</span>
+      </div>
+      <div class="detail-row light"><span>Сумма</span><strong>${esc(reminder.amount_text)}</strong></div>
+      <div class="detail-row light"><span>Дата</span><strong>${esc(reminder.event_date)}</strong></div>
+      <div class="detail-row light"><span>Повтор</span><strong>${esc(repeatLabel(reminder))}</strong></div>
+      <div class="detail-row light"><span>Напомнить</span><strong>за ${reminder.notify_days_before} дн.</strong></div>
+      ${reminder.next_event_date ? `<div class="detail-row light"><span>Следующая</span><strong>${esc(reminder.next_event_date)}</strong></div>` : ''}
+      <div class="actions">
+        <button class="button primary" data-action="reminder-record" data-id="${reminder.id}" ${reminder.is_active ? '' : 'disabled'}>${esc(primary)}</button>
+        <button class="button secondary" data-action="reminder-open" data-id="${reminder.id}">Открыть</button>
+      </div>
+    </article>
+  `;
+}
+
+export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 'reminders' = 'goals', canWrite = false): string {
+  if (plans?.all_scope_note && mode !== 'reminders') {
     return `<section class="screen">${EmptyPanel('Выберите пространство', plans.all_scope_note)}</section>`;
   }
   return `
@@ -81,13 +146,21 @@ export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' = 
       <div class="segmented" role="tablist" aria-label="Планы">
         <button data-action="plans-mode" data-mode="goals" class="${mode === 'goals' ? 'active' : ''}" role="tab" aria-selected="${mode === 'goals'}">Цели</button>
         <button data-action="plans-mode" data-mode="limits" class="${mode === 'limits' ? 'active' : ''}" role="tab" aria-selected="${mode === 'limits'}">Лимиты и бюджеты</button>
+        <button data-action="plans-mode" data-mode="reminders" class="${mode === 'reminders' ? 'active' : ''}" role="tab" aria-selected="${mode === 'reminders'}">Напоминания</button>
       </div>
       ${mode === 'goals' ? `
         ${SectionHeader('Цели', 'Крупные намерения и план пополнения', canWrite ? `<button class="icon-button" data-action="goal-create" aria-label="Создать цель">${icon('plus')}</button>` : '')}
         ${(plans?.goals || []).map(goalCard).join('') || EmptyPanel('Целей пока нет', 'Создайте цель, чтобы видеть прогресс и следующий шаг.')}
+      ` : mode === 'limits' ? `
+        ${SectionHeader('Общие лимиты', 'Один предел для расходов периода', canWrite ? `<button class="icon-button" data-action="limit-create" data-scope="all_expenses" aria-label="Создать общий лимит">${icon('plus')}</button>` : '')}
+        ${(plans?.general_limits || []).map(limitCard).join('') || EmptyPanel('Общих лимитов пока нет', 'Добавьте общий лимит на неделю или месяц.')}
+        ${SectionHeader('Бюджеты категорий', 'Несколько категорий под одним бюджетом', canWrite ? `<button class="icon-button" data-action="category-budget-create" aria-label="Создать бюджет категорий">${icon('plus')}</button>` : '')}
+        ${(plans?.category_budgets || []).map(categoryBudgetCard).join('') || EmptyPanel('Бюджетов категорий пока нет', 'Соберите несколько категорий в один бюджет.')}
+        ${SectionHeader('Лимиты категорий', 'Ограничение одной категории', canWrite ? `<button class="icon-button" data-action="limit-create" data-scope="category" aria-label="Создать лимит категории">${icon('plus')}</button>` : '')}
+        ${(plans?.limits || []).map(limitCard).join('') || EmptyPanel('Лимитов категорий пока нет', 'Добавьте лимит на отдельную категорию.')}
       ` : `
-        ${SectionHeader('Лимиты и бюджеты', 'Контроль расходов без лишней тревожности', canWrite ? `<button class="icon-button" data-action="limit-create" aria-label="Создать лимит">${icon('plus')}</button>` : '')}
-        ${(plans?.limits || []).map(limitCard).join('') || EmptyPanel('Лимитов пока нет', 'Добавьте лимит на категорию или все расходы.')}
+        ${SectionHeader('Личные напоминания', 'Те же напоминания, что и в Telegram-боте', canWrite ? `<button class="button secondary" data-action="reminder-create">+ Новое напоминание</button>` : '')}
+        ${(plans?.reminders || []).map(reminderCard).join('') || EmptyPanel('Напоминаний пока нет', 'Создайте оплату, подписку или будущий доход.')}
       `}
     </section>
   `;
@@ -207,23 +280,87 @@ export function GoalContributionForm(goal: Goal, idempotencyKey: string, saving 
   `;
 }
 
-export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = ''): string {
+function currencyOptions(selected?: string | null, available: string[] = ['RUB', 'USD', 'EUR']): string {
+  const codes = available.length ? available : ['RUB', 'USD', 'EUR'];
+  return codes.map((code) => `<option value="${esc(code)}" ${code === selected ? 'selected' : ''}>${esc(code)}</option>`).join('');
+}
+
+export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category'): string {
+  const scope = limit?.scope || initialScope;
   return `
     <form class="form-grid" data-action="${limit ? 'save-limit' : 'create-limit'}" ${limit ? `data-id="${esc(limit.id)}"` : ''}>
       <label class="field">Название<input class="input" name="title" maxlength="80" placeholder="Например, Кафе" value="${esc(limit?.title || '')}" /></label>
       <label class="field">Что ограничиваем<select class="select" name="scope">
-        <option value="category" ${limit?.scope !== 'all_expenses' ? 'selected' : ''}>Категория</option>
-        <option value="all_expenses" ${limit?.scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
+        <option value="category" ${scope !== 'all_expenses' ? 'selected' : ''}>Категория</option>
+        <option value="all_expenses" ${scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
       </select></label>
-      <label class="field">Категория<select class="select" name="category">
+      <label class="field" data-field="limit-category" ${scope === 'all_expenses' ? 'hidden' : ''}>Категория<select class="select" name="category" ${scope === 'all_expenses' ? 'disabled' : ''}>
         ${categories.map((cat) => `<option value="${esc(cat.name)}" ${limit?.category === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
       </select></label>
       <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" placeholder="0,00" value="${esc(limit?.amount || '')}" required /></label>
+      ${limit?.currency ? `<input type="hidden" name="currency" value="${esc(limit.currency)}" />` : ''}
       <label class="field">Период<select class="select" name="period">
         <option value="month" ${limit?.period !== 'week' ? 'selected' : ''}>Месяц</option>
         <option value="week" ${limit?.period === 'week' ? 'selected' : ''}>Неделя</option>
       </select></label>
       <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${limit?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
+    </form>
+  `;
+}
+
+export function ReminderForm(reminder: Reminder | null, categories: Array<{ name: string }>, saving = false, error = '', draft?: Record<string, unknown>): string {
+  const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
+  const repeat = value('repeat_rule', reminder?.repeat_rule || 'none');
+  const remType = value('rem_type', reminder?.rem_type === 'Доходы' ? 'income' : 'expense');
+  const selectedCategory = value('category', reminder?.category || '');
+  return `
+    <form class="form-grid" data-action="${reminder ? 'save-reminder' : 'create-reminder'}" ${reminder ? `data-id="${reminder.id}"` : ''}>
+      <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(value('title', reminder?.title || ''))}" required /></label>
+      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(value('amount', reminder?.amount || ''))}" required /></label>
+      ${reminder?.currency ? `<input type="hidden" name="currency" value="${esc(reminder.currency)}" />` : ''}
+      <label class="field">Категория<select class="select" name="category">
+        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${selectedCategory === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
+      </select></label>
+      <label class="field">Тип<select class="select" name="rem_type">
+        <option value="expense" ${remType !== 'income' ? 'selected' : ''}>Расход</option>
+        <option value="income" ${remType === 'income' ? 'selected' : ''}>Доход</option>
+      </select></label>
+      <label class="field">Дата<input class="input" name="event_date" type="date" value="${esc(value('event_date', reminder?.event_date || ''))}" required /></label>
+      <label class="field">Повтор<select class="select" name="repeat_rule">
+        <option value="none" ${repeat === 'none' ? 'selected' : ''}>Не повторять</option>
+        <option value="weekly" ${repeat === 'weekly' ? 'selected' : ''}>Еженедельно</option>
+        <option value="monthly" ${repeat === 'monthly' ? 'selected' : ''}>Ежемесячно</option>
+        <option value="yearly" ${repeat === 'yearly' ? 'selected' : ''}>Ежегодно</option>
+        <option value="custom_days" ${repeat === 'custom_days' ? 'selected' : ''}>Каждые N дней</option>
+      </select></label>
+      <label class="field">Интервал дней<input class="input" name="repeat_interval_days" type="number" min="1" max="3650" value="${esc(value('repeat_interval_days', reminder?.repeat_interval_days || ''))}" /></label>
+      <label class="field">Напомнить заранее<input class="input" name="notify_days_before" type="number" min="0" max="30" value="${esc(value('notify_days_before', reminder?.notify_days_before ?? 1))}" /></label>
+      <label class="toggle-row"><input type="checkbox" name="is_active" ${draft?.is_active === false ? '' : reminder?.is_active !== false ? 'checked' : ''} /> Активно</label>
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
+    </form>
+  `;
+}
+
+export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categories: Array<{ name: string }>, saving = false, error = '', availableCurrencies: string[] = ['RUB', 'USD', 'EUR'], defaultCurrency = 'RUB'): string {
+  const selected = new Set(budget?.categories || []);
+  const selectedCurrency = budget?.currency || defaultCurrency;
+  return `
+    <form class="form-grid" data-action="${budget ? 'save-category-budget' : 'create-category-budget'}" ${budget ? `data-id="${budget.id}"` : ''}>
+      <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(budget?.title || '')}" required /></label>
+      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(budget?.amount || '')}" required /></label>
+      <label class="field">Валюта<select class="select" name="currency">${currencyOptions(selectedCurrency, availableCurrencies)}</select></label>
+      <label class="field">Период<select class="select" name="period">
+        <option value="month" ${budget?.period !== 'week' ? 'selected' : ''}>Месяц</option>
+        <option value="week" ${budget?.period === 'week' ? 'selected' : ''}>Неделя</option>
+      </select></label>
+      <fieldset class="chip-select">
+        <legend>Категории</legend>
+        ${categories.map((cat) => `<label class="chip"><input type="checkbox" name="categories" value="${esc(cat.name)}" ${selected.has(cat.name) ? 'checked' : ''} /> ${esc(cat.name)}</label>`).join('')}
+      </fieldset>
+      <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${budget?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
       <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
     </form>

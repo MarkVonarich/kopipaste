@@ -45,6 +45,14 @@ from services.categories import (
     transfer_category,
 )
 from services.operations import cancel_operation_draft, commit_operation_draft, load_operation_draft, record_financial_operation
+from services.reminders import (
+    ReminderError,
+    _next_monthly_date,
+    delete_reminder as delete_shared_reminder,
+    record_reminder as record_shared_reminder,
+    snooze_reminder as snooze_shared_reminder,
+    toggle_reminder as toggle_shared_reminder,
+)
 from services.reminder_totals import render_reminder_totals
 from services.workspaces import create_group_workspace, is_active_telegram_member, join_group_workspace, resolve_workspace
 from ui.messages import render_operation_confirmation
@@ -97,15 +105,6 @@ def _integer_major_amount(value) -> Decimal | None:
     return amount
 
 
-def _next_monthly_date(dt: date) -> date:
-    y, m = dt.year, dt.month + 1
-    if m > 12:
-        y, m = y + 1, 1
-    from calendar import monthrange
-    d = min(dt.day, monthrange(y, m)[1])
-    return date(y, m, d)
-
-
 def _repeat_label(r: str, d: dict) -> str:
     return {'none': 'не повторять', 'weekly': 'каждую неделю', 'monthly': 'каждый месяц', 'yearly': 'каждый год', 'custom_days': f"каждые {int(d.get('repeat_interval_days') or 1)} дней"}.get(r or 'none', r or 'none')
 
@@ -114,7 +113,7 @@ def _reminders_menu_kb(has_any: bool):
     return reminders_menu_kb(has_any)
 
 
-async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str):
+async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str, currency: str | None = None):
     second = InlineKeyboardButton('💰 Остаток', callback_data='status') if op_type == 'Расходы' else InlineKeyboardButton('💵 Доходы', callback_data='income_status')
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
@@ -122,7 +121,8 @@ async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, cha
         InlineKeyboardButton('✏️ Изменить', callback_data='op_edit'),
     ]])
     name = (getattr(user, 'full_name', None) or getattr(user, 'first_name', None) or getattr(user, 'username', None) or 'Пользователь')
-    text = render_operation_confirmation(name=name, amount=amount, currency=get_user_currency(chat_id), category=category, op_dt=dt, original=comment, op_kind=op_type)
+    display_currency = currency or get_user_currency(chat_id)
+    text = render_operation_confirmation(name=name, amount=amount, currency=display_currency, category=category, op_dt=dt, original=comment, op_kind=op_type)
     await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown', reply_markup=kb)
 
 
@@ -4337,9 +4337,11 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         return await render_export_menu(q)
 
     if data.startswith('rem_tog|'):
-        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
-        if r:
-            reminder_update(cid, rid, is_active=(not r['is_active']))
+        rid = int(data.split('|', 1)[1])
+        try:
+            toggle_shared_reminder(cid, rid)
+        except ReminderError:
+            return await q.answer('Не найдено', show_alert=True)
         await q.answer('Обновлено')
         q.data = f'rem_o|{rid}'
         return await callback_handler(update, context)
@@ -4349,48 +4351,34 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('🗑 Да, удалить', callback_data=f'rem_del|{rid}')], [InlineKeyboardButton('⬅️ Назад', callback_data=f'rem_o|{rid}')]])
         return await _safe_edit_or_reply(q, f'Удалить напоминание «{title}»?', reply_markup=kb)
     if data.startswith('rem_del|'):
-        rid = int(data.split('|', 1)[1]); reminder_delete(cid, rid)
+        rid = int(data.split('|', 1)[1])
+        delete_shared_reminder(cid, rid)
         await q.answer('Удалено')
         q.data = 'rem_menu'
         return await callback_handler(update, context)
     if data.startswith('rem_snz|'):
-        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
-        if r:
-            reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=1)))
+        rid = int(data.split('|', 1)[1])
+        try:
+            snooze_shared_reminder(cid, rid, days=1)
+        except ReminderError:
+            return await q.answer('Не найдено', show_alert=True)
         await q.answer('Напомню завтра')
         return
     if data.startswith('rem_rec|'):
-        rid = int(data.split('|', 1)[1]); r = reminder_get(cid, rid)
-        if not r:
+        rid = int(data.split('|', 1)[1])
+        chat_type = getattr(update.effective_chat, 'type', 'private') or 'private'
+        try:
+            ctx = resolve_workspace(cid, update.effective_user.id, chat_type)
+            result = record_shared_reminder(user_id=cid, reminder_id=rid, workspace=ctx, chat_type=chat_type, post_commit=True)
+        except ReminderError as exc:
+            if exc.code == 'reminder_inactive':
+                return await q.answer('Напоминание выключено', show_alert=True)
             return await q.answer('Не найдено', show_alert=True)
-        recorded = record_financial_operation(
-            chat_id=cid,
-            actor_user_id=update.effective_user.id,
-            op_date=r['event_date'],
-            op_type=r['rem_type'],
-            category=r['category'],
-            amount=to_decimal_money(r['amount']),
-            comment=r['title'],
-            source='reminder',
-            chat_type=getattr(update.effective_chat, 'type', 'private') or 'private',
-            raw_text=r['title'],
-        )
-        await _send_standard_op_confirmation(context, cid, update.effective_user, r['event_date'], r['rem_type'], r['category'], to_decimal_money(r['amount']), r['title'])
-        await send_operation_limit_alert(recorded, context)
-        if r['repeat_rule'] == 'none':
-            reminder_update(cid, rid, is_active=False)
-        elif r['repeat_rule'] == 'weekly':
-            reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=7)))
-        elif r['repeat_rule'] == 'monthly':
-            nd = _next_monthly_date(r['event_date'])
-            reminder_update(cid, rid, event_date=nd)
-        elif r['repeat_rule'] == 'yearly':
-            reminder_update(cid, rid, event_date=r['event_date'].replace(year=r['event_date'].year + 1))
-        elif r['repeat_rule'] == 'custom_days':
-            reminder_update(cid, rid, event_date=(r['event_date'] + timedelta(days=int(r.get('repeat_interval_days') or 1))))
-        pg_exec("""INSERT INTO public.user_reminder_events(reminder_id, user_id, event_date, notify_days_before, event_type)
-                   VALUES (%s,%s,%s,%s,'recorded')""", (rid, cid, r['event_date'], r['notify_days_before']))
-        log.info('reminder_recorded reminder_id=%s', rid)
+        if result.operation:
+            recorded = result.operation
+            await _send_standard_op_confirmation(context, cid, update.effective_user, recorded.operation_date, recorded.type, recorded.category, recorded.amount, recorded.comment, currency=recorded.currency)
+            await send_operation_limit_alert(recorded, context)
+            log.info('reminder_recorded reminder_id=%s', rid)
         await q.answer('Записано')
         return
     if any(data.startswith(p) for p in ['rem_e_amt|', 'rem_e_cat|', 'rem_e_date|', 'rem_e_rep|', 'rem_e_not|', 'rem_e_typ|']):

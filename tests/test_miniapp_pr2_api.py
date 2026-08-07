@@ -138,9 +138,36 @@ class _IdemCursor:
                 "amount": amount,
                 "currency": currency,
                 "period": period,
+                "enabled": True,
                 "alerts_enabled": bool(alerts_enabled),
             }
-            self._next = (limit_id, name, amount, currency, period, workspace_id, alerts_enabled)
+            self._next = (limit_id, name, amount, currency, period, workspace_id, True, alerts_enabled)
+            return
+        if compact.startswith("UPDATE public.general_spending_limits") and "amount=%s" in compact:
+            name, amount, currency, period, alerts_enabled, _thresholds, limit_id, user_id, workspace_id = params
+            row = self.conn.general_limits.get(int(limit_id))
+            if row and row["owner_user_id"] == int(user_id) and row["workspace_id"] == workspace_id:
+                row.update({
+                    "name": name,
+                    "amount": amount,
+                    "currency": currency or row["currency"],
+                    "period": period,
+                    "alerts_enabled": bool(alerts_enabled),
+                })
+                self._next = (int(limit_id), name, amount, row["currency"], period, workspace_id, row.get("enabled", True), alerts_enabled)
+            return
+        if compact.startswith("UPDATE public.general_spending_limits") and "SET enabled=%s" in compact:
+            enabled, limit_id, user_id, workspace_id = params
+            row = self.conn.general_limits.get(int(limit_id))
+            if row and row["owner_user_id"] == int(user_id) and row["workspace_id"] == workspace_id:
+                row["enabled"] = bool(enabled)
+                self._next = (int(limit_id), row["name"], row["amount"], row["currency"], row["period"], workspace_id, row["enabled"], row["alerts_enabled"])
+            return
+        if compact.startswith("SELECT currency FROM public.category_limits"):
+            user_id, workspace_id, period, category = params
+            row = self.conn.category_limits.get((int(user_id), workspace_id, period, category))
+            if row:
+                self._next = (row["currency"],)
             return
         if compact.startswith("DELETE FROM public.category_limits"):
             user_id, workspace_id, period, category = params
@@ -581,6 +608,61 @@ def test_idempotent_category_limit_create_replays(monkeypatch):
     assert first == second
     assert len(db.category_limits) == 1
     assert events.count("mini_app_budget_limit_created") == 1
+
+
+def test_update_general_limit_without_currency_preserves_existing_currency(monkeypatch):
+    api = _api(monkeypatch)
+    db = _IdemDB()
+    db.general_limits[1] = {
+        "workspace_id": 10,
+        "owner_user_id": 42,
+        "name": "EUR cap",
+        "amount": Decimal("1000.00"),
+        "currency": "EUR",
+        "period": "month",
+        "enabled": False,
+        "alerts_enabled": True,
+    }
+    monkeypatch.setattr("services.miniapp_limits.get_conn", lambda: _IdemConn(db))
+    monkeypatch.setattr(api, "_limit_spent", lambda *_args, **_kwargs: Decimal("0.00"))
+
+    data = api.update_limit(api.request(42), "general:1", {
+        "workspace_id": 10,
+        "scope": "all_expenses",
+        "title": "Updated",
+        "amount": "900.00",
+        "period": "month",
+    })["data"]
+
+    assert data["limit"]["currency"] == "EUR"
+    assert data["limit"]["enabled"] is False
+    assert db.general_limits[1]["currency"] == "EUR"
+    assert db.general_limits[1]["enabled"] is False
+
+
+def test_toggle_general_limit_changes_enabled_without_alerts(monkeypatch):
+    api = _api(monkeypatch)
+    db = _IdemDB()
+    db.general_limits[1] = {
+        "workspace_id": 10,
+        "owner_user_id": 42,
+        "name": "General",
+        "amount": Decimal("1000.00"),
+        "currency": "RUB",
+        "period": "month",
+        "enabled": False,
+        "alerts_enabled": False,
+    }
+    monkeypatch.setattr("services.miniapp_limits.get_conn", lambda: _IdemConn(db))
+    monkeypatch.setattr(api, "_limit_spent", lambda *_args, **_kwargs: Decimal("0.00"))
+
+    enabled = api.update_limit(api.request(42), "general:1", {"workspace_id": 10, "toggle": True, "enabled": True})["data"]["limit"]
+    disabled = api.update_limit(api.request(42), "general:1", {"workspace_id": 10, "toggle": True, "enabled": False})["data"]["limit"]
+
+    assert enabled["enabled"] is True
+    assert enabled["alerts_enabled"] is False
+    assert disabled["enabled"] is False
+    assert disabled["alerts_enabled"] is False
 
 
 def test_limits_list_uses_existing_threshold_policy_and_workspace_scope(monkeypatch):
