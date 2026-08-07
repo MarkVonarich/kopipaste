@@ -323,7 +323,7 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'category-budget-create' | 'category-budget-edit' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
   profileAccordion?: ProfileSection;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders';
@@ -341,4 +341,6 @@ export type AppState = {
   selectedReminderId?: number;
   selectedCategoryBudgetId?: number;
   reminderIdempotencyKey?: string;
+  limitCreateScope?: 'all_expenses' | 'category';
+  reminderDraft?: Partial<ReminderPayload>;
 };

@@ -73,9 +73,10 @@ def create_or_update_general_limit_tx(
 ) -> StoredLimit:
     period = _limit_period(period)
     amount_dec = to_decimal_money(amount, positive=True)
-    cur_currency = (currency or get_user_currency(user_id) or "RUB")[:8]
+    cur_currency = (currency[:8] if currency else None)
     title = (name or "Все расходы").strip()[:80] or "Все расходы"
     if limit_id is None:
+        cur_currency = cur_currency or (get_user_currency(user_id) or "RUB")[:8]
         cur.execute(
             """
             INSERT INTO public.general_spending_limits
@@ -92,7 +93,7 @@ def create_or_update_general_limit_tx(
             UPDATE public.general_spending_limits
                SET name=%s,
                    amount=%s,
-                   currency=%s,
+                   currency=COALESCE(%s, currency),
                    period_type=%s,
                    enabled=true,
                    alerts_enabled=%s,
@@ -124,7 +125,7 @@ def create_or_update_general_limit(
 ) -> StoredLimit:
     period = _limit_period(period)
     amount_dec = to_decimal_money(amount, positive=True)
-    cur_currency = (currency or get_user_currency(user_id) or "RUB")[:8]
+    cur_currency = (currency[:8] if currency else None)
     title = (name or "Все расходы").strip()[:80] or "Все расходы"
     conn = get_conn()
     try:
@@ -171,7 +172,7 @@ def replace_category_limit(
     if not category:
         raise MiniAppLimitError("category_required")
     amount_dec = to_decimal_money(amount, positive=True)
-    currency = (currency or get_user_currency(user_id) or "RUB")[:8]
+    currency = (currency[:8] if currency else None)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -216,11 +217,11 @@ def replace_category_limit_tx(
     if not category:
         raise MiniAppLimitError("category_required")
     amount_dec = to_decimal_money(amount, positive=True)
-    currency = (currency or get_user_currency(user_id) or "RUB")[:8]
+    currency = (currency[:8] if currency else None)
     if require_existing:
         cur.execute(
             """
-            SELECT 1
+            SELECT currency
               FROM public.category_limits
              WHERE user_id=%s
                AND workspace_id IS NOT DISTINCT FROM %s
@@ -230,8 +231,11 @@ def replace_category_limit_tx(
             """,
             (user_id, workspace_id, old_period, old_category),
         )
-        if not cur.fetchone():
+        existing = cur.fetchone()
+        if not existing:
             raise MiniAppLimitError("limit_not_found")
+        currency = currency or existing[0]
+    currency = currency or (get_user_currency(user_id) or "RUB")[:8]
     if old_period is not None and old_category is not None and (old_period != period or old_category != category):
         cur.execute(
             """

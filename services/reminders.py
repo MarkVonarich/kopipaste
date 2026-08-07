@@ -357,6 +357,7 @@ def record_reminder_tx(
         chat_type=chat_type,
         workspace=workspace,
         raw_text=None,
+        currency=reminder["currency"],
     )
     cur.execute(
         """

@@ -279,18 +279,25 @@ export function GoalContributionForm(goal: Goal, idempotencyKey: string, saving 
   `;
 }
 
-export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = ''): string {
+function currencyOptions(selected?: string | null, available: string[] = ['RUB', 'USD', 'EUR']): string {
+  const codes = available.length ? available : ['RUB', 'USD', 'EUR'];
+  return codes.map((code) => `<option value="${esc(code)}" ${code === selected ? 'selected' : ''}>${esc(code)}</option>`).join('');
+}
+
+export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category'): string {
+  const scope = limit?.scope || initialScope;
   return `
     <form class="form-grid" data-action="${limit ? 'save-limit' : 'create-limit'}" ${limit ? `data-id="${esc(limit.id)}"` : ''}>
       <label class="field">Название<input class="input" name="title" maxlength="80" placeholder="Например, Кафе" value="${esc(limit?.title || '')}" /></label>
       <label class="field">Что ограничиваем<select class="select" name="scope">
-        <option value="category" ${limit?.scope !== 'all_expenses' ? 'selected' : ''}>Категория</option>
-        <option value="all_expenses" ${limit?.scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
+        <option value="category" ${scope !== 'all_expenses' ? 'selected' : ''}>Категория</option>
+        <option value="all_expenses" ${scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
       </select></label>
-      <label class="field">Категория<select class="select" name="category">
+      <label class="field" data-field="limit-category" ${scope === 'all_expenses' ? 'hidden' : ''}>Категория<select class="select" name="category" ${scope === 'all_expenses' ? 'disabled' : ''}>
         ${categories.map((cat) => `<option value="${esc(cat.name)}" ${limit?.category === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
       </select></label>
       <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" placeholder="0,00" value="${esc(limit?.amount || '')}" required /></label>
+      ${limit?.currency ? `<input type="hidden" name="currency" value="${esc(limit.currency)}" />` : ''}
       <label class="field">Период<select class="select" name="period">
         <option value="month" ${limit?.period !== 'week' ? 'selected' : ''}>Месяц</option>
         <option value="week" ${limit?.period === 'week' ? 'selected' : ''}>Неделя</option>
@@ -302,20 +309,24 @@ export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: s
   `;
 }
 
-export function ReminderForm(reminder: Reminder | null, categories: Array<{ name: string }>, saving = false, error = ''): string {
-  const repeat = reminder?.repeat_rule || 'none';
+export function ReminderForm(reminder: Reminder | null, categories: Array<{ name: string }>, saving = false, error = '', draft?: Record<string, unknown>): string {
+  const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
+  const repeat = value('repeat_rule', reminder?.repeat_rule || 'none');
+  const remType = value('rem_type', reminder?.rem_type === 'Доходы' ? 'income' : 'expense');
+  const selectedCategory = value('category', reminder?.category || '');
   return `
     <form class="form-grid" data-action="${reminder ? 'save-reminder' : 'create-reminder'}" ${reminder ? `data-id="${reminder.id}"` : ''}>
-      <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(reminder?.title || '')}" required /></label>
-      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(reminder?.amount || '')}" required /></label>
+      <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(value('title', reminder?.title || ''))}" required /></label>
+      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(value('amount', reminder?.amount || ''))}" required /></label>
+      ${reminder?.currency ? `<input type="hidden" name="currency" value="${esc(reminder.currency)}" />` : ''}
       <label class="field">Категория<select class="select" name="category">
-        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${reminder?.category === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
+        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${selectedCategory === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
       </select></label>
       <label class="field">Тип<select class="select" name="rem_type">
-        <option value="expense" ${reminder?.rem_type !== 'Доходы' ? 'selected' : ''}>Расход</option>
-        <option value="income" ${reminder?.rem_type === 'Доходы' ? 'selected' : ''}>Доход</option>
+        <option value="expense" ${remType !== 'income' ? 'selected' : ''}>Расход</option>
+        <option value="income" ${remType === 'income' ? 'selected' : ''}>Доход</option>
       </select></label>
-      <label class="field">Дата<input class="input" name="event_date" type="date" value="${esc(reminder?.event_date || '')}" required /></label>
+      <label class="field">Дата<input class="input" name="event_date" type="date" value="${esc(value('event_date', reminder?.event_date || ''))}" required /></label>
       <label class="field">Повтор<select class="select" name="repeat_rule">
         <option value="none" ${repeat === 'none' ? 'selected' : ''}>Не повторять</option>
         <option value="weekly" ${repeat === 'weekly' ? 'selected' : ''}>Еженедельно</option>
@@ -323,21 +334,23 @@ export function ReminderForm(reminder: Reminder | null, categories: Array<{ name
         <option value="yearly" ${repeat === 'yearly' ? 'selected' : ''}>Ежегодно</option>
         <option value="custom_days" ${repeat === 'custom_days' ? 'selected' : ''}>Каждые N дней</option>
       </select></label>
-      <label class="field">Интервал дней<input class="input" name="repeat_interval_days" type="number" min="1" max="3650" value="${esc(reminder?.repeat_interval_days || '')}" /></label>
-      <label class="field">Напомнить заранее<input class="input" name="notify_days_before" type="number" min="0" max="30" value="${esc(reminder?.notify_days_before ?? 1)}" /></label>
-      <label class="toggle-row"><input type="checkbox" name="is_active" ${reminder?.is_active !== false ? 'checked' : ''} /> Активно</label>
+      <label class="field">Интервал дней<input class="input" name="repeat_interval_days" type="number" min="1" max="3650" value="${esc(value('repeat_interval_days', reminder?.repeat_interval_days || ''))}" /></label>
+      <label class="field">Напомнить заранее<input class="input" name="notify_days_before" type="number" min="0" max="30" value="${esc(value('notify_days_before', reminder?.notify_days_before ?? 1))}" /></label>
+      <label class="toggle-row"><input type="checkbox" name="is_active" ${draft?.is_active === false ? '' : reminder?.is_active !== false ? 'checked' : ''} /> Активно</label>
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
       <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
     </form>
   `;
 }
 
-export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categories: Array<{ name: string }>, saving = false, error = ''): string {
+export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categories: Array<{ name: string }>, saving = false, error = '', availableCurrencies: string[] = ['RUB', 'USD', 'EUR'], defaultCurrency = 'RUB'): string {
   const selected = new Set(budget?.categories || []);
+  const selectedCurrency = budget?.currency || defaultCurrency;
   return `
     <form class="form-grid" data-action="${budget ? 'save-category-budget' : 'create-category-budget'}" ${budget ? `data-id="${budget.id}"` : ''}>
       <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(budget?.title || '')}" required /></label>
       <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(budget?.amount || '')}" required /></label>
+      <label class="field">Валюта<select class="select" name="currency">${currencyOptions(selectedCurrency, availableCurrencies)}</select></label>
       <label class="field">Период<select class="select" name="period">
         <option value="month" ${budget?.period !== 'week' ? 'selected' : ''}>Месяц</option>
         <option value="week" ${budget?.period === 'week' ? 'selected' : ''}>Неделя</option>

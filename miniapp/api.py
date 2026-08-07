@@ -669,6 +669,12 @@ class MiniAppAPI:
             return "normal", pct
         return alert_status_for_band(band), int(min(999, (spent / amount * 100).to_integral_value())) if amount > 0 else 0
 
+    def _validated_currency(self, value: Any, *, fallback: str | None = None) -> str:
+        code = str(value or fallback or "RUB").strip().upper()[:8]
+        if code not in ALLOWED_CURRENCIES:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.")
+        return code
+
     def _limit_projection_percent(self, *, spent: Decimal, amount: Decimal, period: str, today: date) -> int | None:
         if amount <= 0 or spent <= 0:
             return None
@@ -699,7 +705,7 @@ class MiniAppAPI:
         workspace_id: int | None,
         alerts_enabled: bool = True,
     ) -> dict:
-        spent = self._limit_spent(user_id, workspace_id, period, category)
+        spent = self._limit_spent(user_id, workspace_id, period, category, currency=currency)
         remaining = amount - spent
         status, percent = self._limit_status(spent, amount)
         return {
@@ -753,7 +759,8 @@ class MiniAppAPI:
         period = str(item.get("period_type") or "month")
         categories = [str(category) for category in item.get("categories") or []]
         amount = to_decimal_money(item.get("amount") or 0)
-        spent = self._category_budget_spent(req.user_id, item.get("workspace_id"), period, categories)
+        currency = str(item.get("currency") or get_user_currency(req.user_id))
+        spent = self._category_budget_spent(req.user_id, item.get("workspace_id"), period, categories, currency)
         remaining = amount - spent
         status, percent = self._limit_status(spent, amount)
         return {
@@ -761,7 +768,7 @@ class MiniAppAPI:
             "kind": "category_budget",
             "title": str(item.get("name") or "Бюджет категорий"),
             "amount": amount,
-            "currency": str(item.get("currency") or get_user_currency(req.user_id)),
+            "currency": currency,
             "spent": spent,
             "remaining": remaining,
             "percent": percent,
@@ -773,7 +780,7 @@ class MiniAppAPI:
             "workspace_id": item.get("workspace_id"),
         }
 
-    def _category_budget_spent(self, user_id: int, workspace_id: int | None, period: str, categories: list[str]) -> Decimal:
+    def _category_budget_spent(self, user_id: int, workspace_id: int | None, period: str, categories: list[str], currency: str) -> Decimal:
         if not categories:
             return Decimal("0.00")
         today = user_local_date(user_id, workspace_id)
@@ -792,9 +799,10 @@ class MiniAppAPI:
                AND type='Расходы'
                AND category = ANY(%s)
                AND op_date BETWEEN %s AND %s
+               AND COALESCE(currency, %s) = %s
                AND COALESCE(category,'') <> 'Без операций'
             """,
-            (*params, categories, start, end),
+            (*params, categories, start, end, get_user_currency(user_id), currency),
         )
         return to_decimal_money(rows[0][0] if rows else 0)
 
@@ -1764,6 +1772,8 @@ class MiniAppAPI:
 
     def _reminder_body(self, req: MiniAppRequest, body: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
         payload = dict(body)
+        if "currency" in payload:
+            payload["currency"] = self._validated_currency(payload.get("currency"))
         if "rem_type" in payload or not partial:
             payload["rem_type"] = OP_TYPES.get(str(payload.get("rem_type") or payload.get("type") or "expense")) or str(payload.get("rem_type") or "")
         if "category" in payload and payload.get("workspace_id") not in {None, "", "all", "ALL"}:
@@ -1897,7 +1907,7 @@ class MiniAppAPI:
         finally:
             conn.close()
 
-    def _category_budget_body(self, req: MiniAppRequest, ctx: WorkspaceContext, body: dict[str, Any]) -> dict[str, Any]:
+    def _category_budget_body(self, req: MiniAppRequest, ctx: WorkspaceContext, body: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
         period = str(body.get("period") or body.get("period_type") or "month")
         if period not in LIMIT_PERIODS:
             raise MiniAppError(400, "bad_budget_period", "Проверьте период бюджета.")
@@ -1917,7 +1927,7 @@ class MiniAppAPI:
         return {
             "name": str(body.get("title") or body.get("name") or "Бюджет категорий").strip()[:120],
             "amount": to_decimal_money(body.get("amount"), positive=True),
-            "currency": str(body.get("currency") or get_user_currency(req.user_id))[:8],
+            "currency": self._validated_currency(body.get("currency"), fallback=str((existing or {}).get("currency") or get_user_currency(req.user_id))),
             "period_type": period,
             "categories": selected,
             "enabled": bool(body.get("enabled", True)),
@@ -1944,7 +1954,10 @@ class MiniAppAPI:
             except LookupError as exc:
                 raise MiniAppError(404, "budget_not_found", "Бюджет не найден.") from exc
         else:
-            payload = self._category_budget_body(req, ctx, body)
+            current = next((row for row in list_category_budget_groups(req.user_id, ctx.workspace_id) if int(row["id"]) == int(group_id)), None)
+            if not current:
+                raise MiniAppError(404, "budget_not_found", "Бюджет не найден.")
+            payload = self._category_budget_body(req, ctx, body, existing=current)
             try:
                 update_category_budget_group(user_id=req.user_id, workspace_id=ctx.workspace_id, group_id=int(group_id), **payload)
             except LookupError as exc:
@@ -2200,7 +2213,7 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")
         amount = to_decimal_money(body.get("amount"), positive=True)
         scope = str(body.get("scope") or "category")
-        currency = str(body.get("currency") or get_user_currency(req.user_id))[:8]
+        currency = self._validated_currency(body.get("currency"), fallback=get_user_currency(req.user_id))
         try:
             if scope == "all_expenses":
                 stored = create_or_update_general_limit_tx(cur, user_id=req.user_id, workspace_id=ctx.workspace_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
@@ -2219,7 +2232,7 @@ class MiniAppAPI:
         if period not in LIMIT_PERIODS:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")
         amount = to_decimal_money(body.get("amount"), positive=True)
-        currency = str(body.get("currency") or get_user_currency(req.user_id))[:8]
+        currency = self._validated_currency(body.get("currency"), fallback=get_user_currency(req.user_id)) if body.get("currency") else None
         if decoded.startswith("general:"):
             raw_id = int(decoded.split(":", 1)[1])
             try:
@@ -2261,7 +2274,7 @@ class MiniAppAPI:
         self._track(req, "mini_app_budget_limit_deleted", workspace_id=ctx.workspace_id, properties={"action": "delete", "source": "mini_app"})
         return success({"deleted": True, "limit_id": decoded}, request_id=req.request_id)
 
-    def _limit_spent(self, user_id: int, workspace_id: int | None, period: str, category: str | None, today: date | None = None) -> Decimal:
+    def _limit_spent(self, user_id: int, workspace_id: int | None, period: str, category: str | None, today: date | None = None, *, currency: str) -> Decimal:
         today = today or user_local_date(user_id, workspace_id)
         if period == "week":
             start = today - timedelta(days=today.weekday())
@@ -2281,10 +2294,11 @@ class MiniAppAPI:
                AND type='Расходы'
                {category_filter}
                AND op_date BETWEEN %s AND %s
+               AND COALESCE(currency, %s) = %s
                AND COALESCE(type,'') <> 'noop'
                AND COALESCE(category,'') <> 'Без операций'
             """,
-            (*params, *category_params, start, end),
+            (*params, *category_params, start, end, get_user_currency(user_id), currency),
         )
         return to_decimal_money(rows[0][0] if rows else 0)
 

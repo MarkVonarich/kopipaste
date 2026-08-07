@@ -81,7 +81,7 @@ function activityCard(overview: Overview | null): string {
   return `
     <section class="hero-activity" data-testid="home-activity-card">
       <span class="eyebrow">${esc(activity?.label || 'Активность')}</span>
-      <strong>${streak ? `${streak} дней подряд` : 'Серия начнётся сегодня'}</strong>
+      <strong>${streak ? `${streak} дней подряд` : 'Нет серии без пропусков'}</strong>
       <p>${activeDays} активных дней за период${days ? ` из ${days}` : ''}</p>
       ${ActivityCalendarView(activity, true)}
     </section>

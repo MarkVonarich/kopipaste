@@ -4,7 +4,7 @@ import { OperationsScreen } from '../src/components/OperationsScreen';
 import { TransactionForm } from '../src/components/TransactionForm';
 import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
-import { GoalForm, PlansScreen } from '../src/components/PlansScreen';
+import { CategoryBudgetForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from '../src/components/PlansScreen';
 import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
 import { ActivityCalendarView } from '../src/components/ActivityCalendar';
 import { AdditionalMenu, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
@@ -25,6 +25,27 @@ describe('acceptance components', () => {
     expect(html).toContain('Последние операции');
     expect(html).toContain('data-action="open-actions"');
     expect(html).toContain('Все операции');
+  });
+
+  it('uses neutral Home activity copy for zero streak in historical periods', () => {
+    const html = HomeScreen({
+      ...overview,
+      period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
+      activity: {
+        start_date: '2026-07-01',
+        end_date: '2026-07-31',
+        max_count: 0,
+        current_streak: 0,
+        active_days: 0,
+        days_in_period: 31,
+        operations_count: 0,
+        label: 'Активность',
+        days: [{ date: '2026-07-01', count: 0 }],
+      },
+    }, [], 'RUB', true, { period: 'previous_month', operation_type: 'all', category: 'all' });
+
+    expect(html).toContain('Нет серии без пропусков');
+    expect(html).not.toContain('Серия начнётся сегодня');
   });
 
   it('renders aligned Home action columns and at most three recent operations', () => {
@@ -164,6 +185,75 @@ describe('acceptance components', () => {
     }, 'limits');
     expect(limitsHtml).toContain('Food');
     expect(limitsHtml).toContain('750 ₽ / 1 000 ₽');
+  });
+
+  it('opens limit forms with correct scopes and preserves edit currency', () => {
+    const general = LimitForm(null, [{ name: 'Food' }], false, '', 'all_expenses');
+    const category = LimitForm(null, [{ name: 'Food' }], false, '', 'category');
+    const edit = LimitForm({
+      id: 'general:1',
+      kind: 'general',
+      title: 'All',
+      category: null,
+      scope: 'all_expenses',
+      amount: '1000.00',
+      spent: '0.00',
+      remaining: '1000.00',
+      percent: 0,
+      period: 'month',
+      status: 'normal',
+      currency: 'EUR',
+      alerts_enabled: true,
+      workspace_id: 10,
+      icon: 'wallet',
+    }, []);
+
+    expect(general).toContain('<option value="all_expenses" selected>');
+    expect(general).toContain('data-field="limit-category" hidden');
+    expect(category).toContain('<option value="category" selected>');
+    expect(category).not.toContain('data-field="limit-category" hidden');
+    expect(edit).toContain('name="currency" value="EUR"');
+  });
+
+  it('renders category budget currency selector with existing edit currency', () => {
+    const html = CategoryBudgetForm({
+      id: 2,
+      kind: 'category_budget',
+      title: 'Food',
+      amount: '300.00',
+      currency: 'EUR',
+      spent: '0.00',
+      remaining: '300.00',
+      percent: 0,
+      period: 'month',
+      status: 'normal',
+      categories: ['Food'],
+      enabled: true,
+      alerts_enabled: true,
+      workspace_id: 10,
+    }, [{ name: 'Food' }], false, '', ['RUB', 'EUR'], 'RUB');
+
+    expect(html).toContain('name="currency"');
+    expect(html).toContain('<option value="EUR" selected>');
+  });
+
+  it('renders reminder form with switched category options without losing draft fields', () => {
+    const html = ReminderForm(null, [{ name: 'Salary' }], false, '', {
+      title: 'Payroll',
+      amount: '1000',
+      category: 'Salary',
+      rem_type: 'income',
+      event_date: '2026-08-20',
+      repeat_rule: 'monthly',
+      notify_days_before: '2',
+      is_active: true,
+    });
+
+    expect(html).toContain('value="Payroll"');
+    expect(html).toContain('value="1000"');
+    expect(html).toContain('<option value="Salary" selected>');
+    expect(html).toContain('<option value="income" selected>');
+    expect(html).toContain('value="2026-08-20"');
   });
 
   it('renders analytics charts with local filter controls and radar empty state', () => {

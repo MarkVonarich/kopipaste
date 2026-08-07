@@ -200,6 +200,7 @@ def insert_financial_operation_tx(
     chat_type: str = "private",
     workspace: WorkspaceContext,
     raw_text: str | None = None,
+    currency: str | None = None,
 ) -> RecordedOperation:
     if not can_add_operation(workspace):
         track_security_event(SecurityEvent(
@@ -216,7 +217,7 @@ def insert_financial_operation_tx(
     dt = op_date.date() if isinstance(op_date, datetime) else op_date
     amount_dec = to_decimal_money(amount, positive=True)
     compatibility_user_id = actor_user_id if chat_type in {"group", "supergroup"} else chat_id
-    currency = get_user_currency(compatibility_user_id)
+    operation_currency = (currency or get_user_currency(compatibility_user_id) or "RUB").strip().upper()[:8]
     iso = dt.isocalendar()
     week_start = dt.fromordinal(dt.toordinal() - (dt.isoweekday() - 1))
 
@@ -233,7 +234,7 @@ def insert_financial_operation_tx(
         (
             chat_id, compatibility_user_id, dt, op_type, category, amount_dec, comment,
             week_start, int(iso.year), int(iso.week), int(dt.isoweekday()),
-            workspace.workspace_id, actor_user_id, source, currency, raw_text,
+            workspace.workspace_id, actor_user_id, source, operation_currency, raw_text,
         ),
     )
     operation_id = int(cur.fetchone()[0])
@@ -244,7 +245,7 @@ def insert_financial_operation_tx(
         user_id=compatibility_user_id,
         chat_id=chat_id,
         amount=amount_dec,
-        currency=currency,
+        currency=operation_currency,
         type=op_type,
         category=category,
         operation_date=dt,
