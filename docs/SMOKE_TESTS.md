@@ -198,8 +198,20 @@ Run after deployment and restart.
 - Confirm notification rows are switches, challenge notification preference remains available in Settings/Profile, and Quiet hours opens an editor instead of toggling directly.
 - Confirm quiet-hours enabled/start/end save in one action and cross-midnight values still defer challenge notifications.
 - Disable quiet hours after setting `23:00–09:00`, reopen the editor, and confirm `23:00–09:00` is still shown before enabling again.
-- Confirm Telegram menu button `Открыть приложение` opens the Mini App when `MINIAPP_PUBLIC_URL` is HTTPS.
+- Confirm Telegram menu button `Открыть` opens the Mini App when `MINIAPP_PUBLIC_URL` is HTTPS.
 - Confirm `/app` still shows the inline WebApp button.
+- Open profile `@uchet_finbot` after BotFather setup and confirm the Main Mini App Launch/Open button is present.
+- Open the Main Mini App launch button and confirm Home loads.
+- Close and reopen the Mini App from the Main Mini App surface.
+- Repeat Mini App launch checks on Telegram Desktop, Android and iOS.
+- Confirm global filters persist while moving Home → Analytics → Operations → Plans → Profile.
+- Confirm `Неделя` means the current local week from Monday through today.
+- Confirm `Расходы`, `Доходы` and a concrete category filter update Home, Operations and Analytics consistently.
+- Confirm Radar shows absolute money values, full long category names and adaptive tick labels.
+- Confirm Analytics details under Dynamics and Category Structure are collapsed initially.
+- Confirm Activity calendar changes with period/type/category filters and does not create whole-app horizontal scroll.
+- Confirm Home focus shows a progress bar and prioritizes exceeded/high-risk limits or goals.
+- Confirm Home shows upcoming, overdue or completed-today reminder states from the existing bot reminder flow.
 - Confirm the bottom navigation has exactly Operations, Analytics, Home, Plans and Profile.
 - Confirm Home is the centered tab.
 - Confirm every visible bottom tab opens a handled screen.

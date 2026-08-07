@@ -130,6 +130,13 @@ def toggle_notification_preference(user_id: int, key: str) -> bool:
             )
             value = bool(cur.fetchone()[0])
         conn.commit()
+        if key in {"morning", "evening"} and value is False:
+            try:
+                from services.automatic_notifications import suppress_pending_preference_notifications
+
+                suppress_pending_preference_notifications(user_id, key)
+            except Exception:
+                pass
         return value
     except Exception:
         conn.rollback()

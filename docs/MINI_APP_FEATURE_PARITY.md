@@ -42,6 +42,12 @@ This inventory is based on the current repository code in `routers/`, `services/
 
 - Home now shows at most three recent operations, a daily challenge card, a deterministic focus card for the highest-priority goal or limit, and a rule-based period insight.
 - Home insight never adds mixed currencies together and falls back safely when previous-period data is unavailable.
+- Global financial filters now cover period, current week, operation type and category across Home, Operations and Analytics.
+- Analytics Radar compares absolute category amounts in one selected currency with adaptive money ticks and full category labels.
+- Analytics includes an activity calendar based on operation counts, not amounts, and keeps Dynamics/Category Structure details collapsed by default.
+- Home focus uses risk severity for limits and goals and renders the same progress-bar language used by Plans.
+- Home includes the nearest reminder read model from the existing bot reminders and `user_reminder_events`.
+- Telegram launch supports the persistent menu button label `Открыть`, `/app`, and manual BotFather Main Mini App setup.
 - Profile uses single-open accordion sections for User, Appearance, Workspaces, Categories, Notifications, Export/Data, Premium, Help and Legal.
 - Preferred name is shared with bot confirmations through `public.users.preferred_name`.
 - Currency, timezone, active workspace, workspace rename and quiet-hours editor are available from Profile without changing historical operations.

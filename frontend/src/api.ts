@@ -8,14 +8,16 @@ import type {
   Goal,
   GoalMovement,
   GoalPlanPreview,
+  GlobalFinancialFilters,
   NotificationPreferences,
   Operation,
-  PeriodState,
   PremiumInfo,
-  RadarAxis,
+  RadarMoneyAxis,
   ThemeMode,
   TimeDynamicsCurrencyGroup,
   TimeDynamicsItem,
+  ActivityCalendar,
+  HomeReminderSummary,
   Workspace
 } from './types';
 
@@ -28,18 +30,21 @@ type Envelope<T> = {
 
 export type Overview = {
   period: { key: string; start_date: string; end_date: string };
+  filters?: { operation_type: string; category: string };
   workspace_scope: number | 'all' | null;
   aggregation_available: boolean;
   totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
   recent_operations: Operation[];
   info?: { kind: string; text: string } | null;
   challenge?: { key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_key: string; period_end?: string | null } | null;
-  focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
+  focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
   insight?: { kind: string; tone: string; title: string; text: string; currency?: string } | null;
+  reminder?: HomeReminderSummary | null;
 };
 
 export type AnalyticsResponse = {
   period: { key: string; start_date: string; end_date: string };
+  filters?: { operation_type: string; category: string };
   overview: Overview;
   aggregation_available: boolean;
   available_currencies: string[];
@@ -67,11 +72,13 @@ export type AnalyticsResponse = {
     previous_period: { key: string; start_date: string; end_date: string };
     metric: string;
     max_axes: number;
+    scale: { max: string; step: string; ticks: string[] };
     insufficient_data: boolean;
     reason?: string | null;
     explanation: string;
-    axes: RadarAxis[];
+    axes: RadarMoneyAxis[];
   };
+  activity_calendar: ActivityCalendar;
   top_expense_categories: ChartCategoryItem[];
 };
 
@@ -181,10 +188,10 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   bootstrap: () => apiFetch<Bootstrap>('/miniapp/api/bootstrap'),
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
-  overview: (workspaceId: number | 'all' | null, period: PeriodState) =>
-    apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...period })}`),
-  operations: (workspaceId: number | 'all' | null, period: PeriodState, offset = 0, search = '') =>
-    apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...period, offset, search })}`),
+  overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
+    apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
+  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters, offset = 0, search = '') =>
+    apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
   categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),
   operationDetail: (id: number) => apiFetch<Operation>(`/miniapp/api/operations/${id}`),
@@ -196,9 +203,9 @@ export const api = {
   updateOperation: (id: number, payload: Partial<OperationPayload>) =>
     apiFetch<{ operation: Operation }>(`/miniapp/api/operations/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteOperation: (id: number) => apiFetch<{ deleted: boolean; operation_id: number }>(`/miniapp/api/operations/${id}`, { method: 'DELETE', body: '{}' }),
-  analytics: (workspaceId: number | 'all' | null, period: PeriodState & { currency?: string }) =>
+  analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string }) =>
     apiFetch<AnalyticsResponse>(
-      `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...period })}`
+      `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
     ),
   plans: (workspaceId: number | 'all' | null) => apiFetch<PlansResponse>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
   goals: (workspaceId: number | 'all' | null) => apiFetch<{ items: Goal[]; read_only: boolean; note?: string }>(`/miniapp/api/goals${query({ workspace_id: workspaceId })}`),

@@ -252,6 +252,45 @@ def _user_tz_and_hour(user_id: int) -> tuple[int, int]:
     conn.close()
     return int(row[0]), int(row[1])
 
+
+def _parse_pref_hour(value: str | None, fallback_hour: int) -> int:
+    try:
+        hour = int(str(value or "").split(":", 1)[0])
+    except (TypeError, ValueError):
+        hour = int(fallback_hour)
+    return max(0, min(23, hour))
+
+
+def _notification_hour(user_id: int, prefs: dict, kind: str) -> int:
+    if kind == "morning":
+        return _parse_pref_hour(prefs.get("morning_time"), 8)
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT to_char(evening_time, 'HH24:MI')
+              FROM public.notification_preferences
+             WHERE user_id=%s
+             LIMIT 1
+            """,
+            (user_id,),
+        )
+    except Exception:
+        rows = []
+    if rows and rows[0][0]:
+        return _parse_pref_hour(rows[0][0], 20)
+    _off_min, legacy_hour = _user_tz_and_hour(user_id)
+    return _parse_pref_hour(str(legacy_hour), legacy_hour)
+
+
+def is_notification_due(user_id: int, kind: str, local_dt: datetime, prefs: dict) -> bool:
+    if kind == "morning" and not prefs.get("morning_enabled", True):
+        return False
+    if kind == "evening" and not prefs.get("evening_enabled", True):
+        return False
+    if not should_send_now(local_dt, preferences_from_dict(prefs)):
+        return False
+    return local_dt.hour == _notification_hour(user_id, prefs, kind)
+
 def _local_now(user_id: int) -> datetime:
     return user_local_now(user_id)
 
@@ -418,12 +457,8 @@ async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
 
         for uid in users:
             prefs = get_notification_preferences(uid)
-            if not prefs.get("morning_enabled", True):
-                continue
             now_loc = _local_now(uid)
-            if not should_send_now(now_loc, preferences_from_dict(prefs)):
-                continue
-            if not (6 <= now_loc.hour < 12):
+            if not is_notification_due(uid, "morning", now_loc, prefs):
                 continue
             if _already_sent_today(uid, "morning"):
                 continue
@@ -470,13 +505,8 @@ async def evening_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 
         for uid in users:
             prefs = get_notification_preferences(uid)
-            if not prefs.get("evening_enabled", True):
-                continue
-            _off_min, r_hour = _user_tz_and_hour(uid)
             now_loc = _local_now(uid)
-            if not should_send_now(now_loc, preferences_from_dict(prefs)):
-                continue
-            if now_loc.hour != r_hour:
+            if not is_notification_due(uid, "evening", now_loc, prefs):
                 continue
             if _already_sent_today(uid, "evening"):
                 continue

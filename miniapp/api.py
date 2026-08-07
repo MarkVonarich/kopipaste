@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, timedelta
@@ -86,6 +87,7 @@ DEFAULT_PAGE_SIZE = 30
 MAX_PERIOD_DAYS = 366
 ALLOWED_THEMES = {"telegram", "light", "dark"}
 OP_TYPES = {"expense": "Расходы", "income": "Доходы", "Расходы": "Расходы", "Доходы": "Доходы"}
+READ_OPERATION_TYPES = {"all": None, "expense": "Расходы", "income": "Доходы", "Расходы": "Расходы", "Доходы": "Доходы"}
 WRITE_RATE_WINDOW_SECONDS = 60
 WRITE_RATE_LIMIT = 30
 WRITE_RATE_RETENTION_BUCKETS = 24 * 60
@@ -114,6 +116,19 @@ class MiniAppRequest:
     telegram_first_name: str | None = None
     telegram_last_name: str | None = None
     telegram_username: str | None = None
+
+
+@dataclass(frozen=True)
+class TransactionFilters:
+    workspace_ids: list[int | None]
+    all_scope: bool
+    start: date
+    end: date
+    period_key: str
+    operation_type: str
+    category: str | None
+    where_sql: str
+    params: tuple[Any, ...]
 
 
 def serialize(value: Any) -> Any:
@@ -330,16 +345,18 @@ class MiniAppAPI:
     def _period(self, req: MiniAppRequest, params: dict[str, Any], workspace_id: int | None = None) -> tuple[date, date, str]:
         today = user_local_date(req.user_id, workspace_id)
         key = params.get("period") or "current_month"
-        if key == "current_month":
+        if key == "last_30":
+            key = "current_week"
+        if key == "current_week":
+            start = today - timedelta(days=today.weekday())
+            end = today
+        elif key == "current_month":
             start = today.replace(day=1)
             end = today
         elif key == "previous_month":
             first_this = today.replace(day=1)
             end = first_this - timedelta(days=1)
             start = end.replace(day=1)
-        elif key == "last_30":
-            end = today
-            start = today - timedelta(days=29)
         elif key == "custom":
             try:
                 start = date.fromisoformat(str(params["start_date"]))
@@ -352,6 +369,56 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_period", "Invalid period.")
         return start, end, key
 
+    def _operation_type_filter(self, params: dict[str, Any]) -> tuple[str, str | None]:
+        raw = str(params.get("operation_type") or params.get("type") or "all")
+        if raw not in READ_OPERATION_TYPES:
+            raise MiniAppError(400, "bad_type", "Invalid operation type.")
+        if raw in {"Расходы", "Доходы"}:
+            key = "expense" if raw == "Расходы" else "income"
+        else:
+            key = raw
+        return key, READ_OPERATION_TYPES[raw]
+
+    def _category_filter(self, params: dict[str, Any]) -> str | None:
+        raw = str(params.get("category") or "").strip()
+        if not raw or raw == "all":
+            return None
+        if len(raw) > 64:
+            raise MiniAppError(400, "bad_category", "Invalid category.")
+        return raw
+
+    def _transaction_filters(self, req: MiniAppRequest, params: dict[str, Any], *, alias: str = "") -> TransactionFilters:
+        workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
+        start, end, period_key = self._period(req, params, None if all_scope else workspace_ids[0])
+        operation_type, db_type = self._operation_type_filter(params)
+        category = self._category_filter(params)
+        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id, alias=alias)
+        prefix = f"{alias}." if alias else ""
+        filters = [
+            where,
+            f"{prefix}op_date BETWEEN %s AND %s",
+            f"COALESCE({prefix}type,'') <> 'noop'",
+            f"COALESCE({prefix}category,'') <> 'Без операций'",
+        ]
+        values: list[Any] = [*wparams, start, end]
+        if db_type:
+            filters.append(f"{prefix}type=%s")
+            values.append(db_type)
+        if category:
+            filters.append(f"{prefix}category=%s")
+            values.append(category)
+        return TransactionFilters(
+            workspace_ids=workspace_ids,
+            all_scope=all_scope,
+            start=start,
+            end=end,
+            period_key=period_key,
+            operation_type=operation_type,
+            category=category,
+            where_sql=" AND ".join(filters),
+            params=tuple(values),
+        )
+
     def bootstrap(self, req: MiniAppRequest, params: dict[str, Any] | None = None) -> dict:
         workspaces = self._workspace_rows(req.user_id)
         theme = self._profile_theme(req.user_id)
@@ -361,7 +428,7 @@ class MiniAppAPI:
         return success({
             "user": {"id": str(req.user_id), "locale": get_user_locale(req.user_id), "currency": get_user_currency(req.user_id), "timezone": timezone_name, "preferred_name": preferred_name, "display_name": self._display_name(req, preferred_name)},
             "workspaces": [{"workspace_id": "all", "name": "Все пространства", "kind": "all", "role": "viewer", "active": False, "read_only": True}, *workspaces],
-            "periods": ["current_month", "previous_month", "last_30", "custom"],
+            "periods": ["current_week", "current_month", "previous_month", "custom"],
             "theme": theme,
             "version": self.version,
         }, request_id=req.request_id)
@@ -635,20 +702,15 @@ class MiniAppAPI:
 
 
     def overview(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
-        workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
-        start, end, period_key = self._period(req, params, None if all_scope else workspace_ids[0])
-        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
+        tx = self._transaction_filters(req, params)
         rows = pg_fetchall(
             f"""
             SELECT COALESCE(currency, %s), type, COALESCE(SUM(amount),0), COUNT(*)
               FROM public.operations
-             WHERE {where}
-               AND op_date BETWEEN %s AND %s
-               AND COALESCE(type,'') <> 'noop'
-               AND COALESCE(category,'') <> 'Без операций'
+             WHERE {tx.where_sql}
              GROUP BY COALESCE(currency, %s), type
             """,
-            (get_user_currency(req.user_id), *wparams, start, end, get_user_currency(req.user_id)),
+            (get_user_currency(req.user_id), *tx.params, get_user_currency(req.user_id)),
         )
         totals: dict[str, dict[str, Decimal | int]] = {}
         for currency, typ, total, count in rows:
@@ -668,15 +730,17 @@ class MiniAppAPI:
         else:
             info = {"kind": "currencies", "text": "Валюты различаются, поэтому суммы сгруппированы без автоматической конвертации."}
         return success({
-            "period": {"key": period_key, "start_date": start, "end_date": end},
-            "workspace_scope": "all" if all_scope else workspace_ids[0],
+            "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
+            "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
+            "workspace_scope": "all" if tx.all_scope else tx.workspace_ids[0],
             "aggregation_available": aggregation_available,
             "totals_by_currency": totals,
             "recent_operations": recent,
             "info": info,
             "challenge": self._home_challenge(req),
-            "focus": self._home_focus(req, params, all_scope),
-            "insight": self._home_insight(req, workspace_ids, start, end, period_key, totals),
+            "focus": self._home_focus(req, params, tx),
+            "insight": self._home_insight(req, tx, totals),
+            "reminder": self._home_reminder(req),
         }, request_id=req.request_id)
 
     def _home_challenge(self, req: MiniAppRequest) -> dict | None:
@@ -704,30 +768,55 @@ class MiniAppAPI:
             "period_end": card.period_end,
         }
 
-    def _home_focus(self, req: MiniAppRequest, params: dict[str, Any], all_scope: bool) -> dict | None:
-        if all_scope:
+    def _home_focus(self, req: MiniAppRequest, params: dict[str, Any], tx: TransactionFilters) -> dict | None:
+        if tx.all_scope:
             return {"kind": "empty", "title": "Выберите пространство", "description": "Фокус доступен для одного пространства.", "read_only": True}
         candidates: list[dict] = []
+        severity_rank = {"critical": 400, "high": 300, "medium": 200, "normal": 100}
+        today = user_local_date(req.user_id, tx.workspace_ids[0])
         try:
             goals = self.goals(req, params)["data"].get("items", [])
             for goal in goals:
                 percent = int(goal.get("percent") or 0)
-                days_left = None
+                severity = "normal"
+                reason = goal.get("next_action") or "Проверьте план цели."
+                days_left: int | None = None
                 if goal.get("deadline"):
                     try:
-                        days_left = (date.fromisoformat(str(goal["deadline"])) - user_local_date(req.user_id)).days
+                        days_left = (date.fromisoformat(str(goal["deadline"])) - today).days
                     except ValueError:
                         days_left = None
-                urgent = days_left is not None and days_left <= 14 and percent < 100
-                score = (180 if urgent else 100) + min(percent, 100)
+                if days_left is not None and days_left < 0 and percent < 100:
+                    severity, reason = "critical", "Срок цели уже прошёл."
+                elif goal.get("next_contribution_date"):
+                    try:
+                        contribution_days = (date.fromisoformat(str(goal["next_contribution_date"])) - today).days
+                    except ValueError:
+                        contribution_days = 999
+                    if contribution_days < 0:
+                        severity, reason = "critical", "Плановый взнос просрочен."
+                    elif contribution_days <= 2:
+                        severity, reason = "high", "Ближайший взнос уже рядом."
+                    elif contribution_days <= 7:
+                        severity, reason = "medium", "Скоро плановый взнос."
+                if goal.get("projected_completion_date") and goal.get("deadline") and goal.get("strategy") == STRATEGY_DEADLINE:
+                    try:
+                        if date.fromisoformat(str(goal["projected_completion_date"])) > date.fromisoformat(str(goal["deadline"])) and percent < 100:
+                            severity, reason = ("high" if severity != "critical" else severity), "Текущий темп может не успеть к сроку."
+                    except ValueError:
+                        pass
+                if days_left is not None and 0 <= days_left <= 14 and percent < 100 and severity == "normal":
+                    severity, reason = "medium", "Дедлайн цели близко."
+                score = severity_rank[severity] + min(percent, 100)
                 candidates.append({
                     "score": score,
+                    "severity": severity,
                     "kind": "goal",
                     "id": goal.get("id"),
                     "title": goal.get("title") or "Цель",
-                    "description": goal.get("next_action") or "Проверьте план цели.",
+                    "description": reason,
                     "percent": percent,
-                    "status": "urgent" if urgent else goal.get("status") or "active",
+                    "status": severity if severity != "normal" else goal.get("status") or "active",
                     "cta_label": "Открыть цели",
                     "target_mode": "goals",
                 })
@@ -736,21 +825,35 @@ class MiniAppAPI:
         try:
             limits = self.limits(req, params)["data"].get("items", [])
             for limit in limits:
+                if tx.category and limit.get("category") and limit.get("category") != tx.category:
+                    continue
                 percent = int(limit.get("percent") or 0)
                 if percent >= 100:
-                    score = 300 + min(percent, 200)
+                    severity = "critical"
                     status = "exceeded"
                     description = "Лимит превышен. Проверьте расходы периода."
                 elif percent >= 90:
-                    score = 220 + percent
+                    severity = "high"
                     status = "warning"
                     description = "Лимит почти исчерпан."
-                else:
-                    score = 80 + percent
+                elif percent >= 80:
+                    severity = "medium"
+                    status = "risk"
+                    description = "Темп расходов требует внимания."
+                elif percent >= 50:
+                    severity = "normal"
                     status = limit.get("status") or "normal"
                     description = "Лимит в рабочем режиме."
+                else:
+                    severity = "normal"
+                    status = limit.get("status") or "normal"
+                    description = "Лимит в рабочем режиме."
+                score = severity_rank[severity] + min(percent, 200)
+                if tx.category and limit.get("category") == tx.category and severity != "normal":
+                    score += 25
                 candidates.append({
                     "score": score,
+                    "severity": severity,
                     "kind": "limit",
                     "id": limit.get("id"),
                     "title": limit.get("title") or "Лимит",
@@ -772,10 +875,7 @@ class MiniAppAPI:
     def _home_insight(
         self,
         req: MiniAppRequest,
-        workspace_ids: list[int | None],
-        start: date,
-        end: date,
-        period_key: str,
+        tx: TransactionFilters,
         totals: dict[str, dict[str, Decimal | int]],
     ) -> dict:
         if not totals:
@@ -783,21 +883,22 @@ class MiniAppAPI:
         if len(totals) > 1:
             return {"kind": "currency_mix", "tone": "neutral", "title": "Несколько валют", "text": "Сравнение не складывает разные валюты без конвертации."}
         currency = next(iter(totals))
-        prev_start, prev_end, _prev_key = self._previous_period(start, end, period_key)
-        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
+        prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
+        prev_params = dict(operation_type=tx.operation_type, category=tx.category or None)
+        prev_tx = self._transaction_filters(
+            req,
+            {**prev_params, "workspace_id": "all" if tx.all_scope else tx.workspace_ids[0], "period": "custom", "start_date": prev_start.isoformat(), "end_date": prev_end.isoformat()},
+        )
         try:
             rows = pg_fetchall(
                 f"""
                 SELECT type, COALESCE(SUM(amount),0)
                   FROM public.operations
-                 WHERE {where}
-                   AND op_date BETWEEN %s AND %s
+                 WHERE {prev_tx.where_sql}
                    AND COALESCE(currency, %s)=%s
-                   AND COALESCE(type,'') IN ('Расходы','Доходы')
-                   AND COALESCE(category,'') <> 'Без операций'
                  GROUP BY type
                 """,
-                (*wparams, prev_start, prev_end, get_user_currency(req.user_id), currency),
+                (*prev_tx.params, get_user_currency(req.user_id), currency),
             )
         except Exception as exc:
             log.info("miniapp_home_insight_unavailable reason=%s", type(exc).__name__)
@@ -822,21 +923,11 @@ class MiniAppAPI:
 
     def operations(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
-        start, end, period_key = self._period(req, params, None if all_scope else workspace_ids[0])
+        tx = self._transaction_filters(req, params, alias="o")
         limit = min(max(int(params.get("limit") or DEFAULT_PAGE_SIZE), 1), READ_PAGE_LIMIT)
         offset = max(int(params.get("offset") or 0), 0)
-        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id, alias="o")
-        filters = [where, "o.op_date BETWEEN %s AND %s", "COALESCE(o.type,'') <> 'noop'", "COALESCE(o.category,'') <> 'Без операций'"]
-        values: list[Any] = [*wparams, start, end]
-        typ = params.get("type")
-        if typ:
-            if typ not in OP_TYPES:
-                raise MiniAppError(400, "bad_type", "Invalid operation type.")
-            filters.append("o.type=%s")
-            values.append(OP_TYPES[typ])
-        if params.get("category"):
-            filters.append("o.category=%s")
-            values.append(str(params["category"])[:64])
+        filters = [tx.where_sql]
+        values: list[Any] = [*tx.params]
         if params.get("member_user_id"):
             filters.append("o.actor_user_id=%s")
             values.append(int(params["member_user_id"]))
@@ -856,7 +947,7 @@ class MiniAppAPI:
         """
         rows = pg_fetchall(sql, (get_user_currency(req.user_id), *values, limit + 1, offset))
         items = [self._operation_dict(r, include_workspace=all_scope) for r in rows[:limit]]
-        return success({"items": items, "has_more": len(rows) > limit, "limit": limit, "offset": offset, "period": {"key": period_key, "start_date": start, "end_date": end}}, request_id=req.request_id)
+        return success({"items": items, "has_more": len(rows) > limit, "limit": limit, "offset": offset, "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end}}, request_id=req.request_id)
 
     def _operation_dict(self, row: tuple, *, include_workspace: bool = True) -> dict:
         amount = to_decimal_money(row[4] or 0)
@@ -1072,15 +1163,13 @@ class MiniAppAPI:
         return success({"deleted": True, "operation_id": int(operation_id)}, request_id=req.request_id)
 
     def analytics(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
-        workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
-        start, end, period_key = self._period(req, params, None if all_scope else workspace_ids[0])
+        tx = self._transaction_filters(req, params)
         overview = self.overview(req, params)["data"]
-        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
         available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
         requested_currency = str(params.get("currency") or "").strip().upper()
-        prev_start, prev_end, _prev_key = self._previous_period(start, end, period_key)
-        radar_type = OP_TYPES.get(str(params.get("radar_type") or "expense")) or "Расходы"
-        radar_available_currencies = self._radar_currencies(req, workspace_ids, start, end, prev_start, prev_end, radar_type)
+        prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
+        radar_type = self._chart_op_type(params, "radar_type", tx.operation_type)
+        radar_available_currencies = self._radar_currencies(req, tx, prev_start, prev_end, radar_type)
         if requested_currency and requested_currency not in set(available_currencies) | set(radar_available_currencies):
             raise MiniAppError(400, "bad_currency", "Currency is not available for this scope.")
         if requested_currency and requested_currency in available_currencies:
@@ -1090,20 +1179,21 @@ class MiniAppAPI:
         else:
             chart_currencies = available_currencies
         aggregation_available = len(available_currencies) <= 1
-        category_type = OP_TYPES.get(str(params.get("category_type") or "expense")) or "Расходы"
-        structure = self._category_structure(req, where, wparams, start, end, category_type, currencies=chart_currencies)
-        dynamics = self._time_dynamics(req, where, wparams, start, end, currencies=chart_currencies)
+        category_type = self._chart_op_type(params, "category_type", tx.operation_type)
+        grouping = self._validated_grouping(str(params.get("grouping") or "auto"), tx.start, tx.end)
+        structure = self._category_structure(req, tx, category_type, currencies=chart_currencies)
+        dynamics = self._time_dynamics(req, tx, grouping=grouping, currencies=chart_currencies)
         radar = self._radar(
             req,
-            workspace_ids,
-            all_scope,
-            start,
-            end,
-            period_key,
+            tx,
+            prev_start,
+            prev_end,
+            _prev_key,
             radar_type,
             currency=requested_currency or (radar_available_currencies[0] if len(radar_available_currencies) == 1 else None),
             available_currencies=radar_available_currencies,
         )
+        activity = self._activity_calendar(req, tx)
         currency_groups = {
             currency: {
                 "summary": {
@@ -1116,7 +1206,8 @@ class MiniAppAPI:
             for currency in available_currencies
         }
         return success({
-            "period": {"key": period_key, "start_date": start, "end_date": end},
+            "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
+            "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
             "overview": overview,
             "aggregation_available": aggregation_available,
             "available_currencies": available_currencies,
@@ -1142,37 +1233,52 @@ class MiniAppAPI:
             "category_structure": structure,
             "time_dynamics": dynamics,
             "radar": radar,
+            "activity_calendar": activity,
             "top_expense_categories": structure["items"],
         }, request_id=req.request_id)
 
-    def _radar_currencies(self, req: MiniAppRequest, workspace_ids: list[int | None], start: date, end: date, prev_start: date, prev_end: date, op_type: str) -> list[str]:
-        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
+    def _chart_op_type(self, params: dict[str, Any], key: str, global_operation_type: str) -> str:
+        if global_operation_type in {"expense", "income"}:
+            return "Расходы" if global_operation_type == "expense" else "Доходы"
+        raw = str(params.get(key) or "expense")
+        if raw not in OP_TYPES:
+            raise MiniAppError(400, "bad_type", "Invalid chart operation type.")
+        return OP_TYPES[raw]
+
+    def _validated_grouping(self, grouping: str, start: date, end: date) -> str:
+        if not grouping or grouping == "auto":
+            return self._chart_grouping(start, end)
+        if grouping not in {"day", "week", "month"}:
+            raise MiniAppError(400, "bad_grouping", "Invalid grouping.")
+        return grouping
+
+    def _radar_currencies(self, req: MiniAppRequest, tx: TransactionFilters, prev_start: date, prev_end: date, op_type: str) -> list[str]:
+        date_sql = tx.where_sql.replace("op_date BETWEEN %s AND %s", "((op_date BETWEEN %s AND %s) OR (op_date BETWEEN %s AND %s))")
+        values = list(tx.params)
+        period_index = len(tx.params) - (2 + (1 if tx.operation_type != "all" else 0) + (1 if tx.category else 0))
+        values[period_index:period_index + 2] = [tx.start, tx.end, prev_start, prev_end]
         rows = pg_fetchall(
             f"""
             SELECT DISTINCT COALESCE(currency, %s)
               FROM public.operations
-             WHERE {where}
+             WHERE {date_sql}
                AND type=%s
-               AND ((op_date BETWEEN %s AND %s) OR (op_date BETWEEN %s AND %s))
-               AND COALESCE(category,'') <> 'Без операций'
              ORDER BY 1
             """,
-            (get_user_currency(req.user_id), *wparams, op_type, start, end, prev_start, prev_end),
+            (get_user_currency(req.user_id), *values, op_type),
         )
         return sorted(str(row[0]) for row in rows if row and row[0])
 
-    def _category_structure(self, req: MiniAppRequest, where: str, wparams: tuple, start: date, end: date, op_type: str, *, currencies: list[str] | None = None) -> dict:
+    def _category_structure(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, *, currencies: list[str] | None = None) -> dict:
         rows = pg_fetchall(
             f"""
             SELECT category, COALESCE(currency, %s), COALESCE(SUM(amount),0), COUNT(*)
               FROM public.operations
-             WHERE {where} AND type=%s AND op_date BETWEEN %s AND %s
-               AND COALESCE(type,'') <> 'noop'
-               AND COALESCE(category,'') <> 'Без операций'
+             WHERE {tx.where_sql} AND type=%s
              GROUP BY category, COALESCE(currency, %s)
              ORDER BY COALESCE(SUM(amount),0) DESC, category
             """,
-            (get_user_currency(req.user_id), *wparams, op_type, start, end, get_user_currency(req.user_id)),
+            (get_user_currency(req.user_id), *tx.params, op_type, get_user_currency(req.user_id)),
         )
         by_currency: dict[str, list[tuple[str, Decimal, int]]] = defaultdict(list)
         for category, currency, total, count in rows:
@@ -1200,20 +1306,16 @@ class MiniAppAPI:
             groups[currency] = {"currency": currency, "total": currency_total, "items": group_items}
         return {"type": "income" if op_type == "Доходы" else "expense", "top_n": CHART_TOP_N, "currency_groups": groups, "items": items}
 
-    def _time_dynamics(self, req: MiniAppRequest, where: str, wparams: tuple, start: date, end: date, *, currencies: list[str] | None = None) -> dict:
-        grouping = self._chart_grouping(start, end)
+    def _time_dynamics(self, req: MiniAppRequest, tx: TransactionFilters, *, grouping: str, currencies: list[str] | None = None) -> dict:
         rows = pg_fetchall(
             f"""
             SELECT op_date, type, COALESCE(currency, %s), COALESCE(SUM(amount),0), COUNT(*)
               FROM public.operations
-             WHERE {where}
-               AND op_date BETWEEN %s AND %s
-               AND COALESCE(type,'') <> 'noop'
-               AND COALESCE(category,'') <> 'Без операций'
+             WHERE {tx.where_sql}
              GROUP BY op_date, type, COALESCE(currency, %s)
              ORDER BY op_date
             """,
-            (get_user_currency(req.user_id), *wparams, start, end, get_user_currency(req.user_id)),
+            (get_user_currency(req.user_id), *tx.params, get_user_currency(req.user_id)),
         )
         buckets: dict[tuple[date, str], dict[str, Any]] = {}
         for op_date, typ, currency, total, count in rows:
@@ -1239,32 +1341,60 @@ class MiniAppAPI:
             }
         return {"grouping": grouping, "currency_groups": groups, "items": items}
 
+    def _nice_scale(self, maximum: Decimal) -> dict[str, Any]:
+        if maximum <= 0:
+            return {"max": Decimal("0.00"), "step": Decimal("0.00"), "ticks": [Decimal("0.00")]}
+        raw_step = float(maximum) / 4.0
+        magnitude = 10 ** math.floor(math.log10(raw_step)) if raw_step > 0 else 1
+        for family in (1, 2, 2.5, 5, 10):
+            step = Decimal(str(family * magnitude))
+            scale_max = (maximum / step).to_integral_value(rounding="ROUND_CEILING") * step
+            tick_count = int(scale_max / step) + 1
+            if 4 <= tick_count <= 6:
+                return {"max": scale_max, "step": step, "ticks": [step * i for i in range(tick_count)]}
+        step = Decimal(str(10 * magnitude))
+        scale_max = (maximum / step).to_integral_value(rounding="ROUND_CEILING") * step
+        return {"max": scale_max, "step": step, "ticks": [step * i for i in range(int(scale_max / step) + 1)]}
+
     def _radar(
         self,
         req: MiniAppRequest,
-        workspace_ids: list[int | None],
-        all_scope: bool,
-        start: date,
-        end: date,
-        period_key: str,
+        tx: TransactionFilters,
+        prev_start: date,
+        prev_end: date,
+        prev_key: str,
         op_type: str,
         *,
         currency: str | None,
         available_currencies: list[str],
     ) -> dict:
-        prev_start, prev_end, prev_key = self._previous_period(start, end, period_key)
         if currency and currency not in available_currencies:
             raise MiniAppError(400, "bad_currency", "Currency is not available for radar.")
+        base = {
+            "type": "income" if op_type == "Доходы" else "expense",
+            "currency": currency,
+            "current_period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
+            "previous_period": {"key": prev_key, "start_date": prev_start, "end_date": prev_end},
+            "metric": "absolute_amount",
+            "max_axes": RADAR_MAX_AXES,
+            "scale": self._nice_scale(Decimal("0.00")),
+        }
+        if tx.category:
+            return {
+                **base,
+                "aggregation_available": True,
+                "radar_available_currencies": available_currencies,
+                "insufficient_data": True,
+                "reason": "category_filter",
+                "explanation": "Для Radar нужно несколько категорий. Сбросьте фильтр категории, чтобы сравнить структуру.",
+                "axes": [],
+            }
         if not available_currencies:
             return {
-                "type": "income" if op_type == "Доходы" else "expense",
+                **base,
                 "currency": None,
                 "aggregation_available": True,
                 "radar_available_currencies": [],
-                "current_period": {"key": period_key, "start_date": start, "end_date": end},
-                "previous_period": {"key": prev_key, "start_date": prev_start, "end_date": prev_end},
-                "metric": "normalized_category_share_percent",
-                "max_axes": RADAR_MAX_AXES,
                 "insufficient_data": True,
                 "reason": "insufficient_data",
                 "explanation": "Недостаточно данных для radar за оба периода.",
@@ -1272,22 +1402,18 @@ class MiniAppAPI:
             }
         if not currency and len(available_currencies) > 1:
             return {
-                "type": "income" if op_type == "Доходы" else "expense",
+                **base,
                 "currency": None,
                 "aggregation_available": False,
                 "radar_available_currencies": available_currencies,
-                "current_period": {"key": period_key, "start_date": start, "end_date": end},
-                "previous_period": {"key": prev_key, "start_date": prev_start, "end_date": prev_end},
-                "metric": "normalized_category_share_percent",
-                "max_axes": RADAR_MAX_AXES,
                 "insufficient_data": True,
                 "reason": "mixed_currencies",
                 "explanation": "Radar недоступен для нескольких валют без выбора конкретной валюты.",
                 "axes": [],
             }
-        where, wparams = self._workspace_filter_sql(workspace_ids, req.user_id)
         currency_filter = "AND COALESCE(currency, %s)=%s" if currency else ""
         currency_params: tuple[Any, ...] = (get_user_currency(req.user_id), currency) if currency else ()
+        where, wparams = self._workspace_filter_sql(tx.workspace_ids, req.user_id)
         rows = pg_fetchall(
             f"""
             SELECT CASE WHEN op_date BETWEEN %s AND %s THEN 'current' ELSE 'previous' END AS bucket,
@@ -1300,38 +1426,165 @@ class MiniAppAPI:
                AND COALESCE(category,'') <> 'Без операций'
              GROUP BY bucket, category
             """,
-            (start, end, *wparams, op_type, *currency_params, start, end, prev_start, prev_end),
+            (tx.start, tx.end, *wparams, op_type, *currency_params, tx.start, tx.end, prev_start, prev_end),
         )
-        totals = {"current": Decimal("0.00"), "previous": Decimal("0.00")}
         values: dict[str, dict[str, Decimal]] = defaultdict(lambda: {"current": Decimal("0.00"), "previous": Decimal("0.00")})
         for bucket, category, total in rows:
             amount = to_decimal_money(total)
             values[str(category)][str(bucket)] += amount
-            totals[str(bucket)] += amount
         ranked = sorted(values.items(), key=lambda item: item[1]["current"] + item[1]["previous"], reverse=True)[:RADAR_MAX_AXES]
-        insufficient = len(ranked) < 2 or not totals["current"] or not totals["previous"]
+        max_amount = max((max(vals["current"], vals["previous"]) for _category, vals in ranked), default=Decimal("0.00"))
+        insufficient = len(ranked) < 2 or max_amount <= 0
+        scale = self._nice_scale(max_amount)
         axes = [
             {
                 "category": category,
-                "current": int((vals["current"] / totals["current"] * Decimal("100")).to_integral_value()) if totals["current"] else 0,
-                "previous": int((vals["previous"] / totals["previous"] * Decimal("100")).to_integral_value()) if totals["previous"] else 0,
+                "current_amount": vals["current"],
+                "previous_amount": vals["previous"],
             }
             for category, vals in ranked
         ]
         return {
-            "type": "income" if op_type == "Доходы" else "expense",
-            "currency": currency,
+            **base,
             "aggregation_available": True,
             "radar_available_currencies": available_currencies,
-            "current_period": {"key": period_key, "start_date": start, "end_date": end},
-            "previous_period": {"key": prev_key, "start_date": prev_start, "end_date": prev_end},
-            "metric": "normalized_category_share_percent",
-            "max_axes": RADAR_MAX_AXES,
+            "scale": scale,
             "insufficient_data": insufficient,
             "reason": "insufficient_data" if insufficient else None,
-            "explanation": "Значения нормализованы как доля категории внутри периода.",
+            "explanation": "Radar сравнивает абсолютные суммы категорий в выбранной валюте.",
             "axes": [] if insufficient else axes,
         }
+
+    def _home_reminder(self, req: MiniAppRequest) -> dict:
+        local_today = user_local_date(req.user_id)
+        try:
+            completed_rows = pg_fetchall(
+                """
+                SELECT r.id, r.title, r.category, r.amount, r.currency, e.event_date,
+                       r.event_date, r.repeat_rule, r.is_active, e.created_at
+                  FROM public.user_reminder_events e
+                  JOIN public.user_reminders r ON r.id=e.reminder_id AND r.user_id=e.user_id
+                 WHERE e.user_id=%s
+                   AND e.event_type='recorded'
+                   AND (e.created_at AT TIME ZONE %s)::date=%s
+                 ORDER BY e.created_at DESC, e.id DESC
+                 LIMIT 1
+                """,
+                (req.user_id, user_timezone_name(req.user_id)[0], local_today),
+            )
+        except (errors.UndefinedTable, errors.UndefinedColumn):
+            completed_rows = []
+        if completed_rows:
+            rid, title, category, amount, currency, event_date, next_event_date, repeat_rule, is_active, _created_at = completed_rows[0]
+            recurring_next = next_event_date if is_active and repeat_rule != "none" and next_event_date != event_date else None
+            return {
+                "state": "completed_today",
+                "id": int(rid),
+                "title": str(title),
+                "event_date": event_date,
+                "amount_text": format_money(to_decimal_money(amount), currency),
+                "category": str(category),
+                "next_event_date": recurring_next,
+                "status_text": "Оплачено сегодня" if recurring_next else "Завершено сегодня",
+                "overdue_days": 0,
+                "repeat_rule": repeat_rule,
+            }
+        try:
+            overdue_rows = pg_fetchall(
+                """
+                SELECT id, title, category, amount, currency, event_date, repeat_rule
+                  FROM public.user_reminders
+                 WHERE user_id=%s AND is_active=TRUE AND event_date < %s
+                 ORDER BY event_date, id
+                 LIMIT 1
+                """,
+                (req.user_id, local_today),
+            )
+        except (errors.UndefinedTable, errors.UndefinedColumn):
+            overdue_rows = []
+        if overdue_rows:
+            rid, title, category, amount, currency, event_date, repeat_rule = overdue_rows[0]
+            overdue_days = (local_today - event_date).days
+            return {
+                "state": "overdue",
+                "id": int(rid),
+                "title": str(title),
+                "event_date": event_date,
+                "amount_text": format_money(to_decimal_money(amount), currency),
+                "category": str(category),
+                "next_event_date": None,
+                "status_text": f"Просрочено на {overdue_days} дн.",
+                "overdue_days": overdue_days,
+                "repeat_rule": repeat_rule,
+            }
+        try:
+            upcoming_rows = pg_fetchall(
+                """
+                SELECT id, title, category, amount, currency, event_date, repeat_rule
+                  FROM public.user_reminders
+                 WHERE user_id=%s AND is_active=TRUE AND event_date >= %s
+                 ORDER BY event_date, id
+                 LIMIT 1
+                """,
+                (req.user_id, local_today),
+            )
+        except (errors.UndefinedTable, errors.UndefinedColumn):
+            upcoming_rows = []
+        if upcoming_rows:
+            rid, title, category, amount, currency, event_date, repeat_rule = upcoming_rows[0]
+            days = (event_date - local_today).days
+            if days == 0:
+                status = "Сегодня"
+            elif days == 1:
+                status = "Завтра"
+            else:
+                status = f"Через {days} дн."
+            return {
+                "state": "upcoming",
+                "id": int(rid),
+                "title": str(title),
+                "event_date": event_date,
+                "amount_text": format_money(to_decimal_money(amount), currency),
+                "category": str(category),
+                "next_event_date": None,
+                "status_text": status,
+                "overdue_days": 0,
+                "repeat_rule": repeat_rule,
+            }
+        return {
+            "state": "empty",
+            "id": None,
+            "title": "Нет запланированных событий",
+            "event_date": None,
+            "amount_text": None,
+            "category": None,
+            "next_event_date": None,
+            "status_text": "Добавьте напоминание в боте.",
+            "overdue_days": 0,
+            "repeat_rule": None,
+        }
+
+    def _activity_calendar(self, req: MiniAppRequest, tx: TransactionFilters) -> dict:
+        rows = pg_fetchall(
+            f"""
+            SELECT op_date, COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+             GROUP BY op_date
+             ORDER BY op_date
+            """,
+            tx.params,
+        )
+        counts = {row[0]: int(row[1] or 0) for row in rows}
+        days = []
+        current = tx.start
+        max_count = 0
+        while current <= tx.end:
+            count = counts.get(current, 0)
+            max_count = max(max_count, count)
+            days.append({"date": current, "count": count})
+            current += timedelta(days=1)
+        return {"start_date": tx.start, "end_date": tx.end, "max_count": max_count, "days": days}
 
     def plans(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
@@ -1859,6 +2112,12 @@ class MiniAppAPI:
             "mini_app_tab_opened",
             "mini_app_workspace_changed",
             "mini_app_period_changed",
+            "mini_app_global_filter_opened",
+            "mini_app_global_filter_applied",
+            "mini_app_activity_calendar_opened",
+            "mini_app_analytics_details_toggled",
+            "mini_app_analytics_grouping_changed",
+            "mini_app_home_reminder_opened",
             "mini_app_transaction_add_opened",
             "mini_app_analytics_chart_filter_changed",
             "mini_app_premium_opened",
@@ -1871,7 +2130,11 @@ class MiniAppAPI:
         }
         if event not in allowed:
             raise MiniAppError(400, "bad_event", "Invalid analytics event.")
-        props = {k: v for k, v in (body.get("properties") or {}).items() if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "result", "source", "kind", "setting", "section"}}
+        props = {
+            k: v
+            for k, v in (body.get("properties") or {}).items()
+            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section"}
+        }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)
 

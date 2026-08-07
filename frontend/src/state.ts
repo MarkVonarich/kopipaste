@@ -1,11 +1,12 @@
-import type { AppState, PeriodState, ProfileSection, TabKey, ThemeMode, Workspace } from './types';
+import type { AppState, GlobalFinancialFilters, GlobalOperationType, PeriodState, ProfileSection, TabKey, ThemeMode, Workspace } from './types';
 
 const STORAGE_KEY = 'finuchet-miniapp-state-v1';
 
 type PersistedState = {
   theme?: ThemeMode;
   workspaceId?: number | 'all' | null;
-  period?: PeriodState;
+  period?: Partial<PeriodState> & { period?: PeriodState['period'] | 'last_30' };
+  globalFilters?: Partial<GlobalFinancialFilters>;
   profileAccordion?: ProfileSection;
 };
 
@@ -23,19 +24,48 @@ export function persistState(state: AppState): void {
   const persisted: PersistedState = {
     theme: state.theme,
     workspaceId: state.workspaceId,
-    period: state.period,
+    period: state.globalFilters,
+    globalFilters: state.globalFilters,
     profileAccordion: state.profileAccordion
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 }
 
+function normalizePeriod(period?: Partial<PeriodState> & { period?: PeriodState['period'] | 'last_30' }): PeriodState {
+  const raw = String(period?.period || '');
+  const key = raw === 'last_30' ? 'current_week' : raw;
+  if (key === 'custom') {
+    return { period: 'custom', start_date: period?.start_date, end_date: period?.end_date };
+  }
+  if (key === 'current_week' || key === 'current_month' || key === 'previous_month') {
+    return { period: key };
+  }
+  return { period: 'current_month' };
+}
+
+function normalizeOperationType(value?: string): GlobalOperationType {
+  return value === 'expense' || value === 'income' ? value : 'all';
+}
+
+function initialGlobalFilters(persisted: PersistedState): GlobalFinancialFilters {
+  const source = (persisted.globalFilters || persisted.period || {}) as Partial<GlobalFinancialFilters>;
+  const period = normalizePeriod(source);
+  return {
+    ...period,
+    operation_type: normalizeOperationType(source.operation_type),
+    category: typeof source.category === 'string' && source.category.trim() ? source.category.trim() : 'all'
+  };
+}
+
 export function initialState(): AppState {
   const persisted = readPersistedState();
+  const globalFilters = initialGlobalFilters(persisted);
   return {
     tab: 'home',
     theme: persisted.theme || 'telegram',
     workspaceId: persisted.workspaceId ?? null,
-    period: persisted.period || { period: 'current_month' },
+    period: globalFilters,
+    globalFilters,
     loading: true,
     search: '',
     saving: false,
@@ -67,7 +97,7 @@ export function periodLabel(period: PeriodState): string {
   return {
     current_month: 'Месяц',
     previous_month: 'Прошлый',
-    last_30: '30 дней',
+    current_week: 'Неделя',
     custom: `${period.start_date || ''} - ${period.end_date || ''}`
   }[period.period];
 }

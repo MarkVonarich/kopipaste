@@ -1,6 +1,7 @@
 export type TabKey = 'operations' | 'analytics' | 'home' | 'plans' | 'profile';
 export type ThemeMode = 'telegram' | 'light' | 'dark';
-export type PeriodKey = 'current_month' | 'previous_month' | 'last_30' | 'custom';
+export type PeriodKey = 'current_week' | 'current_month' | 'previous_month' | 'custom';
+export type GlobalOperationType = 'all' | 'expense' | 'income';
 export type OperationType = 'Расходы' | 'Доходы';
 export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'categories' | 'notifications' | 'export-data' | 'premium' | 'help' | 'legal';
 
@@ -17,6 +18,11 @@ export type PeriodState = {
   period: PeriodKey;
   start_date?: string;
   end_date?: string;
+};
+
+export type GlobalFinancialFilters = PeriodState & {
+  operation_type: GlobalOperationType;
+  category: string;
 };
 
 export type Operation = {
@@ -68,10 +74,41 @@ export type TimeDynamicsCurrencyGroup = {
   datasets: TimeDynamicsDataset[];
 };
 
-export type RadarAxis = {
+export type RadarMoneyAxis = {
   category: string;
-  current: number;
-  previous: number;
+  current_amount: string;
+  previous_amount: string;
+};
+
+export type RadarScale = {
+  max: string;
+  step: string;
+  ticks: string[];
+};
+
+export type ActivityDay = {
+  date: string;
+  count: number;
+};
+
+export type ActivityCalendar = {
+  start_date: string;
+  end_date: string;
+  max_count: number;
+  days: ActivityDay[];
+};
+
+export type HomeReminderSummary = {
+  state: 'upcoming' | 'overdue' | 'completed_today' | 'empty';
+  id?: number | null;
+  title: string;
+  event_date?: string | null;
+  amount_text?: string | null;
+  category?: string | null;
+  next_event_date?: string | null;
+  status_text: string;
+  overdue_days: number;
+  repeat_rule?: string | null;
 };
 
 export type Goal = {
@@ -187,6 +224,7 @@ export type AppState = {
   theme: ThemeMode;
   workspaceId: number | 'all' | null;
   period: PeriodState;
+  globalFilters: GlobalFinancialFilters;
   boot?: Bootstrap;
   loading: boolean;
   error?: string;
@@ -213,6 +251,7 @@ export type AppState = {
     categoryType: 'expense' | 'income';
     dynamicsType: 'expense' | 'income' | 'both';
     radarType: 'expense' | 'income';
+    grouping?: 'day' | 'week' | 'month';
     categoryCurrency?: string;
     dynamicsCurrency?: string;
     radarCurrency?: string;

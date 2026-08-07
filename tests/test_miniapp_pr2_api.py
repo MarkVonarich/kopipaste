@@ -197,7 +197,9 @@ def test_analytics_returns_summary_category_other_dynamics_and_radar(monkeypatch
     assert data["category_structure"]["items"][-1]["category"] == "Прочее"
     assert data["time_dynamics"]["grouping"] == "day"
     assert data["radar"]["insufficient_data"] is False
-    assert data["radar"]["metric"] == "normalized_category_share_percent"
+    assert data["radar"]["metric"] == "absolute_amount"
+    axes = {axis["category"]: axis for axis in data["radar"]["axes"]}
+    assert axes["Food"]["current_amount"] == "300.00"
 
 
 def test_radar_insufficient_data_and_foreign_workspace_denied(monkeypatch):
@@ -348,7 +350,8 @@ def test_radar_currency_discovery_uses_previous_period_when_current_empty(monkey
 
     filtered = api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "RUB"})["data"]
     assert filtered["radar"]["currency"] == "RUB"
-    assert filtered["radar"]["reason"] == "insufficient_data"
+    assert filtered["radar"]["reason"] is None
+    assert filtered["radar"]["axes"][0]["previous_amount"] == "100.00"
 
     with pytest.raises(MiniAppError) as exc:
         api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "USD"})
