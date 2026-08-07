@@ -5,7 +5,7 @@ import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { AppState, BudgetLimit, CategoryOption, GlobalFinancialFilters, Goal, Operation, OperationType, PeriodKey, ThemeMode, Workspace } from './types';
+import type { AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, Operation, OperationType, PeriodKey, Reminder, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
@@ -13,7 +13,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { HomeScreen } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
-import { GoalContributionForm, GoalForm, LimitForm, PlansScreen } from './components/PlansScreen';
+import { CategoryBudgetForm, GoalContributionForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
 import { AdditionalMenu, CurrencyForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
@@ -31,6 +31,8 @@ let profile: Awaited<ReturnType<typeof api.profile>> | null = null;
 let selectedOperation: Operation | null = null;
 let selectedGoal: Goal | null = null;
 let selectedLimit: BudgetLimit | null = null;
+let selectedReminder: Reminder | null = null;
+let selectedCategoryBudget: CategoryBudgetGroup | null = null;
 let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
@@ -107,6 +109,36 @@ function setGlobalFilters(next: GlobalFinancialFilters): void {
 
 function operationAmount(op: Operation): string {
   return op.amount_text || formatMoneyString(op.amount, op.currency);
+}
+
+function reminderPayload(form: HTMLFormElement) {
+  const data = new FormData(form);
+  const repeatRule = String(data.get('repeat_rule') || 'none');
+  const interval = Number(data.get('repeat_interval_days') || 0);
+  return {
+    workspace_id: state.workspaceId,
+    title: String(data.get('title') || '').trim(),
+    amount: normalizeMoneyText(String(data.get('amount') || '')),
+    category: String(data.get('category') || ''),
+    rem_type: String(data.get('rem_type') || 'expense') as 'expense' | 'income',
+    event_date: String(data.get('event_date') || ''),
+    repeat_rule: repeatRule as 'none' | 'weekly' | 'monthly' | 'yearly' | 'custom_days',
+    repeat_interval_days: repeatRule === 'custom_days' ? interval || 1 : null,
+    notify_days_before: Number(data.get('notify_days_before') || 1),
+    is_active: data.get('is_active') === 'on',
+  };
+}
+
+function categoryBudgetPayload(form: HTMLFormElement) {
+  const data = new FormData(form);
+  return {
+    workspace_id: state.workspaceId,
+    title: String(data.get('title') || '').trim(),
+    amount: normalizeMoneyText(String(data.get('amount') || '')),
+    period: String(data.get('period') || 'month') as 'week' | 'month',
+    categories: data.getAll('categories').map((item) => String(item)),
+    alerts_enabled: data.get('alerts_enabled') === 'on',
+  };
 }
 
 function renderTopbar(): string {
@@ -194,6 +226,39 @@ function renderSheet(): string {
   }
   if (state.sheet === 'limit-edit' && selectedLimit) {
     return BottomSheet('Изменить лимит', LimitForm(selectedLimit, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'reminder-create') {
+    return BottomSheet('Новое напоминание', ReminderForm(null, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'reminder-edit' && selectedReminder) {
+    return BottomSheet('Изменить напоминание', ReminderForm(selectedReminder, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'reminder-detail' && selectedReminder) {
+    const primary = selectedReminder.status === 'overdue' ? 'Оплачено — записать' : 'Записать операцию';
+    return BottomSheet(esc(selectedReminder.title), `
+      <div class="detail-grid">
+        <div class="detail-row"><span>Сумма</span><strong>${esc(selectedReminder.amount_text)}</strong></div>
+        <div class="detail-row"><span>Тип</span><strong>${esc(selectedReminder.rem_type)}</strong></div>
+        <div class="detail-row"><span>Категория</span><strong>${esc(selectedReminder.category)}</strong></div>
+        <div class="detail-row"><span>Дата</span><strong>${esc(selectedReminder.event_date)}</strong></div>
+        <div class="detail-row"><span>Повтор</span><strong>${esc(selectedReminder.repeat_rule)}</strong></div>
+        <div class="detail-row"><span>Статус</span><strong>${selectedReminder.is_active ? 'активно' : 'выключено'}</strong></div>
+      </div>
+      <div class="form-grid">
+        <button class="button primary" data-action="reminder-record" data-id="${selectedReminder.id}" ${selectedReminder.is_active ? '' : 'disabled'}>${esc(primary)}</button>
+        <button class="button secondary" data-action="reminder-snooze" data-id="${selectedReminder.id}">Напомнить завтра</button>
+        <button class="button secondary" data-action="reminder-edit" data-id="${selectedReminder.id}">Изменить</button>
+        <button class="button text" data-action="reminder-toggle" data-id="${selectedReminder.id}">${selectedReminder.is_active ? 'Выключить' : 'Включить'}</button>
+        <button class="button danger" data-action="reminder-delete" data-id="${selectedReminder.id}">Удалить</button>
+        <button class="button text" data-action="go-reminders">Все напоминания</button>
+      </div>
+    `);
+  }
+  if (state.sheet === 'category-budget-create') {
+    return BottomSheet('Новый бюджет категорий', CategoryBudgetForm(null, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'category-budget-edit' && selectedCategoryBudget) {
+    return BottomSheet('Изменить бюджет категорий', CategoryBudgetForm(selectedCategoryBudget, categoryOptions, state.saving, state.saveError));
   }
   if (state.sheet === 'premium') {
     return BottomSheet('Premium', InfoPanel('Premium', profile?.premium?.description || 'Premium-раздел пока информационный.'));
@@ -297,6 +362,16 @@ function safeError(error: unknown): string {
     goal_preview_stale: 'План изменился. Обновите предпросмотр.',
     rate_limited: 'Слишком много действий подряд. Попробуйте позже.',
     miniapp_not_configured: 'Mini App ещё не настроен на сервере.',
+    reminder_not_found: 'Напоминание не найдено.',
+    reminder_inactive: 'Напоминание выключено.',
+    reminder_already_recorded: 'Это напоминание уже записано.',
+    reminder_invalid_date: 'Проверьте дату напоминания.',
+    reminder_invalid_repeat: 'Проверьте повтор напоминания.',
+    reminder_access_denied: 'Нет доступа к напоминанию.',
+    reminder_stale_occurrence: 'Напоминание уже изменилось. Обновите экран.',
+    budget_not_found: 'Бюджет не найден.',
+    budget_invalid_categories: 'Выберите категории из списка.',
+    budget_access_denied: 'Нет доступа к бюджету.',
   }[code] || 'Не получилось выполнить действие. Попробуйте ещё раз.';
 }
 
@@ -696,7 +771,7 @@ function wireEvents(): void {
   app.querySelectorAll<HTMLButtonElement>('[data-action="plans-mode"]').forEach((button) => {
     button.addEventListener('click', () => {
       hapticSelection();
-      state.plansMode = button.dataset.mode === 'limits' ? 'limits' : 'goals';
+      state.plansMode = button.dataset.mode === 'limits' ? 'limits' : button.dataset.mode === 'reminders' ? 'reminders' : 'goals';
       render();
     });
   });
@@ -743,6 +818,22 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async () => {
     await api.track('mini_app_home_reminder_opened', { result: overview?.reminder?.state || 'empty', source: 'mini_app' });
+    const reminderId = overview?.reminder?.id;
+    if (!reminderId) {
+      state.tab = 'plans';
+      state.plansMode = 'reminders';
+      await loadScreen();
+      return;
+    }
+    try {
+      selectedReminder = (await api.reminderDetail(reminderId)).reminder;
+      state.sheet = 'reminder-detail';
+      state.reminderIdempotencyKey = requestId();
+      render();
+    } catch (error) {
+      state.error = safeError(error);
+      render();
+    }
   });
   app.querySelector<HTMLButtonElement>('[data-action="goal-create"]')?.addEventListener('click', () => {
     state.sheet = 'goal-create';
@@ -815,6 +906,142 @@ function wireEvents(): void {
       selectedLimit = (plans?.limits || []).find((limit) => limit.id === button.dataset.id) || null;
       state.confirmLimitDeleteId = selectedLimit?.id;
       render();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="reminder-create"]')?.addEventListener('click', async () => {
+    await loadCategoriesFor('expense');
+    selectedReminder = null;
+    state.sheet = 'reminder-create';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="reminder-open"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      selectedReminder = (plans?.reminders || []).find((reminder) => reminder.id === Number(button.dataset.id)) || null;
+      if (!selectedReminder) selectedReminder = (await api.reminderDetail(Number(button.dataset.id))).reminder;
+      state.sheet = 'reminder-detail';
+      state.reminderIdempotencyKey = requestId();
+      state.saveError = undefined;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="reminder-edit"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await loadCategoriesFor(selectedReminder?.rem_type === 'Доходы' ? 'income' : 'expense');
+      selectedReminder = selectedReminder?.id === Number(button.dataset.id)
+        ? selectedReminder
+        : (plans?.reminders || []).find((reminder) => reminder.id === Number(button.dataset.id)) || null;
+      state.sheet = selectedReminder ? 'reminder-edit' : null;
+      state.saveError = undefined;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="reminder-record"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (state.saving) return;
+      const reminderId = Number(button.dataset.id);
+      const reminder = selectedReminder?.id === reminderId ? selectedReminder : (plans?.reminders || []).find((item) => item.id === reminderId) || null;
+      state.saving = true;
+      render();
+      try {
+        await api.recordReminder(reminderId, {
+          workspace_id: state.workspaceId,
+          idempotency_key: state.reminderIdempotencyKey || requestId(),
+          event_date: reminder?.event_date
+        });
+        selectedReminder = null;
+        state.sheet = null;
+        state.reminderIdempotencyKey = requestId();
+        showToast('Операция записана');
+        if (state.tab === 'home') {
+          await loadScreen();
+        } else {
+          await reloadActive();
+        }
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="reminder-snooze"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        selectedReminder = (await api.snoozeReminder(Number(button.dataset.id), { days: 1 })).reminder;
+        state.sheet = null;
+        showToast('Напомню завтра');
+        await reloadActive();
+      } catch (error) {
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="reminder-toggle"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const reminderId = Number(button.dataset.id);
+      const reminder = selectedReminder?.id === reminderId ? selectedReminder : (plans?.reminders || []).find((item) => item.id === reminderId) || null;
+      try {
+        selectedReminder = (await api.toggleReminder(reminderId, reminder ? !reminder.is_active : undefined)).reminder;
+        showToast('Напоминание обновлено');
+        await reloadActive();
+      } catch (error) {
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="reminder-delete"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        await api.deleteReminder(Number(button.dataset.id));
+        selectedReminder = null;
+        state.sheet = null;
+        showToast('Напоминание удалено');
+        await reloadActive();
+      } catch (error) {
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="go-reminders"]')?.addEventListener('click', async () => {
+    state.tab = 'plans';
+    state.plansMode = 'reminders';
+    state.sheet = null;
+    await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="category-budget-create"]')?.addEventListener('click', async () => {
+    await loadCategoriesFor('expense');
+    selectedCategoryBudget = null;
+    state.sheet = 'category-budget-create';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-budget-edit"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await loadCategoriesFor('expense');
+      selectedCategoryBudget = (plans?.category_budgets || []).find((budget) => budget.id === Number(button.dataset.id)) || null;
+      state.sheet = selectedCategoryBudget ? 'category-budget-edit' : null;
+      state.saveError = undefined;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-budget-toggle"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const budget = (plans?.category_budgets || []).find((item) => item.id === Number(button.dataset.id));
+      if (!budget) return;
+      await api.updateCategoryBudget(budget.id, { workspace_id: state.workspaceId, toggle: true, enabled: !budget.enabled });
+      showToast('Бюджет обновлён');
+      await reloadActive();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-budget-delete"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await api.deleteCategoryBudget(Number(button.dataset.id), state.workspaceId);
+      showToast('Бюджет удалён');
+      await reloadActive();
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
@@ -1184,6 +1411,82 @@ function wireEvents(): void {
       state.dirty = false;
       closeSheet();
       showToast('Лимит обновлён');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="create-reminder"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.createReminder(reminderPayload(form));
+      closeSheet();
+      showToast('Напоминание создано');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="save-reminder"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      selectedReminder = (await api.updateReminder(Number(form.dataset.id), reminderPayload(form))).reminder;
+      closeSheet();
+      showToast('Напоминание обновлено');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="create-category-budget"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.createCategoryBudget(categoryBudgetPayload(form));
+      closeSheet();
+      showToast('Бюджет создан');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="save-category-budget"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.updateCategoryBudget(Number(form.dataset.id), categoryBudgetPayload(form));
+      closeSheet();
+      showToast('Бюджет обновлён');
       await reloadActive();
     } catch (error) {
       state.saving = false;

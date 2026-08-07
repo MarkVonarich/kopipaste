@@ -241,6 +241,13 @@ textarea:disabled {
   gap: var(--space-7);
 }
 
+.home-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--space-3);
+}
+
 .hero-metric {
   display: grid;
   gap: var(--space-3);
@@ -248,6 +255,29 @@ textarea:disabled {
   border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.hero-activity {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.hero-activity strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.hero-activity p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .eyebrow {
@@ -261,7 +291,7 @@ textarea:disabled {
 .hero-metric strong {
   display: block;
   color: var(--text);
-  font-size: 38px;
+  font-size: 32px;
   font-weight: 700;
   line-height: 0.98;
   letter-spacing: 0;
@@ -387,6 +417,11 @@ textarea:disabled {
   background: var(--surface);
   color: var(--text);
   text-align: left;
+}
+
+.smart-card .cta-text {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .smart-card span {
@@ -864,7 +899,7 @@ textarea:disabled {
 
 .segmented {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-1);
   min-height: 48px;
   padding: var(--space-1);
@@ -1107,6 +1142,42 @@ canvas {
   padding-bottom: var(--space-1);
 }
 
+.activity-scroll.compact {
+  margin-top: var(--space-1);
+  padding-bottom: 0;
+}
+
+.activity-scroll.compact .activity-layout {
+  grid-template-columns: 22px max-content;
+  gap: 3px 5px;
+}
+
+.activity-scroll.compact .activity-months {
+  grid-template-columns: repeat(var(--activity-weeks), 14px);
+  gap: 3px;
+  font-size: 9px;
+  line-height: 14px;
+}
+
+.activity-scroll.compact .activity-weekdays {
+  grid-template-rows: repeat(7, 14px);
+  gap: 3px;
+  font-size: 9px;
+  line-height: 14px;
+}
+
+.activity-scroll.compact .activity-calendar {
+  grid-template-rows: repeat(7, 14px);
+  grid-auto-columns: 14px;
+  gap: 3px;
+}
+
+.activity-scroll.compact .activity-cell {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+}
+
 .activity-layout {
   display: grid;
   grid-template-columns: 28px max-content;
@@ -1187,6 +1258,34 @@ canvas {
   height: 14px;
   border-radius: 4px;
   background: var(--surface-secondary);
+}
+
+.chip-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.chip-select {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+.chip-select legend {
+  width: 100%;
+  margin-bottom: var(--space-1);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.chip-select .chip {
+  gap: var(--space-1);
 }
 
 .entity-head {
@@ -1404,6 +1503,7 @@ canvas {
   .toolbar,
   .custom-period,
   .metric-pair,
+  .home-hero-grid,
   .home-columns,
   .smart-home-grid,
   .metrics-grid,

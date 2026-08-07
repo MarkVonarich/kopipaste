@@ -6,6 +6,7 @@ import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
 import { GoalForm, PlansScreen } from '../src/components/PlansScreen';
 import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
+import { ActivityCalendarView } from '../src/components/ActivityCalendar';
 import { AdditionalMenu, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
 
 const overview = {
@@ -212,7 +213,7 @@ describe('acceptance components', () => {
     expect(html).toContain('Недостаточно данных');
   });
 
-  it('renders money radar long labels, collapsed details and activity heatmap', () => {
+  it('renders money radar long labels and keeps activity out of Analytics', () => {
     const longCategory = 'Фиксированные расходы на коммунальные услуги';
     const html = AnalyticsScreen({
       period: overview.period,
@@ -262,57 +263,13 @@ describe('acceptance components', () => {
     expect(html).not.toContain('...');
     expect(html).toContain('5к');
     expect(html).toContain('Текущий период');
-    expect(html).toContain('Пн');
-    expect(html).toContain('Пт');
-    expect(html).toContain('июл');
-    expect(html).toContain('авг');
-    expect(html).toContain('activity-calendar');
-    expect(html).toContain('1 августа — 2 операций');
-    expect(html).toContain('data-weekday-row="5"');
-    expect(html).toContain('activity-scroll');
+    expect(html).not.toContain('Количество операций по дням');
+    expect(html).not.toContain('activity-calendar');
   });
 
   it('aligns activity calendar Monday and Friday starts', () => {
-    const base = {
-      period: overview.period,
-      overview,
-      aggregation_available: true,
-      available_currencies: ['RUB'],
-      radar_available_currencies: [],
-      selected_currency: null,
-      currency_groups: {},
-      summary: {
-        aggregation_available: true,
-        available_currencies: ['RUB'],
-        currency_groups: {},
-        totals_by_currency: {},
-        result_by_currency: {},
-      },
-      category_structure: { type: 'expense' as const, top_n: 5, currency_groups: {}, items: [] },
-      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
-      radar: {
-        type: 'expense' as const,
-        currency: null,
-        aggregation_available: true,
-        current_period: overview.period,
-        previous_period: { key: 'previous_month', start_date: '2026-07-01', end_date: '2026-07-31' },
-        metric: 'absolute_amount',
-        max_axes: 6,
-        scale: { max: '0.00', step: '0.00', ticks: ['0.00'] },
-        insufficient_data: true,
-        explanation: 'Недостаточно данных',
-        axes: [],
-      },
-      top_expense_categories: [],
-    };
-    const monday = AnalyticsScreen({
-      ...base,
-      activity_calendar: { start_date: '2026-08-03', end_date: '2026-08-04', max_count: 1, days: [{ date: '2026-08-03', count: 1 }, { date: '2026-08-04', count: 0 }] },
-    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_week', operation_type: 'all', category: 'all' });
-    const friday = AnalyticsScreen({
-      ...base,
-      activity_calendar: { start_date: '2026-08-07', end_date: '2026-08-08', max_count: 1, days: [{ date: '2026-08-07', count: 1 }, { date: '2026-08-08', count: 0 }] },
-    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'custom', operation_type: 'all', category: 'all' });
+    const monday = ActivityCalendarView({ start_date: '2026-08-03', end_date: '2026-08-04', max_count: 1, days: [{ date: '2026-08-03', count: 1 }, { date: '2026-08-04', count: 0 }] });
+    const friday = ActivityCalendarView({ start_date: '2026-08-07', end_date: '2026-08-08', max_count: 1, days: [{ date: '2026-08-07', count: 1 }, { date: '2026-08-08', count: 0 }] });
 
     expect(monday).toContain('3 августа — 1 операций');
     expect(monday).toContain('data-weekday-row="1"');

@@ -71,4 +71,29 @@ describe('mini app startup guard', () => {
     expect(document.body.textContent).toContain(TELEGRAM_LAUNCH_MESSAGE);
     expect(apiMock.bootstrap).not.toHaveBeenCalled();
   });
+
+  it('allows Main Mini App launch start_param without trusting it for bootstrap', async () => {
+    const ready = vi.fn();
+    const expand = vi.fn();
+    window.Telegram = {
+      WebApp: {
+        initData: 'query_id=1&user=%7B%22id%22%3A42%7D&auth_date=1&hash=abc',
+        start_param: 'workspace_999',
+        tgWebAppStartParam: 'workspace_999',
+        ready,
+        expand,
+        onEvent: vi.fn()
+      }
+    } as typeof window.Telegram;
+    const apiMock = installApiMock();
+
+    await import('../src/main');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ready).toHaveBeenCalled();
+    expect(expand).toHaveBeenCalled();
+    expect(apiMock.bootstrap).toHaveBeenCalledOnce();
+    expect(document.body.textContent).not.toContain(TELEGRAM_LAUNCH_MESSAGE);
+  });
 });

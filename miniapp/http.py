@@ -112,6 +112,34 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.analytics(req, params))
         if method == "GET" and path == "/miniapp/api/plans":
             return _json_response(start_response, 200, api.plans(req, params))
+        if method == "GET" and path == "/miniapp/api/reminders":
+            return _json_response(start_response, 200, api.reminders(req, params))
+        if method == "POST" and path == "/miniapp/api/reminders":
+            return _json_response(start_response, 200, api.create_reminder(req, body))
+        if path.startswith("/miniapp/api/reminders/"):
+            parts = path.strip("/").split("/")
+            reminder_id = int(parts[3])
+            tail = parts[4] if len(parts) > 4 else ""
+            if method == "GET" and not tail:
+                return _json_response(start_response, 200, api.reminder_detail(req, reminder_id))
+            if method == "PATCH" and not tail:
+                return _json_response(start_response, 200, api.update_reminder(req, reminder_id, body))
+            if method == "DELETE" and not tail:
+                return _json_response(start_response, 200, api.delete_reminder(req, reminder_id))
+            if method == "POST" and tail == "record":
+                return _json_response(start_response, 200, api.record_reminder(req, reminder_id, body))
+            if method == "POST" and tail == "snooze":
+                return _json_response(start_response, 200, api.snooze_reminder(req, reminder_id, body))
+            if method == "POST" and tail == "toggle":
+                return _json_response(start_response, 200, api.toggle_reminder(req, reminder_id, body))
+        if method == "POST" and path == "/miniapp/api/category-budgets":
+            return _json_response(start_response, 200, api.create_category_budget(req, body))
+        if path.startswith("/miniapp/api/category-budgets/"):
+            budget_id = int(path.rsplit("/", 1)[-1])
+            if method == "PATCH":
+                return _json_response(start_response, 200, api.update_category_budget(req, budget_id, body))
+            if method == "DELETE":
+                return _json_response(start_response, 200, api.delete_category_budget(req, budget_id, body))
         if method == "GET" and path == "/miniapp/api/goals":
             return _json_response(start_response, 200, api.goals(req, params))
         if method == "POST" and path == "/miniapp/api/goals":

@@ -18,6 +18,13 @@ import type {
   TimeDynamicsItem,
   ActivityCalendar,
   HomeReminderSummary,
+  CategoryBudgetGroup,
+  CategoryBudgetPayload,
+  GeneralSpendingLimit,
+  Reminder,
+  ReminderPayload,
+  ReminderRecordPayload,
+  ReminderSnoozePayload,
   Workspace
 } from './types';
 
@@ -40,6 +47,7 @@ export type Overview = {
   focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
   insight?: { kind: string; tone: string; title: string; text: string; currency?: string } | null;
   reminder?: HomeReminderSummary | null;
+  activity?: ActivityCalendar;
 };
 
 export type AnalyticsResponse = {
@@ -94,6 +102,9 @@ export type PlansResponse = {
   read_only: boolean;
   goals: Goal[];
   limits: BudgetLimit[];
+  general_limits: GeneralSpendingLimit[];
+  category_budgets: CategoryBudgetGroup[];
+  reminders: Reminder[];
   all_scope_note?: string | null;
 };
 
@@ -223,6 +234,19 @@ export const api = {
     apiFetch<{ goal: Goal }>(`/miniapp/api/goals/${id}/status`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, status }) }),
   setGoalReminders: (id: number, workspaceId: number | 'all' | null, enabled: boolean) =>
     apiFetch<{ goal: Goal }>(`/miniapp/api/goals/${id}/reminders`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, enabled }) }),
+  reminders: () => apiFetch<{ items: Reminder[] }>('/miniapp/api/reminders'),
+  reminderDetail: (id: number) => apiFetch<{ reminder: Reminder }>(`/miniapp/api/reminders/${id}`),
+  createReminder: (payload: ReminderPayload) =>
+    apiFetch<{ reminder: Reminder }>('/miniapp/api/reminders', { method: 'POST', body: JSON.stringify(payload) }),
+  updateReminder: (id: number, payload: Partial<ReminderPayload>) =>
+    apiFetch<{ reminder: Reminder }>(`/miniapp/api/reminders/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteReminder: (id: number) => apiFetch<{ deleted: boolean; reminder_id: number }>(`/miniapp/api/reminders/${id}`, { method: 'DELETE', body: '{}' }),
+  recordReminder: (id: number, payload: ReminderRecordPayload) =>
+    apiFetch<{ result: string; reminder?: Reminder | null; operation?: Operation | null }>(`/miniapp/api/reminders/${id}/record`, { method: 'POST', body: JSON.stringify(payload) }),
+  snoozeReminder: (id: number, payload: ReminderSnoozePayload = {}) =>
+    apiFetch<{ reminder: Reminder }>(`/miniapp/api/reminders/${id}/snooze`, { method: 'POST', body: JSON.stringify(payload) }),
+  toggleReminder: (id: number, enabled?: boolean) =>
+    apiFetch<{ reminder: Reminder }>(`/miniapp/api/reminders/${id}/toggle`, { method: 'POST', body: JSON.stringify(enabled === undefined ? {} : { enabled }) }),
   limits: (workspaceId: number | 'all' | null) => apiFetch<{ items: BudgetLimit[]; read_only: boolean; note?: string }>(`/miniapp/api/limits${query({ workspace_id: workspaceId })}`),
   createLimit: (payload: LimitPayload) =>
     apiFetch<{ limit: BudgetLimit }>('/miniapp/api/limits', { method: 'POST', body: JSON.stringify(payload) }),
@@ -230,6 +254,12 @@ export const api = {
     apiFetch<{ limit: BudgetLimit }>(`/miniapp/api/limits/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteLimit: (id: string, workspaceId: number | 'all' | null) =>
     apiFetch<{ deleted: boolean; limit_id: string }>(`/miniapp/api/limits/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),
+  createCategoryBudget: (payload: CategoryBudgetPayload) =>
+    apiFetch<{ budget: CategoryBudgetGroup }>('/miniapp/api/category-budgets', { method: 'POST', body: JSON.stringify(payload) }),
+  updateCategoryBudget: (id: number, payload: CategoryBudgetPayload | ({ workspace_id: number | 'all' | null; toggle: true; enabled?: boolean; alerts_enabled?: boolean })) =>
+    apiFetch<{ budget: CategoryBudgetGroup }>(`/miniapp/api/category-budgets/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteCategoryBudget: (id: number, workspaceId: number | 'all' | null) =>
+    apiFetch<{ deleted: boolean; budget_id: number }>(`/miniapp/api/category-budgets/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),
   profile: () => apiFetch<{ theme: ThemeMode; preferred_name?: string | null; display_name?: string; currency: string; available_currencies?: string[]; timezone: string; timezone_options?: Array<{ label: string; value: string }>; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] } }>('/miniapp/api/profile'),
   setTheme: (theme: ThemeMode) => apiFetch<{ theme: ThemeMode }>('/miniapp/api/profile/theme', { method: 'POST', body: JSON.stringify({ theme }) }),
   setPreferredName: (preferred_name: string) => apiFetch<{ preferred_name?: string | null; display_name: string }>('/miniapp/api/profile/preferred-name', { method: 'POST', body: JSON.stringify({ preferred_name }) }),

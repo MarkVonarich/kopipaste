@@ -109,21 +109,37 @@ The `/app` command shows a WebApp button only when `MINIAPP_PUBLIC_URL` is confi
 
 On bot startup, the application registers Telegram's persistent chat menu button with `MenuButtonWebApp` when `MINIAPP_PUBLIC_URL` is present and HTTPS. Registration is idempotent and startup continues on temporary Telegram API errors.
 
-BotFather Main Mini App still needs a manual production check:
+## MAIN MINI APP SETUP
 
-Main Mini App production setup:
+BotFather Main Mini App setup is manual after production deploy. Do not run it
+from application code or deployment scripts.
 
 1. Open `@BotFather`.
 2. Select the production bot `@uchet_finbot`.
-3. Configure the Main Mini App.
-4. URL: `https://app.kopipaste.ru`.
-5. Name: `КопиPaste`.
-6. Launch/Open label: `Открыть`, if the Telegram UI allows choosing the label.
-7. Verify the launch button in the bot profile.
-8. Verify the Apps/Search surface that Telegram shows for Main Mini Apps.
-9. Verify Telegram Desktop, Android and iOS.
+3. Open Bot Settings.
+4. Configure Main Mini App.
+5. URL: `https://app.kopipaste.ru`.
+6. Name: `КопиPaste`.
+7. Launch label: `Открыть`, if Telegram allows changing the label.
+8. Save.
+9. Open the bot profile.
+10. Verify the system Launch/Open App button.
+11. Verify the Apps section in Telegram Search.
+12. Verify Telegram Desktop.
+13. Verify Android.
+14. Verify iOS.
+15. Verify the chat-list surface where supported by the Telegram client.
 
-The exact placement of Telegram's system launch button is controlled by the Telegram client. The Python Bot API cannot force Telegram to render a Main Mini App button in a particular chat-list position. Keep the persistent `MenuButtonWebApp` and `/app` command as supported entry points.
+The exact placement of Telegram's system launch button, including whether it is
+shown directly in a chat-list row, is controlled by Telegram client version and
+platform. The Bot API and `setChatMenuButton` cannot force that placement. Keep
+the persistent `MenuButtonWebApp` with label `Открыть`, `/app`, and inline WebApp
+button as supported entry points.
+
+Main Mini App launch through `https://t.me/uchet_finbot?startapp` must use normal
+Telegram `initData` authentication. The frontend may safely receive an empty or
+unused `tgWebAppStartParam`; it is not authorization data and must not switch
+workspace or expose another user's data.
 
 Do not paste tokens or secrets into BotFather notes or deployment logs.
 

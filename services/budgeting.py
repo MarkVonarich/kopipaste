@@ -355,6 +355,117 @@ def create_category_budget_group(*, user_id: int, workspace_id: int | None, name
         conn.close()
 
 
+def update_category_budget_group(*, user_id: int, workspace_id: int | None, group_id: int, name: str, amount: Decimal | int | str, categories: Iterable[str], currency: str | None = None, period_type: str = "month", enabled: bool = True, alerts_enabled: bool = True) -> int:
+    unique_categories = list(dict.fromkeys(c.strip() for c in categories if c and c.strip()))
+    if not unique_categories:
+        raise ValueError("at least one category is required")
+    currency = currency or get_user_currency(user_id)
+    amount_dec = to_decimal_money(amount, positive=True)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.category_budget_groups
+                   SET name=%s, amount=%s, currency=%s, period_type=%s,
+                       enabled=%s, alerts_enabled=%s, updated_at=now()
+                 WHERE id=%s
+                   AND owner_user_id=%s
+                   AND workspace_id IS NOT DISTINCT FROM %s
+                RETURNING id
+                """,
+                (name.strip()[:120], amount_dec, currency, period_type, enabled, alerts_enabled, int(group_id), int(user_id), workspace_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise LookupError("budget_not_found")
+            cur.execute("DELETE FROM public.category_budget_group_members WHERE group_id=%s", (int(group_id),))
+            for category in unique_categories:
+                cur.execute(
+                    """
+                    INSERT INTO public.category_budget_group_members (group_id, category_name, normalized_category_name)
+                    VALUES (%s, %s, lower(%s))
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (int(group_id), category[:64], category[:64]),
+                )
+        conn.commit()
+        return int(group_id)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def set_category_budget_group_enabled(*, user_id: int, workspace_id: int | None, group_id: int, enabled: bool | None = None, alerts_enabled: bool | None = None) -> dict:
+    assignments: list[str] = []
+    values: list = []
+    if enabled is not None:
+        assignments.append("enabled=%s")
+        values.append(bool(enabled))
+    if alerts_enabled is not None:
+        assignments.append("alerts_enabled=%s")
+        values.append(bool(alerts_enabled))
+    if not assignments:
+        rows = list_category_budget_groups(user_id, workspace_id)
+        for row in rows:
+            if int(row["id"]) == int(group_id):
+                return row
+        raise LookupError("budget_not_found")
+    values.extend([int(group_id), int(user_id), workspace_id])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE public.category_budget_groups
+                   SET {', '.join(assignments)}, updated_at=now()
+                 WHERE id=%s
+                   AND owner_user_id=%s
+                   AND workspace_id IS NOT DISTINCT FROM %s
+                RETURNING id
+                """,
+                tuple(values),
+            )
+            if not cur.fetchone():
+                raise LookupError("budget_not_found")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    rows = list_category_budget_groups(user_id, workspace_id)
+    for row in rows:
+        if int(row["id"]) == int(group_id):
+            return row
+    raise LookupError("budget_not_found")
+
+
+def delete_category_budget_group(*, user_id: int, workspace_id: int | None, group_id: int) -> bool:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM public.category_budget_groups
+                 WHERE id=%s
+                   AND owner_user_id=%s
+                   AND workspace_id IS NOT DISTINCT FROM %s
+                """,
+                (int(group_id), int(user_id), workspace_id),
+            )
+            deleted = cur.rowcount == 1
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def list_active_expense_categories(*, user_id: int, workspace_id: int | None = None, limit: int = 100) -> list[BudgetCategoryOption]:
     """Return current-workspace expense category choices without embedding names in callback_data."""
     found: dict[str, BudgetCategoryOption] = {}
