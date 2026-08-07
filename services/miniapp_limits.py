@@ -23,6 +23,7 @@ class StoredLimit:
     period: str
     workspace_id: int | None
     alerts_enabled: bool = True
+    enabled: bool = True
 
 
 class MiniAppLimitError(Exception):
@@ -55,7 +56,8 @@ def _general_row_to_limit(row) -> StoredLimit:
         currency=row[3],
         period=row[4],
         workspace_id=int(row[5]) if row[5] is not None else None,
-        alerts_enabled=bool(row[6]),
+        enabled=bool(row[6]),
+        alerts_enabled=bool(row[7]),
     )
 
 
@@ -83,7 +85,7 @@ def create_or_update_general_limit_tx(
               (workspace_id, owner_user_id, name, amount, currency, period_type,
                enabled, alerts_enabled, notification_thresholds)
             VALUES (%s,%s,%s,%s,%s,%s,true,%s,%s)
-            RETURNING id, name, amount, currency, period_type, workspace_id, alerts_enabled
+            RETURNING id, name, amount, currency, period_type, workspace_id, enabled, alerts_enabled
             """,
             (workspace_id, user_id, title, amount_dec, cur_currency, period, alerts_enabled, Json(list(DEFAULT_THRESHOLDS))),
         )
@@ -95,14 +97,13 @@ def create_or_update_general_limit_tx(
                    amount=%s,
                    currency=COALESCE(%s, currency),
                    period_type=%s,
-                   enabled=true,
                    alerts_enabled=%s,
                    notification_thresholds=%s,
                    updated_at=now()
              WHERE id=%s
                AND owner_user_id=%s
                AND workspace_id IS NOT DISTINCT FROM %s
-            RETURNING id, name, amount, currency, period_type, workspace_id, alerts_enabled
+            RETURNING id, name, amount, currency, period_type, workspace_id, enabled, alerts_enabled
             """,
             (title, amount_dec, cur_currency, period, alerts_enabled, Json(list(DEFAULT_THRESHOLDS)), int(limit_id), user_id, workspace_id),
         )
@@ -146,6 +147,50 @@ def create_or_update_general_limit(
     except errors.UniqueViolation as exc:
         conn.rollback()
         raise MiniAppLimitError("limit_conflict") from exc
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def set_general_limit_enabled(
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    limit_id: int,
+    enabled: bool | None = None,
+    alerts_enabled: bool | None = None,
+) -> StoredLimit:
+    assignments: list[str] = []
+    values: list = []
+    if enabled is not None:
+        assignments.append("enabled=%s")
+        values.append(bool(enabled))
+    if alerts_enabled is not None:
+        assignments.append("alerts_enabled=%s")
+        values.append(bool(alerts_enabled))
+    assignments.append("updated_at=now()")
+    values.extend([int(limit_id), int(user_id), workspace_id])
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE public.general_spending_limits
+                   SET {', '.join(assignments)}
+                 WHERE id=%s
+                   AND owner_user_id=%s
+                   AND workspace_id IS NOT DISTINCT FROM %s
+                RETURNING id, name, amount, currency, period_type, workspace_id, enabled, alerts_enabled
+                """,
+                tuple(values),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise MiniAppLimitError("limit_not_found")
+        conn.commit()
+        return _general_row_to_limit(row)
     except Exception:
         conn.rollback()
         raise
@@ -279,6 +324,7 @@ def replace_category_limit_tx(
         period=row[0],
         workspace_id=int(row[4]) if row[4] is not None else None,
         alerts_enabled=True,
+        enabled=True,
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -33,7 +34,7 @@ class ReminderRecordResult:
 def _next_monthly_date(value: date) -> date:
     year = value.year + (1 if value.month == 12 else 0)
     month = 1 if value.month == 12 else value.month + 1
-    day = min(value.day, 28)
+    day = min(value.day, monthrange(year, month)[1])
     return date(year, month, day)
 
 

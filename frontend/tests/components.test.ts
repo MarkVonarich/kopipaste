@@ -213,6 +213,31 @@ describe('acceptance components', () => {
     expect(category).toContain('<option value="category" selected>');
     expect(category).not.toContain('data-field="limit-category" hidden');
     expect(edit).toContain('name="currency" value="EUR"');
+
+    const card = PlansScreen({
+      goals: [],
+      limits: [],
+      general_limits: [{
+        id: 'general:1',
+        kind: 'general',
+        title: 'All',
+        category: null,
+        scope: 'all_expenses',
+        amount: '1000.00',
+        spent: '0.00',
+        remaining: '1000.00',
+        percent: 0,
+        period: 'month',
+        status: 'normal',
+        currency: 'EUR',
+        alerts_enabled: true,
+        enabled: true,
+        workspace_id: 10,
+        icon: 'wallet',
+      }],
+    }, 'limits', true);
+    expect(card).toContain('data-action="limit-toggle"');
+    expect(card).toContain('Выключить');
   });
 
   it('renders category budget currency selector with existing edit currency', () => {

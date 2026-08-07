@@ -19,6 +19,7 @@ from services.categories import (
 )
 from services.operations import category_options, commit_operation_draft, create_operation_draft, load_operation_draft, record_financial_operation
 from services.records import get_user_alias, record_operation, send_operation_limit_alert
+from services.reminders import _next_monthly_date
 from services.workspaces import resolve_workspace
 from routers.helpers import prompt_type_menu
 from ui.keyboards import ml_top2_kb
@@ -278,15 +279,6 @@ def _goal_schedule_config(frequency: str) -> dict:
     if frequency == "salary_twice_monthly":
         return {"days": [5, 20], "salary_payments_per_month": 2}
     return {}
-
-
-def _next_monthly_date(dt: date) -> date:
-    y, m = dt.year, dt.month + 1
-    if m > 12:
-        y, m = y + 1, 1
-    from calendar import monthrange
-    d = min(dt.day, monthrange(y, m)[1])
-    return date(y, m, d)
 
 
 def _reminder_repeat_label(r: str, d: dict) -> str:

@@ -250,7 +250,7 @@ export const api = {
   limits: (workspaceId: number | 'all' | null) => apiFetch<{ items: BudgetLimit[]; read_only: boolean; note?: string }>(`/miniapp/api/limits${query({ workspace_id: workspaceId })}`),
   createLimit: (payload: LimitPayload) =>
     apiFetch<{ limit: BudgetLimit }>('/miniapp/api/limits', { method: 'POST', body: JSON.stringify(payload) }),
-  updateLimit: (id: string, payload: LimitPayload) =>
+  updateLimit: (id: string, payload: LimitPayload | { workspace_id: number | 'all' | null; toggle: true; enabled?: boolean; alerts_enabled?: boolean }) =>
     apiFetch<{ limit: BudgetLimit }>(`/miniapp/api/limits/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteLimit: (id: string, workspaceId: number | 'all' | null) =>
     apiFetch<{ deleted: boolean; limit_id: string }>(`/miniapp/api/limits/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),

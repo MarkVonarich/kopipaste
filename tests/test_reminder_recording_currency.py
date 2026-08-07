@@ -47,6 +47,18 @@ def _workspace() -> WorkspaceContext:
     return WorkspaceContext(10, -100, 42, "group", "member", "Family", True)
 
 
+def test_monthly_reminder_month_end_semantics():
+    assert reminders._next_monthly_date(date(2026, 8, 31)) == date(2026, 9, 30)
+    assert reminders._next_monthly_date(date(2026, 9, 30)) == date(2026, 10, 30)
+    assert reminders._next_monthly_date(date(2026, 1, 31)) == date(2026, 2, 28)
+    assert reminders._next_monthly_date(date(2028, 1, 31)) == date(2028, 2, 29)
+    assert reminders._next_monthly_date(date(2026, 8, 15)) == date(2026, 9, 15)
+
+
+def test_yearly_feb_29_semantics_stays_safe():
+    assert reminders._advance_date(date(2028, 2, 29), "yearly") == date(2029, 2, 28)
+
+
 def test_record_reminder_passes_saved_eur_currency_to_operation(monkeypatch):
     cur = _ReminderCursor(currency="EUR")
     captured = {}

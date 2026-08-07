@@ -83,6 +83,7 @@ from services.miniapp_limits import (
     delete_limit as delete_stored_limit,
     replace_category_limit,
     replace_category_limit_tx,
+    set_general_limit_enabled,
 )
 from services.notification_preferences import (
     TOGGLE_FIELDS,
@@ -727,7 +728,7 @@ class MiniAppAPI:
         }
 
     def _stored_limit_dict(self, req: MiniAppRequest, stored: StoredLimit) -> dict:
-        return self._limit_dict(
+        data = self._limit_dict(
             user_id=req.user_id,
             kind=stored.kind,
             identifier=stored.identifier,
@@ -739,6 +740,9 @@ class MiniAppAPI:
             workspace_id=stored.workspace_id,
             alerts_enabled=stored.alerts_enabled,
         )
+        if stored.kind == "general":
+            data["enabled"] = stored.enabled
+        return data
 
     def _general_limit_dict(self, req: MiniAppRequest, item: dict) -> dict:
         period = str(item.get("period_type") or "month")
@@ -1930,8 +1934,8 @@ class MiniAppAPI:
             "currency": self._validated_currency(body.get("currency"), fallback=str((existing or {}).get("currency") or get_user_currency(req.user_id))),
             "period_type": period,
             "categories": selected,
-            "enabled": bool(body.get("enabled", True)),
-            "alerts_enabled": bool(body.get("alerts_enabled", True)),
+            "enabled": bool(body["enabled"]) if "enabled" in body else bool((existing or {}).get("enabled", True)),
+            "alerts_enabled": bool(body["alerts_enabled"]) if "alerts_enabled" in body else bool((existing or {}).get("alerts_enabled", True)),
         }
 
     def create_category_budget(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
@@ -2228,6 +2232,20 @@ class MiniAppAPI:
         self._check_write_rate(req)
         ctx = self._write_scope(req, body.get("workspace_id"))
         decoded = unquote(limit_id)
+        if "toggle" in body and decoded.startswith("general:"):
+            raw_id = int(decoded.split(":", 1)[1])
+            try:
+                stored = set_general_limit_enabled(
+                    user_id=req.user_id,
+                    workspace_id=ctx.workspace_id,
+                    limit_id=raw_id,
+                    enabled=bool(body.get("enabled")) if "enabled" in body else None,
+                    alerts_enabled=bool(body.get("alerts_enabled")) if "alerts_enabled" in body else None,
+                )
+            except MiniAppLimitError as exc:
+                raise MiniAppError(404 if exc.code == "limit_not_found" else 400, exc.code, "Limit could not be updated.") from exc
+            self._track(req, "mini_app_budget_limit_updated", workspace_id=ctx.workspace_id, properties={"action": "toggle", "source": "mini_app"})
+            return success({"limit": self._stored_limit_dict(req, stored), "id": decoded}, request_id=req.request_id)
         period = str(body.get("period") or "month")
         if period not in LIMIT_PERIODS:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")

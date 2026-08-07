@@ -47,6 +47,7 @@ from services.categories import (
 from services.operations import cancel_operation_draft, commit_operation_draft, load_operation_draft, record_financial_operation
 from services.reminders import (
     ReminderError,
+    _next_monthly_date,
     delete_reminder as delete_shared_reminder,
     record_reminder as record_shared_reminder,
     snooze_reminder as snooze_shared_reminder,
@@ -104,15 +105,6 @@ def _integer_major_amount(value) -> Decimal | None:
     return amount
 
 
-def _next_monthly_date(dt: date) -> date:
-    y, m = dt.year, dt.month + 1
-    if m > 12:
-        y, m = y + 1, 1
-    from calendar import monthrange
-    d = min(dt.day, monthrange(y, m)[1])
-    return date(y, m, d)
-
-
 def _repeat_label(r: str, d: dict) -> str:
     return {'none': 'не повторять', 'weekly': 'каждую неделю', 'monthly': 'каждый месяц', 'yearly': 'каждый год', 'custom_days': f"каждые {int(d.get('repeat_interval_days') or 1)} дней"}.get(r or 'none', r or 'none')
 
@@ -121,7 +113,7 @@ def _reminders_menu_kb(has_any: bool):
     return reminders_menu_kb(has_any)
 
 
-async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str):
+async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user, dt: date, op_type: str, category: str, amount: int, comment: str, currency: str | None = None):
     second = InlineKeyboardButton('💰 Остаток', callback_data='status') if op_type == 'Расходы' else InlineKeyboardButton('💵 Доходы', callback_data='income_status')
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton('🗑️ Удалить', callback_data='del_last'),
@@ -129,7 +121,8 @@ async def _send_standard_op_confirmation(context: ContextTypes.DEFAULT_TYPE, cha
         InlineKeyboardButton('✏️ Изменить', callback_data='op_edit'),
     ]])
     name = (getattr(user, 'full_name', None) or getattr(user, 'first_name', None) or getattr(user, 'username', None) or 'Пользователь')
-    text = render_operation_confirmation(name=name, amount=amount, currency=get_user_currency(chat_id), category=category, op_dt=dt, original=comment, op_kind=op_type)
+    display_currency = currency or get_user_currency(chat_id)
+    text = render_operation_confirmation(name=name, amount=amount, currency=display_currency, category=category, op_dt=dt, original=comment, op_kind=op_type)
     await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown', reply_markup=kb)
 
 
@@ -4383,7 +4376,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             return await q.answer('Не найдено', show_alert=True)
         if result.operation:
             recorded = result.operation
-            await _send_standard_op_confirmation(context, cid, update.effective_user, recorded.operation_date, recorded.type, recorded.category, recorded.amount, recorded.comment)
+            await _send_standard_op_confirmation(context, cid, update.effective_user, recorded.operation_date, recorded.type, recorded.category, recorded.amount, recorded.comment, currency=recorded.currency)
             await send_operation_limit_alert(recorded, context)
             log.info('reminder_recorded reminder_id=%s', rid)
         await q.answer('Записано')

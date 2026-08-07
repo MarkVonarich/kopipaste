@@ -540,8 +540,8 @@ def test_update_category_budget_without_currency_preserves_existing_currency(mon
         "amount": Decimal("300.00"),
         "currency": "EUR",
         "period_type": "month",
-        "enabled": True,
-        "alerts_enabled": True,
+        "enabled": False,
+        "alerts_enabled": False,
         "categories": ("Food",),
     }
     captured = {}
@@ -560,7 +560,11 @@ def test_update_category_budget_without_currency_preserves_existing_currency(mon
     })["data"]
 
     assert captured["currency"] == "EUR"
+    assert captured["enabled"] is False
+    assert captured["alerts_enabled"] is False
     assert data["budget"]["currency"] == "EUR"
+    assert data["budget"]["enabled"] is False
+    assert data["budget"]["alerts_enabled"] is False
 
 
 def test_update_reminder_without_currency_does_not_reset_currency(monkeypatch):

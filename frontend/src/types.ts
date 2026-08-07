@@ -199,6 +199,7 @@ export type BudgetLimit = {
   alerts_enabled: boolean;
   workspace_id: number | null;
   icon: string;
+  enabled?: boolean;
 };
 
 export type GeneralSpendingLimit = BudgetLimit & {

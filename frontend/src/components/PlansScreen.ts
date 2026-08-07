@@ -81,6 +81,7 @@ function limitCard(limit: BudgetLimit | GeneralSpendingLimit): string {
       <div class="detail-row light"><span>Осталось</span><strong>${formatMoneyString(limit.remaining, limit.currency)}</strong></div>
       <div class="actions">
         <button class="button secondary" data-action="limit-edit" data-id="${esc(limit.id)}">Изменить</button>
+        ${limit.kind === 'general' ? `<button class="button text" data-action="limit-toggle" data-id="${esc(limit.id)}">${limit.enabled === false ? 'Включить' : 'Выключить'}</button>` : ''}
         <button class="button danger" data-action="limit-delete" data-id="${esc(limit.id)}">Удалить</button>
       </div>
     </article>

@@ -960,6 +960,15 @@ function wireEvents(): void {
       render();
     });
   });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="limit-toggle"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const limit = findLimitById(button.dataset.id);
+      if (!limit) return;
+      await api.updateLimit(limit.id, { workspace_id: state.workspaceId, toggle: true, enabled: !(limit.enabled !== false) });
+      showToast('Лимит обновлён');
+      await reloadActive();
+    });
+  });
   app.querySelector<HTMLButtonElement>('[data-action="reminder-create"]')?.addEventListener('click', async () => {
     await loadCategoriesFor('expense');
     selectedReminder = null;

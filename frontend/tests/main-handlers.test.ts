@@ -85,7 +85,7 @@ function installAppMocks() {
       }
     })),
     recordReminder: vi.fn(async () => ({ result: 'recorded', reminder: null, operation: { id: 9 } })),
-    updateLimit: vi.fn(),
+    updateLimit: vi.fn(async () => ({ limit: plansData.general_limits[0] })),
     deleteLimit: vi.fn(),
     track: vi.fn(async () => undefined),
   };
@@ -163,6 +163,20 @@ describe('main plan handlers', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(document.querySelector<HTMLSelectElement>('form[data-action="create-limit"] select[name="scope"]')?.value).toBe('category');
+  });
+
+  it('toggles a general limit explicitly without using edit', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await Promise.resolve();
+    await Promise.resolve();
+    await openPlansLimits();
+
+    document.querySelector<HTMLButtonElement>('[data-action="limit-toggle"][data-id="general:1"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(api.updateLimit).toHaveBeenCalledWith('general:1', { workspace_id: 10, toggle: true, enabled: false });
   });
 
   it('asks for a writable workspace before recording Home reminder from all workspaces', async () => {
