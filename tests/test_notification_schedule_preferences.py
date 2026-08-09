@@ -305,6 +305,59 @@ def test_grouped_plans_on_allows_financial_control_notifications(monkeypatch):
         assert mod._automatic_delivery_skip_reason(_notification_row(notification_type)) is None
 
 
+def test_grouped_plans_delivery_respects_each_legacy_subtype_field(monkeypatch):
+    from services import automatic_notifications as mod
+
+    prefs = {
+        "limit_alerts_enabled": False,
+        "budget_alerts_enabled": True,
+        "goal_notifications_enabled": False,
+        "subscription_alerts_enabled": True,
+        "recurring_spend_alerts_enabled": False,
+        "quiet_hours_enabled": False,
+        "timezone": "UTC",
+    }
+    monkeypatch.setattr("services.notification_preferences.get_notification_preferences", lambda _user_id: prefs)
+
+    assert mod._automatic_delivery_skip_reason(_notification_row("category_limit_warning")) == "preference_disabled"
+    assert mod._automatic_delivery_skip_reason(_notification_row("limit_near")) == "preference_disabled"
+    assert mod._automatic_delivery_skip_reason(_notification_row("budget_near")) is None
+    assert mod._automatic_delivery_skip_reason(_notification_row("goal_planned_contribution")) == "preference_disabled"
+    assert mod._automatic_delivery_skip_reason(_notification_row("subscription_upcoming")) is None
+    assert mod._automatic_delivery_skip_reason(_notification_row("recurring_spend_detected")) == "preference_disabled"
+
+
+def test_queued_delivery_skips_disabled_legacy_plan_subtype(monkeypatch):
+    from services import automatic_notifications as mod
+
+    skipped = []
+    row = _notification_row("category_limit_warning")
+    monkeypatch.setattr(mod, "release_stale_deferred_claims", lambda: 0)
+    monkeypatch.setattr(mod, "claim_due_notifications", lambda limit=50: [row])
+    monkeypatch.setattr(
+        "services.notification_preferences.get_notification_preferences",
+        lambda _user_id: {
+            "limit_alerts_enabled": False,
+            "budget_alerts_enabled": True,
+            "goal_notifications_enabled": False,
+            "subscription_alerts_enabled": True,
+            "recurring_spend_alerts_enabled": False,
+            "quiet_hours_enabled": False,
+            "timezone": "UTC",
+        },
+    )
+    monkeypatch.setattr(mod, "mark_notification_skipped", lambda notification_id, reason: skipped.append((notification_id, reason)))
+
+    class _Bot:
+        async def send_message(self, **_kwargs):
+            raise AssertionError("disabled subtype must not be sent")
+
+    counts = asyncio.run(mod.process_due_notifications(SimpleNamespace(bot=_Bot())))
+
+    assert counts["skipped"] == 1
+    assert skipped == [(99, "preference_disabled")]
+
+
 def test_user_reminder_is_independent_of_grouped_preferences(monkeypatch):
     from services import automatic_notifications as mod
 

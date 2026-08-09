@@ -220,6 +220,20 @@ PLAN_NOTIFICATION_TYPES = {
     "goal_achieved",
     "goal_salary_snooze",
 }
+PLAN_NOTIFICATION_PREFERENCE_FIELDS = {
+    "category_limit_warning": "limit_alerts_enabled",
+    "smart_morning_limit": "limit_alerts_enabled",
+    "limit_exceeded": "limit_alerts_enabled",
+    "limit_near": "limit_alerts_enabled",
+    "budget_exceeded": "budget_alerts_enabled",
+    "budget_near": "budget_alerts_enabled",
+    "pace_overspend": "budget_alerts_enabled",
+    "subscription_upcoming": "subscription_alerts_enabled",
+    "recurring_spend_detected": "recurring_spend_alerts_enabled",
+    "goal_planned_contribution": "goal_notifications_enabled",
+    "goal_achieved": "goal_notifications_enabled",
+    "goal_salary_snooze": "goal_notifications_enabled",
+}
 
 
 def _notification_preference_group(notification_type: str) -> str | None:
@@ -249,13 +263,26 @@ def _notification_group_enabled(notification_type: str, prefs: dict) -> bool:
             return bool(prefs.get("evening_enabled", True))
         return bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))
     if group == "plans":
-        return bool(
-            prefs.get("limit_alerts_enabled", True)
-            or prefs.get("budget_alerts_enabled", True)
-            or prefs.get("goal_notifications_enabled", False)
-            or prefs.get("subscription_alerts_enabled", True)
-            or prefs.get("recurring_spend_alerts_enabled", True)
-        )
+        field = PLAN_NOTIFICATION_PREFERENCE_FIELDS.get(notification_type)
+        if not field:
+            if notification_type.startswith("goal_"):
+                field = "goal_notifications_enabled"
+            elif notification_type.startswith("budget_"):
+                field = "budget_alerts_enabled"
+            elif notification_type.startswith("limit_"):
+                field = "limit_alerts_enabled"
+            elif notification_type.startswith("subscription_"):
+                field = "subscription_alerts_enabled"
+            elif notification_type.startswith("recurring_"):
+                field = "recurring_spend_alerts_enabled"
+        defaults = {
+            "goal_notifications_enabled": False,
+            "limit_alerts_enabled": True,
+            "budget_alerts_enabled": True,
+            "subscription_alerts_enabled": True,
+            "recurring_spend_alerts_enabled": True,
+        }
+        return bool(prefs.get(field, defaults.get(field, True)))
     if group == "reports":
         if notification_type == "weekly_report":
             return bool(prefs.get("weekly_reports_enabled", True))

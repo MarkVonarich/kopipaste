@@ -5,6 +5,149 @@ from types import SimpleNamespace
 from services.categories import CategoryReferenceCounts, ManagedCategory
 
 
+def _category_scope_rows():
+    return {
+        "operations": [
+            {"id": 1, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
+            {"id": 2, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
+            {"id": 3, "workspace_id": 10, "user_id": 55, "type": "Доходы", "category": "Прочее"},
+        ],
+        "user_reminders": [
+            {"id": 11, "workspace_id": 10, "user_id": 55, "rem_type": "Расходы", "category": "Прочее"},
+            {"id": 12, "workspace_id": 10, "user_id": 55, "rem_type": "Доходы", "category": "Прочее"},
+        ],
+    }
+
+
+class _CategoryCursor:
+    def __init__(self, rows):
+        self.rows = rows
+        self.rowcount = 0
+        self._result = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return list(self._result)
+
+    def execute(self, sql, params=()):
+        compact = " ".join(sql.split())
+        self.rowcount = 0
+        if compact.startswith("SELECT lower(category), COUNT(*)::int FROM public.operations"):
+            workspace_id, op_type, keys = params
+            self._result = self._group_count("operations", workspace_id, op_type, keys)
+            return
+        if compact.startswith("SELECT lower(category), COUNT(*)::int FROM public.user_reminders"):
+            user_id, workspace_id, op_type, keys = params
+            self._result = self._group_count("user_reminders", workspace_id, op_type, keys, user_id=user_id)
+            return
+        if compact.startswith("SELECT COUNT(*) FROM public.operations"):
+            workspace_id, op_type, key = params
+            self._result = [(len(self._matching("operations", workspace_id, op_type, key)),)]
+            return
+        if compact.startswith("SELECT COUNT(*) FROM public.user_reminders"):
+            user_id, workspace_id, op_type, key = params
+            self._result = [(len(self._matching("user_reminders", workspace_id, op_type, key, user_id=user_id)),)]
+            return
+        if compact.startswith("UPDATE public.operations SET category=%s"):
+            destination, workspace_id, op_type, key = params
+            changed = 0
+            for row in self._matching("operations", workspace_id, op_type, key):
+                row["category"] = destination
+                changed += 1
+            self.rowcount = changed
+            self._result = []
+            return
+        if compact.startswith("UPDATE public.user_reminders SET category=%s"):
+            destination, user_id, workspace_id, op_type, key = params
+            changed = 0
+            for row in self._matching("user_reminders", workspace_id, op_type, key, user_id=user_id):
+                row["category"] = destination
+                changed += 1
+            self.rowcount = changed
+            self._result = []
+            return
+        if compact.startswith("SELECT period, amount, currency FROM public.category_limits"):
+            self._result = []
+            return
+        if compact.startswith("SELECT id FROM public.operations"):
+            workspace_id, op_type, key = params
+            self._result = [(row["id"],) for row in self._matching("operations", workspace_id, op_type, key)]
+            return
+        if compact.startswith("DELETE FROM public.operations WHERE id=ANY"):
+            operation_ids = set(params[0])
+            before = len(self.rows["operations"])
+            self.rows["operations"] = [row for row in self.rows["operations"] if row["id"] not in operation_ids]
+            self.rowcount = before - len(self.rows["operations"])
+            self._result = []
+            return
+        if compact.startswith("DELETE FROM public.user_reminders"):
+            user_id, workspace_id, op_type, key = params
+            before = len(self.rows["user_reminders"])
+            self.rows["user_reminders"] = [
+                row for row in self.rows["user_reminders"]
+                if row not in self._matching("user_reminders", workspace_id, op_type, key, user_id=user_id)
+            ]
+            self.rowcount = before - len(self.rows["user_reminders"])
+            self._result = []
+            return
+        self._result = []
+
+    def _group_count(self, table, workspace_id, op_type, keys, *, user_id=55):
+        counts = {}
+        for key in keys:
+            counts[key] = len(self._matching(table, workspace_id, op_type, key, user_id=user_id))
+        return [(key, count) for key, count in counts.items() if count]
+
+    def _matching(self, table, workspace_id, op_type, key, *, user_id=55):
+        type_field = "type" if table == "operations" else "rem_type"
+        return [
+            row for row in self.rows[table]
+            if row.get("user_id") == user_id
+            and row.get("workspace_id") == workspace_id
+            and row.get(type_field) == op_type
+            and str(row.get("category") or "").casefold() == key
+        ]
+
+
+class _CategoryConn:
+    def __init__(self, rows):
+        self.cursor_obj = _CategoryCursor(rows)
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _patch_category_scope(monkeypatch, rows):
+    from services import categories
+
+    schemas = {
+        "operations": {"id", "workspace_id", "user_id", "chat_id", "type", "category", "updated_at"},
+        "user_reminders": {"id", "workspace_id", "user_id", "rem_type", "category", "updated_at"},
+    }
+    monkeypatch.setattr(categories, "get_conn", lambda: _CategoryConn(rows))
+    monkeypatch.setattr(categories, "_table_columns", lambda _cur, table: schemas.get(table, set()))
+    monkeypatch.setattr(categories, "_ensure_category_exists", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(categories, "_update_draft_category", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(categories, "track_product_event", lambda _event: None)
+
+
 class _Message:
     def __init__(self, chat_id=55, chat_type="private"):
         self.chat = SimpleNamespace(id=chat_id, type=chat_type)
@@ -413,3 +556,90 @@ def test_report_export_buttons_use_exact_periods():
 
     assert "rep_export|w|2026-07-20|2026-07-26" in weekly
     assert "rep_export|m|2026-07-01|2026-07-31" in monthly
+
+
+def test_category_reference_counts_isolate_user_reminders_by_rem_type(monkeypatch):
+    from services import categories
+
+    rows = _category_scope_rows()
+    _patch_category_scope(monkeypatch, rows)
+
+    expense = categories.category_reference_counts_many(
+        user_id=55,
+        workspace_id=10,
+        op_type="Расходы",
+        category_keys=["Прочее"],
+    )["прочее"]
+    income = categories.category_reference_counts(
+        user_id=55,
+        workspace_id=10,
+        op_type="Доходы",
+        category="Прочее",
+    )
+
+    assert expense.operations == 2
+    assert expense.reminders == 1
+    assert income.operations == 1
+    assert income.reminders == 1
+
+
+def test_rename_category_isolates_operations_and_reminders_by_op_type(monkeypatch):
+    from services import categories
+
+    rows = _category_scope_rows()
+    _patch_category_scope(monkeypatch, rows)
+    monkeypatch.setattr(categories, "_category_exists", lambda *_args, **_kwargs: False)
+
+    result = categories.rename_category(
+        user_id=55,
+        workspace_id=10,
+        op_type="Расходы",
+        source="Прочее",
+        destination="Отдых",
+    )
+
+    assert result.counts.operations == 2
+    assert result.counts.reminders == 1
+    assert [row["category"] for row in rows["operations"]] == ["Отдых", "Отдых", "Прочее"]
+    assert [row["category"] for row in rows["user_reminders"]] == ["Отдых", "Прочее"]
+
+
+def test_transfer_category_isolates_operations_and_reminders_by_op_type(monkeypatch):
+    from services import categories
+
+    rows = _category_scope_rows()
+    _patch_category_scope(monkeypatch, rows)
+    monkeypatch.setattr(categories, "_category_exists", lambda *_args, **_kwargs: True)
+
+    result = categories.transfer_category(
+        user_id=55,
+        workspace_id=10,
+        op_type="Расходы",
+        source="Прочее",
+        destination="Отдых",
+    )
+
+    assert result.counts.operations == 2
+    assert result.counts.reminders == 1
+    assert [row["category"] for row in rows["operations"]] == ["Отдых", "Отдых", "Прочее"]
+    assert [row["category"] for row in rows["user_reminders"]] == ["Отдых", "Прочее"]
+
+
+def test_hard_delete_category_keeps_same_name_income_category_usable(monkeypatch):
+    from services import categories
+
+    rows = _category_scope_rows()
+    _patch_category_scope(monkeypatch, rows)
+
+    result = categories.hard_delete_category_with_operations(
+        user_id=55,
+        workspace_id=10,
+        op_type="Расходы",
+        category="Прочее",
+    )
+
+    assert result.deleted_operation_count == 2
+    assert result.counts.operations == 2
+    assert result.counts.reminders == 1
+    assert rows["operations"] == [{"id": 3, "workspace_id": 10, "user_id": 55, "type": "Доходы", "category": "Прочее"}]
+    assert rows["user_reminders"] == [{"id": 12, "workspace_id": 10, "user_id": 55, "rem_type": "Доходы", "category": "Прочее"}]
