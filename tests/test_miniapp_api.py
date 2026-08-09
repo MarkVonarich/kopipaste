@@ -945,12 +945,41 @@ def test_home_insight_does_not_mix_currencies():
 def test_profile_setters_and_quiet_hours_update(monkeypatch):
     api = _api(monkeypatch)
     events = []
+    notification_state = {
+        "quiet_hours_enabled": False,
+        "quiet_hours_start": "22:30",
+        "quiet_hours_end": "08:00",
+    }
+
+    def _set_quiet_hours(_user_id, enabled, start, end):
+        notification_state.update({
+            "quiet_hours_enabled": enabled,
+            "quiet_hours_start": start,
+            "quiet_hours_end": end,
+        })
+        return notification_state
+
+    def _grouped_notification_preferences(_user_id):
+        return {
+            **notification_state,
+            "daily_notifications": {"enabled": True, "morning_time": "08:30", "evening_time": "20:30"},
+            "plans_control": {"enabled": False},
+            "reports": {"enabled": False},
+            "quiet_hours": {
+                "enabled": notification_state["quiet_hours_enabled"],
+                "start": notification_state["quiet_hours_start"],
+                "end": notification_state["quiet_hours_end"],
+            },
+            "timezone": "Europe/Moscow",
+        }
+
     monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append((event_name, kwargs)))
     monkeypatch.setattr("miniapp.api.set_user_preferred_name", lambda _user_id, value: value.strip())
     monkeypatch.setattr("miniapp.api.set_user_currency", lambda _user_id, value: value)
     monkeypatch.setattr("miniapp.api.set_notification_timezone", lambda _user_id, value: {"timezone": value})
-    monkeypatch.setattr("miniapp.api.set_quiet_hours", lambda _user_id, enabled, start, end: {"quiet_hours_enabled": enabled, "quiet_hours_start": start, "quiet_hours_end": end})
-    monkeypatch.setattr("miniapp.api.get_notification_preferences", lambda _user_id: {"quiet_hours_enabled": True})
+    monkeypatch.setattr("miniapp.api.set_quiet_hours", _set_quiet_hours)
+    monkeypatch.setattr("miniapp.api.grouped_notification_preferences", _grouped_notification_preferences)
+    monkeypatch.setattr("miniapp.api.get_notification_preferences", lambda _user_id: (_ for _ in ()).throw(AssertionError("unexpected real notification DB access")))
 
     assert api.set_profile_preferred_name(api.request(42), {"preferred_name": " Маша "})["data"]["preferred_name"] == "Маша"
     assert api.set_profile_currency(api.request(42), {"currency": "USD"})["data"]["currency"] == "USD"
@@ -958,6 +987,9 @@ def test_profile_setters_and_quiet_hours_update(monkeypatch):
     data = api.update_notification_preferences(api.request(42), {"action": "quiet_hours_update", "enabled": True, "start": "22:30", "end": "08:00"})["data"]
 
     assert data["quiet_hours_enabled"] is True
+    assert data["quiet_hours"]["enabled"] is True
+    assert data["quiet_hours"]["start"] == "22:30"
+    assert data["quiet_hours"]["end"] == "08:00"
     assert events[-1][0] == "mini_app_profile_setting_changed"
 
 
