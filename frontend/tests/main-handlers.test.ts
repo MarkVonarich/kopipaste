@@ -300,6 +300,124 @@ describe('main plan handlers', () => {
     expect(document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')).toBeNull();
   });
 
+  it('recovers pending add-to-home state when Telegram later reports added', async () => {
+    installAppMocks();
+    const addToHomeScreen = vi.fn();
+    const statuses: Array<'missed' | 'added'> = ['missed', 'added'];
+    window.Telegram = {
+      WebApp: {
+        initData: 'query_id=1&user=%7B%22id%22%3A42%7D&auth_date=1&hash=abc',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        onEvent: vi.fn(),
+        addToHomeScreen,
+        checkHomeScreenStatus: vi.fn((callback?: (status: 'missed' | 'added') => void) => callback?.(statuses.shift() || 'added')),
+        BackButton: { onClick: vi.fn(), show: vi.fn(), hide: vi.fn() },
+      }
+    } as typeof window.Telegram;
+
+    await import('../src/main');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    document.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.body.textContent).toContain('Добавить на главный экран');
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')?.click();
+    await Promise.resolve();
+    expect(document.body.textContent).toContain('Подтвердите добавление в Telegram');
+
+    document.querySelector<HTMLButtonElement>('[data-action="close-sheet"]')?.click();
+    await Promise.resolve();
+    document.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.body.textContent).toContain('Добавлено');
+    expect(document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')).toBeNull();
+  });
+
+  it('does not downgrade added when a stale add-to-home check resolves later', async () => {
+    installAppMocks();
+    const eventHandlers: Record<string, Array<() => void>> = {};
+    let resolveCheck: ((status: 'missed') => void) | undefined;
+    window.Telegram = {
+      WebApp: {
+        initData: 'query_id=1&user=%7B%22id%22%3A42%7D&auth_date=1&hash=abc',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        onEvent: vi.fn((event: string, callback: () => void) => {
+          eventHandlers[event] = [...(eventHandlers[event] || []), callback];
+        }),
+        addToHomeScreen: vi.fn(),
+        checkHomeScreenStatus: vi.fn((callback?: (status: 'missed') => void) => {
+          resolveCheck = callback;
+        }),
+        BackButton: { onClick: vi.fn(), show: vi.fn(), hide: vi.fn() },
+      }
+    } as typeof window.Telegram;
+
+    await import('../src/main');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    document.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.click();
+    await Promise.resolve();
+    expect(eventHandlers.homeScreenAdded).toHaveLength(1);
+
+    eventHandlers.homeScreenAdded[0]();
+    await Promise.resolve();
+    expect(document.body.textContent).toContain('Добавлено');
+
+    resolveCheck?.('missed');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.body.textContent).toContain('Добавлено');
+    expect(document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')).toBeNull();
+  });
+
+  it('turns pending add-to-home state into a retryable unknown state', async () => {
+    installAppMocks();
+    const addToHomeScreen = vi.fn();
+    const statuses: Array<'missed' | 'unknown'> = ['missed', 'unknown'];
+    window.Telegram = {
+      WebApp: {
+        initData: 'query_id=1&user=%7B%22id%22%3A42%7D&auth_date=1&hash=abc',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        onEvent: vi.fn(),
+        addToHomeScreen,
+        checkHomeScreenStatus: vi.fn((callback?: (status: 'missed' | 'unknown') => void) => callback?.(statuses.shift() || 'unknown')),
+        BackButton: { onClick: vi.fn(), show: vi.fn(), hide: vi.fn() },
+      }
+    } as typeof window.Telegram;
+
+    await import('../src/main');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    document.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')?.click();
+    await Promise.resolve();
+    expect(document.body.textContent).toContain('Подтвердите добавление в Telegram');
+
+    document.querySelector<HTMLButtonElement>('[data-action="close-sheet"]')?.click();
+    await Promise.resolve();
+    document.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const menuDetails = Array.from(document.querySelectorAll('.bottom-sheet .detail-row strong')).map((node) => node.textContent);
+    expect(menuDetails).not.toContain('Подтвердите добавление в Telegram');
+    expect(document.body.textContent).toContain('Добавить на главный экран');
+    expect(document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')).not.toBeNull();
+  });
+
   it('does not call native add-to-home when Telegram already reports added', async () => {
     installAppMocks();
     const addToHomeScreen = vi.fn();

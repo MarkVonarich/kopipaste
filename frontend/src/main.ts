@@ -39,6 +39,7 @@ let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 let chartInstances: Chart[] = [];
 let homeScreenEventsRegistered = false;
+let homeScreenCheckSeq = 0;
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -1268,9 +1269,12 @@ function wireEvents(): void {
     state.sheet = 'menu';
     if (state.homeScreenStatus !== 'added' && state.homeScreenStatus !== 'pending') state.homeScreenStatus = 'unknown';
     render();
+    if (state.homeScreenStatus === 'added') return;
+    const checkSeq = ++homeScreenCheckSeq;
     void checkHomeScreenStatus().then((status) => {
+      if (checkSeq !== homeScreenCheckSeq) return;
       if (state.sheet !== 'menu') return;
-      if (state.homeScreenStatus === 'added' || state.homeScreenStatus === 'pending') return;
+      if (state.homeScreenStatus === 'added') return;
       state.homeScreenStatus = status;
       render();
     });
