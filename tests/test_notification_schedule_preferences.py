@@ -121,11 +121,11 @@ def test_deferred_delivery_rechecks_disabled_preference(monkeypatch):
         "timezone_name": "Europe/Moscow",
         "attempts": 0,
     }])
-    monkeypatch.setattr(mod, "_automatic_type_preference_enabled", lambda _user_id, _type: False)
+    monkeypatch.setattr(
+        "services.notification_preferences.get_notification_preferences",
+        lambda _user_id: {"morning_enabled": False, "quiet_hours_enabled": False, "timezone": "Europe/Moscow"},
+    )
     monkeypatch.setattr(mod, "mark_notification_skipped", lambda notification_id, reason: skipped.append((notification_id, reason)))
-
-    import asyncio
-    from types import SimpleNamespace
 
     counts = asyncio.run(mod.process_due_notifications(SimpleNamespace(bot=SimpleNamespace(send_message=None))))
 
@@ -205,6 +205,144 @@ def test_grouped_daily_toggle_updates_morning_and_evening(monkeypatch):
     assert "morning_enabled" in executed[0][0]
     assert "evening_enabled" in executed[0][0]
     assert executed[0][1] == (42, False, False, False, False)
+
+
+def test_grouped_plans_toggle_updates_hidden_financial_control_fields(monkeypatch):
+    from services import notification_preferences as prefs
+
+    executed = []
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            executed.append((" ".join(sql.split()), params))
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(prefs, "get_conn", lambda: _Conn())
+    monkeypatch.setattr(prefs, "grouped_notification_preferences", lambda _user_id: {"plans_control": {"enabled": False}})
+
+    result = prefs.set_grouped_notification_preference(42, "plans", False)
+
+    assert result["plans_control"]["enabled"] is False
+    sql, params = executed[0]
+    assert "limit_alerts_enabled" in sql
+    assert "budget_alerts_enabled" in sql
+    assert "goal_notifications_enabled" in sql
+    assert "subscription_alerts_enabled" in sql
+    assert "recurring_spend_alerts_enabled" in sql
+    assert params == (42, False, False, False, False, False, False, False, False, False, False)
+
+
+def _notification_row(notification_type: str) -> dict:
+    return {
+        "id": 99,
+        "user_id": 42,
+        "workspace_id": None,
+        "notification_type": notification_type,
+        "dedupe_key": f"{notification_type}:42",
+        "template_key": notification_type,
+        "payload": {"text": "hello"},
+        "original_scheduled_at": datetime(2026, 8, 7, 8, 0, tzinfo=timezone.utc),
+        "timezone_name": "UTC",
+        "attempts": 0,
+    }
+
+
+def test_grouped_delivery_mapping_skips_disabled_groups(monkeypatch):
+    from services import automatic_notifications as mod
+
+    prefs = {
+        "morning_enabled": False,
+        "evening_enabled": False,
+        "limit_alerts_enabled": False,
+        "budget_alerts_enabled": False,
+        "goal_notifications_enabled": False,
+        "subscription_alerts_enabled": False,
+        "recurring_spend_alerts_enabled": False,
+        "weekly_reports_enabled": False,
+        "monthly_reports_enabled": False,
+        "quiet_hours_enabled": False,
+        "timezone": "UTC",
+    }
+    monkeypatch.setattr("services.notification_preferences.get_notification_preferences", lambda _user_id: prefs)
+
+    for notification_type in ["day_nudge", "evening_reminder", "category_limit_warning", "budget_near", "goal_planned_contribution", "subscription_upcoming", "recurring_spend_detected", "weekly_report", "monthly_report", "challenge_prompt"]:
+        assert mod._automatic_delivery_skip_reason(_notification_row(notification_type), now_utc=datetime(2026, 8, 7, 8, 0, tzinfo=timezone.utc)) == "preference_disabled"
+
+
+def test_grouped_plans_on_allows_financial_control_notifications(monkeypatch):
+    from services import automatic_notifications as mod
+
+    prefs = {
+        "limit_alerts_enabled": True,
+        "budget_alerts_enabled": True,
+        "goal_notifications_enabled": True,
+        "subscription_alerts_enabled": True,
+        "recurring_spend_alerts_enabled": True,
+        "quiet_hours_enabled": False,
+        "timezone": "UTC",
+    }
+    monkeypatch.setattr("services.notification_preferences.get_notification_preferences", lambda _user_id: prefs)
+
+    for notification_type in ["category_limit_warning", "budget_near", "goal_planned_contribution", "subscription_upcoming", "recurring_spend_detected"]:
+        assert mod._automatic_delivery_skip_reason(_notification_row(notification_type)) is None
+
+
+def test_user_reminder_is_independent_of_grouped_preferences(monkeypatch):
+    from services import automatic_notifications as mod
+
+    sent = []
+    row = _notification_row("user_reminder")
+    row["template_key"] = "generic"
+    monkeypatch.setattr(mod, "release_stale_deferred_claims", lambda: 0)
+    monkeypatch.setattr(mod, "claim_due_notifications", lambda limit=50: [row])
+    monkeypatch.setattr(mod, "mark_notification_sent", lambda notification_id: sent.append(notification_id))
+    monkeypatch.setattr(mod, "track_product_event", lambda _ev: None)
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            sent.append(kwargs["text"])
+
+    counts = asyncio.run(mod.process_due_notifications(SimpleNamespace(bot=_Bot())))
+
+    assert counts["sent"] == 1
+    assert sent == ["hello", 99]
+
+
+def test_delivery_validation_exception_fails_closed(monkeypatch):
+    from services import automatic_notifications as mod
+
+    skipped = []
+    monkeypatch.setattr(mod, "release_stale_deferred_claims", lambda: 0)
+    monkeypatch.setattr(mod, "claim_due_notifications", lambda limit=50: [_notification_row("evening_reminder")])
+    monkeypatch.setattr("services.notification_preferences.get_notification_preferences", lambda _user_id: (_ for _ in ()).throw(RuntimeError("temporary")))
+    monkeypatch.setattr(mod, "mark_notification_skipped", lambda notification_id, reason: skipped.append((notification_id, reason)))
+
+    class _Bot:
+        async def send_message(self, **_kwargs):
+            raise AssertionError("notification must not be sent")
+
+    counts = asyncio.run(mod.process_due_notifications(SimpleNamespace(bot=_Bot())))
+
+    assert counts["skipped"] == 1
+    assert skipped == [(99, "delivery_validation_failed")]
 
 
 def test_quiet_hours_still_block_due_window(monkeypatch):

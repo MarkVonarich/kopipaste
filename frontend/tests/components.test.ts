@@ -72,7 +72,7 @@ describe('acceptance components', () => {
     expect(incomeColumn).toContain('data-kind="income"');
     expect(expenseColumn).toContain('Расходы');
     expect(expenseColumn).toContain('data-kind="expense"');
-    expect(html).toContain('Челлендж дня');
+    expect(html).toContain('Челлендж · Сегодня');
     expect(html).toContain('Фокус');
     expect(html).toContain('Инсайт периода');
     expect(html).not.toContain('Food 4');
@@ -541,7 +541,10 @@ describe('acceptance components', () => {
       export: { available: true, status: 'ready', presets: ['month'], privacy_note: 'Существующий flow' },
     }, [], 'telegram', 'notifications');
     expect(html).toContain('role="switch"');
-    expect(html).toContain('data-key="challenges"');
+    expect(html).toContain('data-key="daily"');
+    expect(html).toContain('data-key="plans"');
+    expect(html).toContain('data-key="reports"');
+    expect(html).not.toContain('data-key="challenges"');
     expect(html).toContain('data-action="quiet-hours-open"');
     expect(html).not.toContain('data-action="notification-quiet"');
 

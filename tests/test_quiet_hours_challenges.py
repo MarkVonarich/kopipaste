@@ -75,6 +75,10 @@ def test_dispatcher_defers_or_skips_automatic_messages_during_quiet_hours(monkey
     monkeypatch.setattr(mod, "_insert_deferred", lambda **kwargs: inserted.append(kwargs) or 101)
     monkeypatch.setattr(mod, "_mark_skip", lambda **kwargs: skipped.append(kwargs))
     monkeypatch.setattr(mod, "track_product_event", lambda ev: events.append(ev))
+    monkeypatch.setattr(
+        "services.notification_preferences.get_notification_preferences",
+        lambda _user_id: {"weekly_reports_enabled": True, "evening_enabled": True, "quiet_hours_enabled": False},
+    )
 
     context = SimpleNamespace(bot=_Bot())
     deferred = asyncio.run(dispatch_automatic_notification(
@@ -112,6 +116,10 @@ def test_dispatcher_sends_immediately_outside_quiet_hours(monkeypatch):
     monkeypatch.setattr(mod, "_claim_immediate_send", lambda **_kwargs: 101)
     monkeypatch.setattr(mod, "mark_notification_sent", lambda _notification_id: None)
     monkeypatch.setattr(mod, "track_product_event", lambda ev: events.append(ev))
+    monkeypatch.setattr(
+        "services.notification_preferences.get_notification_preferences",
+        lambda _user_id: {"limit_alerts_enabled": True, "budget_alerts_enabled": True, "goal_notifications_enabled": True, "subscription_alerts_enabled": True, "recurring_spend_alerts_enabled": True},
+    )
 
     context = SimpleNamespace(bot=_Bot())
     result = asyncio.run(dispatch_automatic_notification(

@@ -102,7 +102,7 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
           <div class="settings-list">
             ${prefs ? `
               ${notificationBlock('Ежедневные уведомления', 'daily', prefs.daily_notifications?.enabled ?? (prefs.morning_enabled || prefs.evening_enabled), 'Короткие сообщения утром и вечером помогают не забывать записывать операции.', `Утро ${prefs.daily_notifications?.morning_time || prefs.morning_time} · Вечер ${prefs.daily_notifications?.evening_time || prefs.evening_time}`)}
-              ${notificationBlock('Планы и контроль', 'plans', prefs.plans_control?.enabled ?? (prefs.limit_alerts_enabled || prefs.budget_alerts_enabled || prefs.goal_notifications_enabled), 'Предупреждает о лимитах и бюджетах и напоминает о финансовых целях.')}
+              ${notificationBlock('Планы и контроль', 'plans', prefs.plans_control?.enabled ?? (prefs.limit_alerts_enabled || prefs.budget_alerts_enabled || prefs.goal_notifications_enabled || (prefs.subscription_alerts_enabled ?? true) || (prefs.recurring_spend_alerts_enabled ?? true)), 'Предупреждает о лимитах, бюджетах, целях и важных регулярных расходах.')}
               ${notificationBlock('Отчёты', 'reports', prefs.reports?.enabled ?? (prefs.weekly_reports_enabled || prefs.monthly_reports_enabled), 'Присылает финансовую сводку за неделю и месяц.')}
               ${row('Тихие часы', prefs.quiet_hours?.enabled || prefs.quiet_hours_enabled ? `${prefs.quiet_hours?.start || prefs.quiet_hours_start || '22:30'}–${prefs.quiet_hours?.end || prefs.quiet_hours_end || '08:00'}` : 'Выкл', 'В это время автоматические сообщения не будут вас беспокоить.', 'quiet-hours-open')}
             ` : '<p class="caption">Настройки недоступны.</p>'}

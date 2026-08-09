@@ -5,6 +5,7 @@ import pytest
 
 from miniapp.api import MiniAppAPI, MiniAppError, TransactionFilters
 from miniapp.auth import MiniAppUser
+from services.categories import CategoryReferenceCounts, ManagedCategory
 from services.challenges import ChallengeCard, ChallengeDefinition
 from services.operations import RecordedOperation
 from services.workspaces import WorkspaceContext
@@ -80,6 +81,54 @@ def test_transaction_filter_sql_is_parameterized(monkeypatch):
     assert "DROP TABLE" not in tx.where_sql
     assert tx.category in tx.params
     assert "o.category=%s" in tx.where_sql
+
+
+def test_managed_categories_reference_counts_are_batched(monkeypatch):
+    api = _api(monkeypatch)
+    categories = [
+        ManagedCategory(name=f"Category {index}", normalized_name=f"category {index}", op_type="Расходы", operation_count=index)
+        for index in range(35)
+    ]
+    calls = []
+
+    monkeypatch.setattr(api, "_read_scope", lambda _req, _workspace_id: ([10], False))
+    monkeypatch.setattr("miniapp.api.list_managed_categories", lambda **_kwargs: categories)
+
+    def _many(**kwargs):
+        calls.append(kwargs)
+        return {
+            "category 3": CategoryReferenceCounts(operations=3, reminders=1),
+            "category 7": CategoryReferenceCounts(category_limits=2, aliases=1),
+        }
+
+    monkeypatch.setattr("miniapp.api.category_reference_counts_many", _many)
+
+    data = api.managed_categories(api.request(42), {"workspace_id": 10, "type": "expense"})["data"]
+
+    assert len(data["items"]) == 35
+    assert len(calls) == 1
+    assert calls[0]["user_id"] == 42
+    assert calls[0]["workspace_id"] == 10
+    assert calls[0]["op_type"] == "Расходы"
+    assert len(calls[0]["category_keys"]) == 35
+    refs = {item["token"]: item["references"] for item in data["items"]}
+    assert refs["category 3"]["operations"] == 3
+    assert refs["category 3"]["reminders"] == 1
+    assert refs["category 7"]["category_limits"] == 2
+    assert refs["category 7"]["aliases"] == 1
+
+
+def test_category_lookup_does_not_recalculate_reference_counts(monkeypatch):
+    api = _api(monkeypatch)
+    categories = [ManagedCategory(name="Food", normalized_name="food", op_type="Расходы", operation_count=3)]
+
+    monkeypatch.setattr("miniapp.api.list_managed_categories", lambda **_kwargs: categories)
+    monkeypatch.setattr("miniapp.api.category_reference_counts_many", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("lookup should be cheap")))
+
+    item = api._category_by_token(api.request(42), 10, "Расходы", "food")
+
+    assert item["name"] == "Food"
+    assert "references" not in item
 
 
 def test_radar_returns_absolute_amounts_and_scale(monkeypatch):
