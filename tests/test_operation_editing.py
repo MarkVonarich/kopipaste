@@ -190,3 +190,39 @@ def test_new_operation_category_selection_ignores_stale_edit_state_and_preserves
         "note": None,
         "comment": "кофе у офиса",
     }]
+
+
+def test_alias_hit_passes_merchant_to_final_operation_commit(monkeypatch):
+    from routers import messages
+
+    recorded = []
+
+    async def _record_operation(cat, amt, dt, typ, update, context, note=None, merchant=None):
+        recorded.append({
+            "cat": cat,
+            "amount": amt,
+            "type": typ,
+            "note": note,
+            "merchant": merchant,
+            "pending": dict(context.user_data.get("pending") or {}),
+        })
+
+    monkeypatch.setattr(messages, "parse_user_input", lambda _text: ("Дринкит", 285, date(2026, 8, 4), None))
+    monkeypatch.setattr(messages, "convert_amount_if_needed", lambda *_args, **_kwargs: (285, None))
+    monkeypatch.setattr(messages, "get_user_alias", lambda *_args, **_kwargs: ("Расходы", "Заведения"))
+    monkeypatch.setattr(messages, "insert_ml_observation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(messages, "record_operation", _record_operation)
+
+    context = SimpleNamespace(user_data={})
+    message = _Message(chat_id=55, text="дринкит 285")
+
+    asyncio.run(messages.handle_text(_text_update(message), context))
+
+    assert recorded == [{
+        "cat": "Заведения",
+        "amount": 285,
+        "type": "Расходы",
+        "note": None,
+        "merchant": "дринкит",
+        "pending": {},
+    }]

@@ -215,4 +215,37 @@ describe('main plan handlers', () => {
     expect(document.body.textContent).toContain('Family');
     expect(api.recordReminder).not.toHaveBeenCalled();
   });
+
+  it('opens the global menu and requests Telegram native add-to-home', async () => {
+    const api = installAppMocks();
+    const addToHomeScreen = vi.fn();
+    const checkHomeScreenStatus = vi.fn((callback?: (status: 'missed') => void) => callback?.('missed'));
+    window.Telegram = {
+      WebApp: {
+        initData: 'query_id=1&user=%7B%22id%22%3A42%7D&auth_date=1&hash=abc',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        onEvent: vi.fn(),
+        addToHomeScreen,
+        checkHomeScreenStatus,
+        BackButton: { onClick: vi.fn(), show: vi.fn(), hide: vi.fn() },
+      }
+    } as typeof window.Telegram;
+
+    await import('../src/main');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    document.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.body.textContent).toContain('Добавить на главный экран');
+
+    document.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')?.click();
+    await Promise.resolve();
+
+    expect(addToHomeScreen).toHaveBeenCalled();
+    expect(api.track).toHaveBeenCalledWith('mini_app_add_to_home_requested', { source: 'mini_app' });
+  });
 });

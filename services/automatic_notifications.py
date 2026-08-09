@@ -258,10 +258,10 @@ def _notification_group_enabled(notification_type: str, prefs: dict) -> bool:
         return True
     if group == "daily":
         if notification_type == "day_nudge":
-            return bool(prefs.get("morning_enabled", True))
+            return False
         if notification_type == "evening_reminder":
             return bool(prefs.get("evening_enabled", True))
-        return bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))
+        return bool(prefs.get("evening_enabled", True))
     if group == "plans":
         field = PLAN_NOTIFICATION_PREFERENCE_FIELDS.get(notification_type)
         if not field:
@@ -318,6 +318,8 @@ def _daily_delivery_kind(notification_type: str) -> str | None:
 
 def _automatic_delivery_skip_reason(row: dict[str, Any], *, now_utc: datetime | None = None) -> str | None:
     notification_type = str(row.get("notification_type") or "")
+    if notification_type == "day_nudge":
+        return "preference_disabled"
     group = _notification_preference_group(notification_type)
     if group == "retired":
         return "preference_disabled"

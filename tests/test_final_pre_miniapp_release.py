@@ -141,7 +141,7 @@ def test_category_picker_keyboard_uses_compact_callbacks_and_balanced_rows():
     assert len(markup.inline_keyboard[0]) == 2
 
 
-def test_notification_toggle_refreshes_same_message_and_label(monkeypatch):
+def test_legacy_morning_notification_toggle_is_retired(monkeypatch):
     callbacks = _patch_common(monkeypatch)
     state = {"morning_enabled": False}
 
@@ -161,9 +161,7 @@ def test_notification_toggle_refreshes_same_message_and_label(monkeypatch):
         }
 
     def _toggle(_cid, key):
-        assert key == "morning"
-        state["morning_enabled"] = not state["morning_enabled"]
-        return state["morning_enabled"]
+        raise AssertionError("retired morning toggle must not update preferences")
 
     monkeypatch.setattr(callbacks, "get_notification_preferences", _prefs)
     monkeypatch.setattr(callbacks, "toggle_notification_preference", _toggle)
@@ -171,13 +169,9 @@ def test_notification_toggle_refreshes_same_message_and_label(monkeypatch):
     query = _CallbackQuery("notif_toggle|morning")
     asyncio.run(callbacks.callback_handler(_update(query), context))
 
-    assert query.answers[-1][0] == "Утренние уведомления включены"
-    assert any("✅ Ежедневные уведомления" == button.text for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
-
-    second = _CallbackQuery("notif_toggle|morning")
-    asyncio.run(callbacks.callback_handler(_update(second), context))
+    assert query.answers[-1][0] == "Утренние автоматические уведомления отключены."
     assert state["morning_enabled"] is False
-    assert any("✅ Ежедневные уведомления" == button.text for row in second.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
+    assert any("✅ Уведомления" == button.text for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
 
 
 def test_quiet_hours_cross_midnight_boundaries():

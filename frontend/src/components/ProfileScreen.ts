@@ -25,7 +25,6 @@ const SECTIONS: Array<[ProfileSection, string]> = [
   ['appearance', 'Внешний вид'],
   ['workspaces', 'Пространства'],
   ['notifications', 'Уведомления'],
-  ['export-data', 'Экспорт и данные'],
   ['premium', 'Premium'],
   ['help', 'Помощь'],
   ['legal', 'Правовая информация'],
@@ -57,7 +56,7 @@ function notificationBlock(label: string, key: string, enabled: boolean, descrip
   `;
 }
 
-function panel(section: ProfileSection, active: ProfileSection, body: string): string {
+function panel(section: ProfileSection, active: ProfileSection | null | undefined, body: string): string {
   const title = SECTIONS.find(([key]) => key === section)?.[1] || section;
   const open = section === active;
   return `
@@ -72,13 +71,13 @@ function panel(section: ProfileSection, active: ProfileSection, body: string): s
   `;
 }
 
-export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace[], activeTheme: ThemeMode, activeSection: ProfileSection): string {
+export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace[], activeTheme: ThemeMode, activeSection: ProfileSection | null | undefined): string {
   const prefs = profile?.notifications;
   const visibleWorkspaces = profile?.workspaces || workspaces.filter((item) => item.workspace_id !== 'all');
   const activeWorkspace = visibleWorkspaces.find((workspace) => workspace.active);
   return `
     <section class="screen profile-screen">
-      ${SectionHeader('Настройки', 'Профиль, данные и внешний вид', `<button class="icon-button secondary" data-action="open-menu" aria-label="Открыть дополнительное меню">${icon('more')}</button>`)}
+      ${SectionHeader('Настройки', 'Профиль, данные и внешний вид')}
       <div class="accordion" data-testid="profile-accordion">
         ${panel('user', activeSection, `
           <div class="settings-list">
@@ -101,14 +100,13 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
         ${panel('notifications', activeSection, `
           <div class="settings-list">
             ${prefs ? `
-              ${notificationBlock('Ежедневные уведомления', 'daily', prefs.daily_notifications?.enabled ?? (prefs.morning_enabled || prefs.evening_enabled), 'Короткие сообщения утром и вечером помогают не забывать записывать операции.', `Утро ${prefs.daily_notifications?.morning_time || prefs.morning_time} · Вечер ${prefs.daily_notifications?.evening_time || prefs.evening_time}`)}
+              ${notificationBlock('Ежедневные уведомления', 'daily', prefs.daily_notifications?.enabled ?? prefs.evening_enabled, 'Короткое вечернее сообщение помогает не забывать записывать операции.', `Вечер ${prefs.daily_notifications?.evening_time || prefs.evening_time}`)}
               ${notificationBlock('Планы и контроль', 'plans', prefs.plans_control?.enabled ?? (prefs.limit_alerts_enabled || prefs.budget_alerts_enabled || prefs.goal_notifications_enabled || (prefs.subscription_alerts_enabled ?? true) || (prefs.recurring_spend_alerts_enabled ?? true)), 'Предупреждает о лимитах, бюджетах, целях и важных регулярных расходах.')}
               ${notificationBlock('Отчёты', 'reports', prefs.reports?.enabled ?? (prefs.weekly_reports_enabled || prefs.monthly_reports_enabled), 'Присылает финансовую сводку за неделю и месяц.')}
               ${row('Тихие часы', prefs.quiet_hours?.enabled || prefs.quiet_hours_enabled ? `${prefs.quiet_hours?.start || prefs.quiet_hours_start || '22:30'}–${prefs.quiet_hours?.end || prefs.quiet_hours_end || '08:00'}` : 'Выкл', 'В это время автоматические сообщения не будут вас беспокоить.', 'quiet-hours-open')}
             ` : '<p class="caption">Настройки недоступны.</p>'}
           </div>
         `)}
-        ${panel('export-data', activeSection, row('Экспорт', profile?.export?.status || 'Открыть', profile?.export?.privacy_note || 'Экспорт использует существующий flow.', 'export-open'))}
         ${panel('premium', activeSection, row(profile?.premium?.title || 'Premium', profile?.premium?.status || 'info', profile?.premium?.description || 'Информационный раздел.', 'premium-open'))}
         ${panel('help', activeSection, `
           ${profile?.help_url ? `<a class="settings-row" href="${esc(profile.help_url)}" target="_blank" rel="noreferrer"><span><strong>Помощь</strong></span><em>${icon('chevron')}</em></a>` : ''}
@@ -173,10 +171,13 @@ export function QuietHoursForm(prefs: NotificationPreferences | undefined, savin
   </form>`;
 }
 
-export function AdditionalMenu(profile: ProfileData | null, canAddToHome: boolean): string {
+export function AdditionalMenu(profile: ProfileData | null, homeScreenStatus: 'unsupported' | 'unknown' | 'added' | 'missed' = 'unknown'): string {
+  const canAddToHome = homeScreenStatus === 'unknown' || homeScreenStatus === 'missed';
   return `
     <div class="form-grid">
       ${canAddToHome ? '<button class="button" data-action="add-to-home">Добавить на главный экран</button>' : ''}
+      ${homeScreenStatus === 'added' ? '<div class="detail-row"><span>Главный экран</span><strong>Добавлено</strong></div>' : ''}
+      ${homeScreenStatus === 'unsupported' ? '<div class="detail-row"><span>Главный экран</span><strong>Недоступно</strong></div>' : ''}
       <button class="button" data-action="share-app">Поделиться Finuchet</button>
       ${profile?.help_url ? `<a class="button" href="${esc(profile.help_url)}" target="_blank" rel="noreferrer">Помощь</a>` : ''}
       <button class="button" data-action="report-issue">Сообщить о проблеме</button>

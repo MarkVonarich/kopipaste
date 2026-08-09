@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from miniapp.api import MiniAppAPI, MiniAppError
+from miniapp.api import MiniAppAPI, MiniAppError, TransactionFilters
 from services.goals import Goal, GoalMovement
 from services.workspaces import WorkspaceContext
 
@@ -342,6 +342,29 @@ def test_mixed_currency_analytics_groups_without_arithmetic(monkeypatch):
     assert filtered["selected_currency"] == "RUB"
     assert filtered["radar"]["currency"] == "RUB"
     assert filtered["radar"]["insufficient_data"] is False
+
+
+def test_category_structure_collapses_duplicate_canonical_categories(monkeypatch):
+    api = _api(monkeypatch)
+
+    def _fetch(sql, params=()):
+        assert "GROUP BY category, COALESCE(currency" in sql
+        return [
+            ("Прочее", "RUB", Decimal("100.00"), 1),
+            ("прочее ", "RUB", Decimal("50.00"), 2),
+            ("Food", "RUB", Decimal("25.00"), 1),
+        ]
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 7), "current_week", "all", None, "workspace_id=ANY(%s)", ([10],))
+
+    structure = api._category_structure(api.request(42), tx, "Расходы", currencies=["RUB"])
+
+    rub_items = structure["currency_groups"]["RUB"]["items"]
+    assert [item["category"] for item in rub_items].count("Прочее") == 1
+    other = next(item for item in rub_items if item["category"] == "Прочее")
+    assert other["total"] == Decimal("150.00")
+    assert other["count"] == 3
 
 
 def test_radar_currency_discovery_uses_previous_period_when_current_empty(monkeypatch):

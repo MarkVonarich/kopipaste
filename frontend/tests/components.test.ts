@@ -7,7 +7,7 @@ import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/
 import { CategoryBudgetForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from '../src/components/PlansScreen';
 import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
 import { ActivityCalendarView } from '../src/components/ActivityCalendar';
-import { AdditionalMenu, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
+import { AdditionalMenu, ExportForm, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
 
 const overview = {
   period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-04' },
@@ -76,6 +76,30 @@ describe('acceptance components', () => {
     expect(html).toContain('Фокус');
     expect(html).toContain('Инсайт периода');
     expect(html).not.toContain('Food 4');
+  });
+
+  it('renders smart Home carousel dots inside card shells without nested buttons', () => {
+    const html = HomeScreen({
+      ...overview,
+      challenges: [
+        { key: 'daily', title: 'Сегодня', description: 'Запишите операцию', progress: 1, target: 2, completed: false, cta_label: 'Добавить', period_type: 'day', period_key: '2026-08-04' },
+        { key: 'weekly', title: 'Неделя', description: 'Пять дней', progress: 2, target: 5, completed: false, cta_label: 'Добавить', period_type: 'week', period_key: '2026-08-03' },
+      ],
+      focus_items: [
+        { kind: 'limit', title: 'Food', description: 'Лимит', target_mode: 'limits', percent: 60 },
+        { kind: 'goal', title: 'Trip', description: 'Цель', target_mode: 'goals', percent: 25 },
+      ],
+      reminders: [
+        { state: 'upcoming', id: 1, title: 'Internet', event_date: '2026-08-10', status_text: 'Скоро', overdue_days: 0 },
+        { state: 'empty', title: 'Нет событий', status_text: 'Добавьте напоминание', overdue_days: 0 },
+      ],
+      insight: { kind: 'period', tone: 'neutral', title: 'Период', text: 'Есть данные' },
+    }, [], 'RUB', true);
+
+    expect(html).toContain('class="smart-card home-carousel"');
+    expect(html).toContain('data-action="carousel-dot"');
+    expect(html).toContain('class="smart-card insight-card');
+    expect(html).not.toContain('<button class="smart-card"');
   });
 
   it('renders focus projected risk without replacing actual progress', () => {
@@ -326,6 +350,8 @@ describe('acceptance components', () => {
     expect(html).toContain('dynamicsChart');
     expect(html).toContain('data-chart="category"');
     expect(html).toContain('Недостаточно данных');
+    expect(html).toContain('data-action="export-open"');
+    expect(html).toContain('Открыть экспорт');
   });
 
   it('renders money radar long labels and keeps activity out of Analytics', () => {
@@ -510,7 +536,7 @@ describe('acceptance components', () => {
     expect(html).toContain('Как к вам обращаться?');
     expect(html).toContain('Уведомления');
     expect(html).toContain('Premium');
-    expect(html).toContain('Экспорт и данные');
+    expect(html).not.toContain('Экспорт и данные');
     expect(html).toContain('profile-name-open');
   });
 
@@ -548,9 +574,17 @@ describe('acceptance components', () => {
     expect(html).toContain('data-action="quiet-hours-open"');
     expect(html).not.toContain('data-action="notification-quiet"');
 
-    const menu = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, false);
+    const menu = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, 'unsupported');
     expect(menu).toContain('Поделиться Finuchet');
     expect(menu).not.toContain('Добавить на главный экран');
+  });
+
+  it('shows custom export date fields immediately and preserves draft dates', () => {
+    const html = ExportForm({ preset: 'custom', start_date: '2026-08-01', end_date: '2026-08-09' }, undefined);
+
+    expect(html).toContain('class="custom-export-fields" >');
+    expect(html).toContain('value="2026-08-01"');
+    expect(html).toContain('value="2026-08-09"');
   });
 
   it('shows Telegram display name before preferred name, then returns to it after clear', () => {

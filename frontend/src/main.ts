@@ -3,7 +3,7 @@ import Chart from 'chart.js/auto';
 import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
 import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
-import { getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch } from './telegram';
+import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
 import type { AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, Operation, OperationType, PeriodKey, Reminder, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
@@ -231,7 +231,7 @@ function writableWorkspaces(): Workspace[] {
 }
 
 function renderProfile(): string {
-  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion || 'user');
+  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion);
 }
 
 function carouselTotal(kind: 'challenge' | 'focus' | 'reminder'): number {
@@ -347,9 +347,7 @@ function renderSheet(): string {
     return BottomSheet('Тихие часы', QuietHoursForm(profile?.notifications, state.saving, state.saveError));
   }
   if (state.sheet === 'menu') {
-    const nav = navigator as Navigator & { standalone?: boolean };
-    const canAdd = 'standalone' in nav || 'BeforeInstallPromptEvent' in window;
-    return BottomSheet('Меню', AdditionalMenu(profile, canAdd));
+    return BottomSheet('Меню', AdditionalMenu(profile, state.homeScreenStatus || 'unknown'));
   }
   if (state.sheet === 'actions') {
     return BottomSheet('Добавить операцию', `
@@ -1252,7 +1250,13 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
     state.sheet = 'menu';
+    state.homeScreenStatus = 'unknown';
     render();
+    void checkHomeScreenStatus().then((status) => {
+      if (state.sheet !== 'menu') return;
+      state.homeScreenStatus = status;
+      render();
+    });
   });
   app.querySelector<HTMLButtonElement>('[data-action="premium-open"]')?.addEventListener('click', async () => {
     await api.premium();
@@ -1271,7 +1275,7 @@ function wireEvents(): void {
   app.querySelectorAll<HTMLButtonElement>('[data-action="profile-section"]').forEach((button) => {
     button.addEventListener('click', async () => {
       const section = button.dataset.section || 'user';
-      state.profileAccordion = section as AppState['profileAccordion'];
+      state.profileAccordion = state.profileAccordion === section ? null : section as AppState['profileAccordion'];
       persistState(state);
       await api.track('mini_app_profile_section_opened', { section, source: 'mini_app' });
       render();
@@ -1338,6 +1342,18 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="share-app"]')?.addEventListener('click', async () => {
     if (navigator.share) await navigator.share({ title: 'Finuchet', text: 'КопиPaste для учёта финансов' }).catch(() => undefined);
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')?.addEventListener('click', async () => {
+    const requested = requestAddToHomeScreen();
+    if (!requested) {
+      state.homeScreenStatus = 'unsupported';
+      render();
+      return;
+    }
+    showToast('Запрос отправлен в Telegram');
+    await api.track('mini_app_add_to_home_requested', { source: 'mini_app' });
+    state.homeScreenStatus = await checkHomeScreenStatus();
+    render();
   });
   app.querySelector<HTMLButtonElement>('[data-action="report-issue"]')?.addEventListener('click', () => {
     window.open(profile?.help_url || 'https://t.me/chiracredible', '_blank', 'noreferrer');
@@ -1903,6 +1919,23 @@ function wireEvents(): void {
       state.saveError = safeError(error);
       render();
     }
+  });
+
+  app.querySelector<HTMLSelectElement>('form[data-action="export-preview"] select[name="preset"]')?.addEventListener('change', (event) => {
+    const form = (event.currentTarget as HTMLSelectElement).form;
+    const data = new FormData(form || undefined);
+    state.exportDraft = {
+      ...(state.exportDraft || {}),
+      workspace_id: state.workspaceId,
+      operation_type: state.globalFilters.operation_type,
+      category: state.globalFilters.category,
+      preset: String(data.get('preset') || 'month'),
+      start_date: String(data.get('start_date') || state.exportDraft?.['start_date'] || ''),
+      end_date: String(data.get('end_date') || state.exportDraft?.['end_date'] || ''),
+    };
+    state.exportPreview = undefined;
+    state.exportSent = false;
+    render();
   });
 
   app.querySelector<HTMLButtonElement>('[data-action="export-send"]')?.addEventListener('click', async () => {

@@ -560,7 +560,7 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
             )
         except Exception:
             pass
-        return await record_operation(cat, amt_final, dt, typ, update, context, note)
+        return await record_operation(cat, amt_final, dt, typ, update, context, note, merchant=merch)
 
     op_type = _guess_operation_type_from_text(text, merch)
     normalized = normalize_for_ml(text)
@@ -1463,6 +1463,9 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     daily_time_state = context.user_data.pop('await_daily_notification_time', None)
     if daily_time_state:
         field = daily_time_state.get('field')
+        if field == 'morning':
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton('🕒 Время уведомлений', callback_data='notif_times')]])
+            return await emsg.reply_text('Утренние автоматические уведомления отключены. Можно настроить вечернее время.', reply_markup=kb)
         try:
             prefs = set_daily_notification_time(cid, field, text.strip())
         except Exception:
@@ -1586,7 +1589,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         alias_norm = normalize_alias_text(context.user_data.get('batch_item_text') or merch)
         record_category_confirmation(cid, context.user_data.get('batch_item_text') or merch, alias_norm, cat_result.name, typ, 'accept')
         await emsg.reply_text('✅ Категория сохранена.' if cat_result.created else '✅ Такая категория уже есть, использую её.')
-        return await record_operation(cat_result.name, amt, dt, typ, update, context, note)
+        return await record_operation(cat_result.name, amt, dt, typ, update, context, note, merchant=merch)
 
     if context.user_data.pop('await_amount', False):
         src_curr = detect_currency_token(text or "")
@@ -1620,7 +1623,7 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception:
                 pass
-            return await record_operation(cat, amt_final, dt, typ, update, context, note)
+            return await record_operation(cat, amt_final, dt, typ, update, context, note, merchant=merch)
 
         op_type = 'Расходы'
         normalized = normalize_for_ml(text)

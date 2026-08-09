@@ -131,6 +131,8 @@ Run after deployment and restart.
 - Enter an invalid timezone and confirm the bot asks again without changing the saved timezone.
 - Confirm changing timezone marks stale pending automatic notifications as skipped with reason `timezone_changed_stale_notification`.
 - Set daily reminder hour to `20:00`; at a non-20 local hour, confirm the evening reminder job does not send or defer a stale evening reminder.
+- Confirm daily notifications show only an evening time in Telegram and Mini App settings.
+- Confirm any queued legacy `day_nudge` notification is skipped and no morning automatic notification is delivered.
 - Enable quiet hours crossing midnight and confirm reminders, reports, limits, challenges and goals respect the saved timezone rather than server time.
 - Create test category `Продукты`.
 - Set a weekly category limit to `2 000 RUB`.
@@ -187,18 +189,24 @@ Run after deployment and restart.
 - Open the Mini App from Telegram and confirm it reaches Home first.
 - Confirm Home shows income with Add income in the left column and expenses with Add expense in the right column.
 - Confirm Home shows no more than three recent operations and `Все операции` opens the Operations tab.
-- Confirm the daily challenge card shows progress and opens a handled Mini App route/plan surface.
+- Confirm Home smart cards show Challenge, Focus and Reminder as equal top-row cards, with Insight full-width below.
+- Confirm Home challenge carousel shows only current Today, Week and Month cards in that order, and current completed cards remain visible.
+- Confirm carousel dots are inside each smart card shell and swiping/keyboard arrows change slides.
 - Confirm the focus card opens Goals or Limits according to the displayed card.
 - Confirm the period insight is neutral/positive/warning and mixed-currency periods are not summed.
-- Confirm Profile opens with the User accordion expanded and only one accordion section open at a time.
+- Confirm Profile opens with all accordion sections closed, tapping one section opens it, and tapping it again closes it.
 - Confirm Preferred name saves and a later bot confirmation uses that name.
 - Confirm Currency saves for future defaults without altering existing operation history.
 - Confirm Timezone saves a preset and a valid custom IANA value, and rejects an invalid value.
 - Confirm Active workspace selection changes the default workspace and owner/admin workspace rename works.
-- Confirm notification rows are switches, challenge notification preference remains available in Settings/Profile, and Quiet hours opens an editor instead of toggling directly.
+- Confirm notification rows are grouped switches and Quiet hours opens an editor instead of toggling directly.
+- Confirm Profile no longer contains Export/Data and Analytics contains the export entry.
+- Open Analytics export, select custom period and confirm start/end date fields appear immediately and keep entered dates while changing the preset.
 - Confirm quiet-hours enabled/start/end save in one action and cross-midnight values still defer challenge notifications.
 - Disable quiet hours after setting `23:00–09:00`, reopen the editor, and confirm `23:00–09:00` is still shown before enabling again.
 - Confirm Telegram menu button `Открыть` opens the Mini App when `MINIAPP_PUBLIC_URL` is HTTPS.
+- Confirm the global three-dot menu opens from Home, Analytics, Operations, Plans and Profile.
+- In Telegram clients that support it, confirm Add to Home Screen uses the native Telegram Mini App action; otherwise confirm the menu degrades without a dead action.
 - Confirm `/app` still shows the inline WebApp button.
 - Open profile `@uchet_finbot` after BotFather setup and confirm the Main Mini App Launch/Open button is present.
 - Open the Main Mini App launch button and confirm Home loads.

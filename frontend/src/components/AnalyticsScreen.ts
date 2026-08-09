@@ -193,6 +193,10 @@ export function AnalyticsScreen(
         ${analytics?.radar.insufficient_data ? '' : '<div class="radar-legend"><span class="current">Текущий период</span><span class="previous">Прошлый период</span></div>'}
         <p class="caption">${esc(analytics?.radar.explanation || 'Значения нормализованы.')} Сравниваются выбранный и предыдущий периоды.</p>
       </section>
+      <section class="chart-section">
+        ${SectionHeader('Экспорт', 'XLSX за выбранный период и пространство', '<button class="button secondary" data-action="export-open" type="button">Открыть экспорт</button>')}
+        <p class="caption">Файл формируется через существующий безопасный flow и отправляется в Telegram.</p>
+      </section>
     </section>
   `;
 }

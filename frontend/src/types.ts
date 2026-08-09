@@ -3,7 +3,7 @@ export type ThemeMode = 'telegram' | 'light' | 'dark';
 export type PeriodKey = 'current_week' | 'current_month' | 'previous_month' | 'custom';
 export type GlobalOperationType = 'all' | 'expense' | 'income';
 export type OperationType = 'Расходы' | 'Доходы';
-export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'notifications' | 'export-data' | 'premium' | 'help' | 'legal';
+export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'notifications' | 'premium' | 'help' | 'legal';
 
 export type Workspace = {
   workspace_id: number | 'all' | null;
@@ -275,7 +275,7 @@ export type NotificationPreferences = {
   quiet_hours_start?: string | null;
   quiet_hours_end?: string | null;
   timezone: string;
-  daily_notifications?: { enabled: boolean; morning_time: string; evening_time: string };
+  daily_notifications?: { enabled: boolean; morning_time?: string; evening_time: string };
   plans_control?: { enabled: boolean };
   reports?: { enabled: boolean };
   quiet_hours?: { enabled: boolean; start: string; end: string };
@@ -343,7 +343,7 @@ export type AppState = {
   confirmDeleteId?: number;
   dirty: boolean;
   sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
-  profileAccordion?: ProfileSection;
+  profileAccordion?: ProfileSection | null;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';
   categoryType?: 'expense' | 'income';
@@ -374,4 +374,5 @@ export type AppState = {
     totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
   };
   exportSent?: boolean;
+  homeScreenStatus?: 'unsupported' | 'unknown' | 'added' | 'missed';
 };
