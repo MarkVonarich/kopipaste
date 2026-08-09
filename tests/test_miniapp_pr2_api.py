@@ -688,12 +688,44 @@ def test_limits_list_uses_existing_threshold_policy_and_workspace_scope(monkeypa
 def test_profile_notification_toggle_and_sanitized_product_event(monkeypatch):
     api = _api(monkeypatch)
     events = []
+    notification_state = {
+        "goal_notifications_enabled": False,
+        "limit_alerts_enabled": False,
+        "budget_alerts_enabled": False,
+        "subscription_alerts_enabled": False,
+        "recurring_spend_alerts_enabled": False,
+    }
+
+    def _toggle_notification_preference(_user_id, key):
+        assert key == "goals"
+        notification_state["goal_notifications_enabled"] = not notification_state["goal_notifications_enabled"]
+        return notification_state["goal_notifications_enabled"]
+
+    def _grouped_notification_preferences(_user_id):
+        plans_enabled = bool(
+            notification_state["limit_alerts_enabled"]
+            or notification_state["budget_alerts_enabled"]
+            or notification_state["goal_notifications_enabled"]
+            or notification_state["subscription_alerts_enabled"]
+            or notification_state["recurring_spend_alerts_enabled"]
+        )
+        return {
+            **notification_state,
+            "daily_notifications": {"enabled": False, "morning_time": "08:30", "evening_time": "20:30"},
+            "plans_control": {"enabled": plans_enabled},
+            "reports": {"enabled": False},
+            "quiet_hours": {"enabled": False, "start": "22:30", "end": "08:00"},
+            "timezone": "Europe/Moscow",
+        }
+
     monkeypatch.setattr(api, "_track", lambda _req, event_name, **kwargs: events.append((event_name, kwargs)))
-    monkeypatch.setattr("miniapp.api.toggle_notification_preference", lambda _user_id, key: key == "goals")
-    monkeypatch.setattr("miniapp.api.get_notification_preferences", lambda _user_id: {"goal_notifications_enabled": True, "limit_alerts_enabled": True})
+    monkeypatch.setattr("miniapp.api.toggle_notification_preference", _toggle_notification_preference)
+    monkeypatch.setattr("miniapp.api.grouped_notification_preferences", _grouped_notification_preferences)
+    monkeypatch.setattr("miniapp.api.get_notification_preferences", lambda _user_id: (_ for _ in ()).throw(AssertionError("unexpected real notification DB access")))
 
     data = api.update_notification_preferences(api.request(42), {"action": "toggle", "key": "goals"})["data"]
     assert data["goal_notifications_enabled"] is True
+    assert data["plans_control"]["enabled"] is True
     assert events[-1][0] == "mini_app_notification_setting_changed"
     assert "amount" not in events[-1][1]["properties"]
 
