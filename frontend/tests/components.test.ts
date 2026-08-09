@@ -62,7 +62,7 @@ describe('acceptance components', () => {
     }));
     const html = HomeScreen({
       ...overview,
-      challenge: { key: 'daily', title: 'Две записи', description: 'Запишите две операции', progress: 1, target: 2, completed: false, cta_label: 'Добавить', period_key: '2026-08-04' },
+      challenge: { key: 'daily', title: 'Две записи за день', description: 'Запишите две реальные операции за сегодня.', progress: 1, target: 2, completed: false, cta_label: 'Добавить', period_key: '2026-08-04' },
       focus: { kind: 'limit', title: 'Food', description: 'Лимит почти исчерпан', target_mode: 'limits', percent: 90 },
       insight: { kind: 'expense_down', tone: 'positive', title: 'Расходы ниже', text: 'На 10% меньше' },
     }, recent, 'RUB', true);
@@ -73,6 +73,10 @@ describe('acceptance components', () => {
     expect(expenseColumn).toContain('Расходы');
     expect(expenseColumn).toContain('data-kind="expense"');
     expect(html).toContain('Челлендж · Сегодня');
+    expect(html).toContain('2 записи за день');
+    expect(html).toContain('1/2');
+    expect(html).toContain('Запишите 2 операции сегодня.');
+    expect(html).not.toContain('реальные операции');
     expect(html).toContain('Фокус');
     expect(html).toContain('Инсайт периода');
     expect(html).not.toContain('Food 4');
@@ -97,9 +101,32 @@ describe('acceptance components', () => {
     }, [], 'RUB', true);
 
     expect(html).toContain('class="smart-card home-carousel"');
+    expect(html.match(/class="smart-card home-carousel"/g)).toHaveLength(3);
     expect(html).toContain('data-action="carousel-dot"');
     expect(html).toContain('class="smart-card insight-card');
     expect(html).not.toContain('<button class="smart-card"');
+  });
+
+  it('renders compact Home reminder copy in all reminder states', () => {
+    const empty = HomeScreen({
+      ...overview,
+      reminders: [{ state: 'empty', title: 'Нет запланированных событий', status_text: 'Добавьте напоминание в боте.', overdue_days: 0 }],
+    }, [], 'RUB', true);
+    const active = HomeScreen({
+      ...overview,
+      reminders: [{ state: 'upcoming', id: 9, title: 'ChatGPT', amount_text: '1 990 ₽', event_date: '19 августа', status_text: 'Через 10 дней', overdue_days: 0 }],
+    }, [], 'RUB', true);
+
+    expect(empty).toContain('Напоминание');
+    expect(empty).toContain('Нет событий');
+    expect(empty).toContain('Добавьте в Планах.');
+    expect(empty).not.toContain('Ближайшее напоминание');
+    expect(empty).not.toContain('Нет запланированных событий');
+    expect(active).toContain('Напоминание');
+    expect(active).toContain('ChatGPT · 1 990 ₽');
+    expect(active).toContain('19 августа');
+    expect(active).toContain('Через 10 дней');
+    expect(active).not.toContain('Ближайшее напоминание');
   });
 
   it('renders the current Home reminder slide id on the action button', () => {
@@ -130,11 +157,24 @@ describe('acceptance components', () => {
   it('renders focus projected risk without replacing actual progress', () => {
     const html = HomeScreen({
       ...overview,
-      focus: { kind: 'limit', title: 'Food', description: 'При текущем темпе лимит может быть превышен.', target_mode: 'limits', percent: 60, projected_percent: 145 },
+      focus: { kind: 'limit', title: 'Food', description: 'При текущем темпе лимит может быть превышен.', target_mode: 'limits', percent: 60, projected_percent: 145, severity: 'high', status: 'warning' },
     }, [], 'RUB', true);
 
     expect(html).toContain('aria-valuenow="60"');
-    expect(html).toContain('Прогноз к концу периода: 145%');
+    expect(html).toContain('Лимит под риском');
+    expect(html).toContain('Прогноз: 145%');
+    expect(html).not.toContain('При текущем темпе лимит может быть превышен.');
+    expect(html).not.toContain('Прогноз к концу периода');
+  });
+
+  it('uses compact Financial Result comparison text on Home', () => {
+    const html = HomeScreen({
+      ...overview,
+      insight: { kind: 'expense_up', tone: 'warning', title: 'Расходы выше', text: 'На 564% больше, чем в прошлом сопоставимом периоде.' },
+    }, [], 'RUB', true);
+
+    expect(html).toContain('На 564% больше прошлого периода');
+    expect(html).not.toContain('в прошлом сопоставимом периоде');
   });
 
   it('renders multiple currencies without false aggregation', () => {

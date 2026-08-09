@@ -52,6 +52,42 @@ function progressBar(percent?: number): string {
   return `<div class="progress-line" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><span style="width:${value}%"></span></div><small>${value}%</small>`;
 }
 
+function compactHomeInsightText(text: string): string {
+  return text
+    .replace(/На\s+(\d+)%\s+(больше|меньше),\s+чем\s+в\s+прошлом\s+сопоставимом\s+периоде\.?/gi, 'На $1% $2 прошлого периода')
+    .replace(/в прошлом сопоставимом периоде/gi, 'прошлого периода')
+    .trim();
+}
+
+function compactChallengeText(text: string): string {
+  return text
+    .replace(/Две/g, '2')
+    .replace(/две/g, '2')
+    .replace(/реальные\s+/gi, '')
+    .replace(/операции\s+за\s+сегодня/gi, 'операции сегодня')
+    .trim();
+}
+
+function compactFocusDescription(item: NonNullable<Overview['focus']>): string {
+  if (item.kind === 'empty') {
+    if ((item.title || '').toLowerCase().includes('фокус свободен')) return 'Добавьте цель или лимит.';
+    return item.description || 'Откройте детали.';
+  }
+  if (item.kind === 'limit') {
+    const status = String(item.status || '').toLowerCase();
+    const severity = String(item.severity || '').toLowerCase();
+    if (status === 'exceeded' || severity === 'critical') return 'Лимит превышен';
+    if (status === 'warning' || severity === 'high') return 'Лимит под риском';
+    if (status === 'risk' || status === 'attention' || severity === 'medium') return 'Близко к лимиту';
+    return 'В пределах лимита';
+  }
+  const severity = String(item.severity || '').toLowerCase();
+  if (severity === 'critical') return 'Требует внимания';
+  if (severity === 'high') return 'Скоро действие';
+  if (severity === 'medium') return 'Проверьте план';
+  return item.description || 'В плане';
+}
+
 function carousel(id: 'challenge' | 'focus' | 'reminder', items: string[], index: number, label: string, action: string, actionAttrs: string[] = []): string {
   if (!items.length) return '';
   const current = Math.max(0, Math.min(index || 0, items.length - 1));
@@ -69,20 +105,18 @@ function carousel(id: 'challenge' | 'focus' | 'reminder', items: string[], index
 
 function reminderCard(reminder: HomeReminderSummary | null | undefined): string {
   const state = reminder?.state || 'empty';
-  const title = reminder?.title || 'Нет запланированных событий';
+  const title = state === 'empty' ? 'Нет событий' : reminder?.title || 'Напоминание';
   const amount = reminder?.amount_text ? ` · ${reminder.amount_text}` : '';
   const date = reminder?.event_date || '';
-  const status = reminder?.status_text || 'Добавьте напоминание в боте.';
-  const next = reminder?.next_event_date ? `<small>Следующее: ${esc(reminder.next_event_date)}</small>` : '';
-  const label = state === 'overdue' ? 'Просрочено' : 'Ближайшее напоминание';
+  const status = state === 'empty' ? 'Добавьте в Планах.' : reminder?.status_text || '';
+  const label = 'Напоминание';
   const action = state === 'overdue' ? 'Записать оплату' : state === 'upcoming' ? 'Записать сейчас' : 'Все напоминания';
   return `
     <div class="reminder-card ${esc(state)}">
       <span>${esc(label)}</span>
       <strong>${esc(title)}${esc(amount)}</strong>
       ${date ? `<small>${esc(date)}</small>` : ''}
-      <small>${esc(status)}</small>
-      ${next}
+      ${status ? `<small>${esc(status)}</small>` : ''}
       <small class="cta-text">${esc(action)}</small>
     </div>
   `;
@@ -118,11 +152,13 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
   const challenges = overview?.challenges?.length ? overview.challenges : challenge ? [challenge] : [];
   const focusItems = overview?.focus_items?.length ? overview.focus_items : focus ? [focus] : [];
   const reminders = overview?.reminders?.length ? overview.reminders : overview?.reminder ? [overview.reminder] : [];
+  const homeInsightText = compactHomeInsightText(overview?.insight?.text || overview?.info?.text || 'Показан выбранный период.');
   const challengeCards = challenges.map((item) => `
     <div>
       <span>Челлендж · ${esc(item.period_type === 'week' ? 'Неделя' : item.period_type === 'month' ? 'Месяц' : 'Сегодня')}</span>
-      <strong>${esc(item.completed ? 'Готово' : item.title)}</strong>
-      <small>${esc(`${item.progress}/${item.target} · ${item.description}`)}</small>
+      <strong>${esc(item.completed ? 'Готово' : compactChallengeText(item.title))}</strong>
+      <small>${esc(`${item.progress}/${item.target}`)}</small>
+      <small>${esc(compactChallengeText(item.description))}</small>
       ${progressBar(Math.round((Number(item.progress || 0) / Math.max(1, Number(item.target || 1))) * 100))}
     </div>
   `);
@@ -130,9 +166,9 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
     <div>
       <span>Фокус</span>
       <strong>${esc(item.title || 'Фокус свободен')}</strong>
-      <small>${esc(item.description || 'Цели и лимиты появятся здесь')}</small>
+      <small>${esc(compactFocusDescription(item))}</small>
       ${item.percent !== undefined ? progressBar(item.percent) : ''}
-      ${item.projected_percent ? `<small>Прогноз к концу периода: ${esc(item.projected_percent)}%</small>` : ''}
+      ${item.projected_percent ? `<small>Прогноз: ${esc(item.projected_percent)}%</small>` : ''}
     </div>
   `);
   const focusActionAttrs = focusItems.map((item) => `data-mode="${esc(item.target_mode || 'goals')}"`);
@@ -146,7 +182,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
           <strong>${esc(heroAmount(overview, filters, fallbackCurrency))}</strong>
           ${period ? `<p>${esc(period)}</p>` : ''}
           <p>${esc(heroSubtitle(filters))}</p>
-          <p class="hero-insight">${esc(overview?.insight?.text || overview?.info?.text || 'Показан выбранный период.')}</p>
+          <p class="hero-insight">${esc(homeInsightText)}</p>
           ${overview && !overview.aggregation_available ? '<p class="caption">Валюты показаны отдельно. Разные валюты не складываются.</p>' : ''}
         </div>
         ${activityCard(overview)}
@@ -174,7 +210,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
         <button class="smart-card insight-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
           <span>Инсайт периода</span>
           <strong>${esc(insight?.title || overview?.info?.text || 'Период')}</strong>
-          <small>${esc(insight?.text || overview?.info?.text || 'Данные обновятся после операций')}</small>
+          <small>${esc(compactHomeInsightText(insight?.text || overview?.info?.text || 'Данные обновятся после операций'))}</small>
         </button>
       </div>
       ${SectionHeader(

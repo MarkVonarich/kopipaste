@@ -142,4 +142,16 @@ describe('mini app design system semantics', () => {
     expect(styles).not.toContain('width: 100vw');
     expect(styles).toContain('prefers-reduced-motion: reduce');
   });
+
+  it('keeps smart card typography from breaking words arbitrarily', async () => {
+    const styles = await readStyles();
+    const smartCardRules = styles
+      .split('}')
+      .filter((rule) => rule.includes('.smart-card'))
+      .join('}');
+
+    expect(smartCardRules).not.toContain('word-break: break-all');
+    expect(smartCardRules).toContain('word-break: normal');
+    expect(smartCardRules).not.toContain('overflow-wrap: anywhere');
+  });
 });
