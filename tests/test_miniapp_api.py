@@ -780,6 +780,34 @@ def test_home_challenge_serializes_existing_daily_challenge(monkeypatch):
     assert card["key"] == "daily_test"
     assert card["progress"] == 1
     assert card["completed"] is False
+    assert card["period_type"] == "day"
+
+
+def test_home_challenges_keep_one_current_card_per_period_in_order(monkeypatch):
+    api = _api(monkeypatch)
+    daily_done = ChallengeDefinition("daily_done", "День готов", "Описание", "day", "operation_count", 1, "daily", "Добавить", "menu_examples", "Готово.")
+    daily_old = ChallengeDefinition("daily_old", "Старый день", "Описание", "day", "operation_count", 1, "daily", "Добавить", "menu_examples", "Готово.")
+    weekly = ChallengeDefinition("weekly_test", "Неделя", "Описание", "week", "operation_count", 5, "weekly", "Добавить", "menu_examples", "Готово.")
+    monthly = ChallengeDefinition("monthly_test", "Месяц", "Описание", "month", "operation_count", 10, "monthly", "Добавить", "menu_examples", "Готово.")
+
+    def _assignments(_user_id, section):
+        if section == "today":
+            return [
+                ChallengeCard(daily_done, 1, 1, True, "2026-08-05", date(2026, 8, 5)),
+                ChallengeCard(daily_old, 1, 1, True, "2026-08-04", date(2026, 8, 4)),
+            ]
+        if section == "week":
+            return [ChallengeCard(weekly, 2, 5, False, "2026-08-03", date(2026, 8, 9))]
+        if section == "month":
+            return [ChallengeCard(monthly, 3, 10, False, "2026-08", date(2026, 8, 31))]
+        return []
+
+    monkeypatch.setattr("miniapp.api.upsert_assignments", _assignments)
+
+    cards = api._home_challenges(api.request(42))
+
+    assert [card["key"] for card in cards] == ["daily_done", "weekly_test", "monthly_test"]
+    assert [card["period_type"] for card in cards] == ["day", "week", "month"]
 
 
 def test_home_focus_priority_is_stable(monkeypatch):

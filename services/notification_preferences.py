@@ -125,7 +125,7 @@ def get_notification_preferences(user_id: int) -> dict:
 
 def grouped_notification_preferences(user_id: int) -> dict:
     prefs = get_notification_preferences(user_id)
-    daily_enabled = bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))
+    daily_enabled = bool(prefs.get("evening_enabled", True))
     plans_enabled = bool(
         prefs.get("limit_alerts_enabled", True)
         or prefs.get("budget_alerts_enabled", True)
@@ -138,7 +138,6 @@ def grouped_notification_preferences(user_id: int) -> dict:
         **prefs,
         "daily_notifications": {
             "enabled": daily_enabled,
-            "morning_time": prefs.get("morning_time") or "08:30",
             "evening_time": prefs.get("evening_time") or "20:30",
         },
         "plans_control": {"enabled": plans_enabled},
@@ -188,7 +187,35 @@ def _set_fields(user_id: int, fields: tuple[str, ...], enabled: bool) -> dict:
 
 
 def set_daily_notifications_enabled(user_id: int, enabled: bool) -> dict:
-    return _set_fields(user_id, GROUPED_NOTIFICATION_FIELDS["daily"], enabled)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.notification_preferences (user_id, morning_enabled, evening_enabled)
+                VALUES (%s, false, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET morning_enabled=false,
+                       evening_enabled=%s,
+                       updated_at=now()
+                """,
+                (user_id, bool(enabled), bool(enabled)),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    try:
+        from services.automatic_notifications import suppress_pending_preference_notifications
+
+        suppress_pending_preference_notifications(user_id, "morning")
+        if not enabled:
+            suppress_pending_preference_notifications(user_id, "evening")
+    except Exception:
+        pass
+    return grouped_notification_preferences(user_id)
 
 
 def set_plans_notifications_enabled(user_id: int, enabled: bool) -> dict:

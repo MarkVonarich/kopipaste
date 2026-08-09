@@ -585,7 +585,7 @@ NOTIFICATION_TOGGLE_LABELS = {
 }
 
 GROUPED_NOTIFICATION_LABELS = {
-    "daily": ("Ежедневные уведомления", "✅ Ежедневные уведомления", "⛔ Ежедневные уведомления"),
+    "daily": ("Уведомления", "✅ Уведомления", "⛔ Уведомления"),
     "plans": ("Планы и контроль", "✅ Планы и контроль", "⛔ Планы и контроль"),
     "reports": ("Отчёты", "✅ Отчёты", "⛔ Отчёты"),
 }
@@ -612,7 +612,7 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
 
 def grouped_notification_preferences_from_prefs(prefs: dict) -> dict:
     return {
-        "daily_notifications": {"enabled": bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))},
+        "daily_notifications": {"enabled": bool(prefs.get("evening_enabled", True))},
         "plans_control": {"enabled": bool(
             prefs.get("limit_alerts_enabled", True)
             or prefs.get("budget_alerts_enabled", True)
@@ -643,9 +643,9 @@ async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAU
     qh_end = prefs.get("quiet_hours_end") or "08:00"
     text = (
         '🔔 Оповещения\n\n'
-        f"Ежедневные уведомления: {daily}\n"
-        f"Утро {prefs['morning_time']} · Вечер {prefs['evening_time']}\n"
-        "Короткие сообщения утром и вечером помогают не забывать записывать операции.\n\n"
+        f"Уведомления: {daily}\n"
+        f"Вечер {prefs['evening_time']}\n"
+        "Короткое вечернее сообщение помогает не забывать записывать операции.\n\n"
         f"📊 Планы и контроль: {plans}\n"
         "Предупреждает о лимитах, бюджетах, целях и важных регулярных расходах.\n\n"
         f"📅 Отчёты: {reports}\n"
@@ -672,7 +672,7 @@ async def _render_challenge_notification_settings(q, cid: int):
 
 def _notification_times_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('☀️ Изменить утро', callback_data='notif_time|morning'), InlineKeyboardButton('🌙 Изменить вечер', callback_data='notif_time|evening')],
+        [InlineKeyboardButton('🌙 Изменить вечер', callback_data='notif_time|evening')],
         [InlineKeyboardButton('⬅️ Назад', callback_data='menu_notifications')],
     ])
 
@@ -681,9 +681,8 @@ async def _render_notification_times(q, cid: int):
     prefs = get_notification_preferences(cid)
     text = (
         "🕒 Время уведомлений\n\n"
-        f"Утро: {prefs.get('morning_time') or '08:30'}\n"
         f"Вечер: {prefs.get('evening_time') or '20:30'}\n\n"
-        "Ежедневные уведомления включаются одной настройкой, а время можно менять отдельно."
+        "Ежедневное напоминание отправляется вечером. Утренние автоматические уведомления отключены."
     )
     return await _safe_edit_or_reply(q, text, reply_markup=_notification_times_markup())
 
@@ -3406,6 +3405,9 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('notif_toggle|'):
         key = data.split('|', 1)[1]
+        if key == 'morning':
+            await q.answer('Утренние автоматические уведомления отключены.', show_alert=True)
+            return await _render_notification_settings(q, cid, context)
         if key == 'challenges':
             await q.answer('Оповещения о челленджах больше не используются.', show_alert=True)
             return await _render_challenge_notification_settings(q, cid)
@@ -3434,6 +3436,9 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         field = data.split('|', 1)[1]
         if field not in {'morning', 'evening'}:
             return await q.answer('Настройка недоступна', show_alert=True)
+        if field == 'morning':
+            await q.answer('Утренние автоматические уведомления отключены.', show_alert=True)
+            return await _render_notification_times(q, cid)
         context.user_data['await_daily_notification_time'] = {'field': field}
         await q.answer()
         label = 'утра' if field == 'morning' else 'вечера'

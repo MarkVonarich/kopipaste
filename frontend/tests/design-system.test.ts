@@ -78,6 +78,8 @@ describe('mini app design system semantics', () => {
     expect(parsed.querySelectorAll('h1')).toHaveLength(1);
     expect(parsed.querySelector('h1')?.textContent).toBe('Аналитика');
     expect(parsed.querySelector('.toolbar')).toBeTruthy();
+    expect(parsed.querySelector('[data-action="open-menu"]')).toBeTruthy();
+    expect(parsed.querySelector('.screen-title p')).toBeFalsy();
   });
 
   it('renders hero financial result, separate income and expense, multicurrency and quick actions', () => {

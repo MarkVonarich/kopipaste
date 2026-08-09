@@ -296,6 +296,8 @@ def notification_due_in_window(local_dt: datetime, configured_time: time, *, win
 
 
 def is_notification_due(user_id: int, kind: str, local_dt: datetime, prefs: dict) -> bool:
+    if kind == "morning":
+        return False
     if kind == "morning" and not prefs.get("morning_enabled", True):
         return False
     if kind == "evening" and not prefs.get("evening_enabled", True):
@@ -461,6 +463,8 @@ async def _user_name(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
 
 async def day_nudge_job(context: ContextTypes.DEFAULT_TYPE):
     """Окно 06:00–12:00 локально. 1 раз/день. Пропуск, если были операции."""
+    log.info("day_nudge_job retired: morning automatic notifications are disabled")
+    return
     try:
         _ensure_tables()
         conn = get_conn(); cur = conn.cursor()

@@ -3,7 +3,7 @@ import Chart from 'chart.js/auto';
 import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
 import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
-import { getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch } from './telegram';
+import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
 import type { AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, Operation, OperationType, PeriodKey, Reminder, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
@@ -38,6 +38,8 @@ let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 let chartInstances: Chart[] = [];
+let homeScreenEventsRegistered = false;
+let homeScreenCheckSeq = 0;
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -83,6 +85,18 @@ function applyTheme(mode: ThemeMode): void {
     const value = params[source];
     if (value) root.setProperty(target, value);
   }
+}
+
+function registerHomeScreenEvents(): void {
+  if (homeScreenEventsRegistered) return;
+  const tg = getTelegramWebApp();
+  if (typeof tg?.onEvent !== 'function') return;
+  homeScreenEventsRegistered = true;
+  tg.onEvent('homeScreenAdded', () => {
+    state.homeScreenStatus = 'added';
+    showToast('КопиPaste добавлен на главный экран');
+    if (state.sheet === 'menu') render();
+  });
 }
 
 function workspaceLabel(workspace: Workspace): string {
@@ -231,7 +245,7 @@ function writableWorkspaces(): Workspace[] {
 }
 
 function renderProfile(): string {
-  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion || 'user');
+  return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion);
 }
 
 function carouselTotal(kind: 'challenge' | 'focus' | 'reminder'): number {
@@ -347,9 +361,7 @@ function renderSheet(): string {
     return BottomSheet('Тихие часы', QuietHoursForm(profile?.notifications, state.saving, state.saveError));
   }
   if (state.sheet === 'menu') {
-    const nav = navigator as Navigator & { standalone?: boolean };
-    const canAdd = 'standalone' in nav || 'BeforeInstallPromptEvent' in window;
-    return BottomSheet('Меню', AdditionalMenu(profile, canAdd));
+    return BottomSheet('Меню', AdditionalMenu(profile, state.homeScreenStatus || 'unknown', getTelegramWebApp()?.platform || ''));
   }
   if (state.sheet === 'actions') {
     return BottomSheet('Добавить операцию', `
@@ -521,7 +533,8 @@ async function bootstrap(): Promise<void> {
   }
   initTelegramShell();
   const tg = getTelegramWebApp();
-  tg?.onEvent('themeChanged', () => applyTheme(state.theme));
+  tg?.onEvent?.('themeChanged', () => applyTheme(state.theme));
+  registerHomeScreenEvents();
   tg?.BackButton?.onClick(() => closeSheet());
   try {
     const boot = await api.bootstrap();
@@ -930,9 +943,10 @@ function wireEvents(): void {
     state.tab = 'analytics';
     await loadScreen();
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async () => {
-    await api.track('mini_app_home_reminder_opened', { result: overview?.reminder?.state || 'empty', source: 'mini_app' });
-    const reminderId = overview?.reminder?.id;
+  app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const reminderId = Number(button.dataset.id || 0);
+    await api.track('mini_app_home_reminder_opened', { result: button.dataset.state || 'empty', source: 'mini_app' });
     if (!reminderId) {
       state.tab = 'plans';
       state.plansMode = 'reminders';
@@ -1251,8 +1265,19 @@ function wireEvents(): void {
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
+    registerHomeScreenEvents();
     state.sheet = 'menu';
+    if (state.homeScreenStatus !== 'added' && state.homeScreenStatus !== 'pending') state.homeScreenStatus = 'unknown';
     render();
+    if (state.homeScreenStatus === 'added') return;
+    const checkSeq = ++homeScreenCheckSeq;
+    void checkHomeScreenStatus().then((status) => {
+      if (checkSeq !== homeScreenCheckSeq) return;
+      if (state.sheet !== 'menu') return;
+      if (state.homeScreenStatus === 'added') return;
+      state.homeScreenStatus = status;
+      render();
+    });
   });
   app.querySelector<HTMLButtonElement>('[data-action="premium-open"]')?.addEventListener('click', async () => {
     await api.premium();
@@ -1271,7 +1296,7 @@ function wireEvents(): void {
   app.querySelectorAll<HTMLButtonElement>('[data-action="profile-section"]').forEach((button) => {
     button.addEventListener('click', async () => {
       const section = button.dataset.section || 'user';
-      state.profileAccordion = section as AppState['profileAccordion'];
+      state.profileAccordion = state.profileAccordion === section ? null : section as AppState['profileAccordion'];
       persistState(state);
       await api.track('mini_app_profile_section_opened', { section, source: 'mini_app' });
       render();
@@ -1338,6 +1363,20 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="share-app"]')?.addEventListener('click', async () => {
     if (navigator.share) await navigator.share({ title: 'Finuchet', text: 'КопиPaste для учёта финансов' }).catch(() => undefined);
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')?.addEventListener('click', async () => {
+    if (state.homeScreenStatus === 'added') return;
+    registerHomeScreenEvents();
+    const requested = requestAddToHomeScreen();
+    if (!requested) {
+      state.homeScreenStatus = 'unsupported';
+      render();
+      return;
+    }
+    state.homeScreenStatus = 'pending';
+    showToast('Подтвердите добавление в Telegram');
+    await api.track('mini_app_add_to_home_requested', { source: 'mini_app' });
+    render();
   });
   app.querySelector<HTMLButtonElement>('[data-action="report-issue"]')?.addEventListener('click', () => {
     window.open(profile?.help_url || 'https://t.me/chiracredible', '_blank', 'noreferrer');
@@ -1903,6 +1942,23 @@ function wireEvents(): void {
       state.saveError = safeError(error);
       render();
     }
+  });
+
+  app.querySelector<HTMLSelectElement>('form[data-action="export-preview"] select[name="preset"]')?.addEventListener('change', (event) => {
+    const form = (event.currentTarget as HTMLSelectElement).form;
+    const data = new FormData(form || undefined);
+    state.exportDraft = {
+      ...(state.exportDraft || {}),
+      workspace_id: state.workspaceId,
+      operation_type: state.globalFilters.operation_type,
+      category: state.globalFilters.category,
+      preset: String(data.get('preset') || 'month'),
+      start_date: String(data.get('start_date') || state.exportDraft?.['start_date'] || ''),
+      end_date: String(data.get('end_date') || state.exportDraft?.['end_date'] || ''),
+    };
+    state.exportPreview = undefined;
+    state.exportSent = false;
+    render();
   });
 
   app.querySelector<HTMLButtonElement>('[data-action="export-send"]')?.addEventListener('click', async () => {

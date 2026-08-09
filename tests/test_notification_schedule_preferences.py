@@ -13,15 +13,15 @@ def test_morning_disabled_is_not_due(monkeypatch):
     assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 9, 0), prefs)
 
 
-def test_morning_due_uses_full_hhmm_window():
+def test_morning_notifications_are_retired_even_when_legacy_pref_enabled():
     from jobs.daily import is_notification_due
 
     prefs = {"morning_enabled": True, "morning_time": "08:30", "quiet_hours_enabled": False}
 
     assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 5), prefs)
     assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 29), prefs)
-    assert is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 30), prefs)
-    assert is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 34), prefs)
+    assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 30), prefs)
+    assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 34), prefs)
     assert not is_notification_due(42, "morning", datetime(2026, 8, 7, 8, 35), prefs)
 
 
@@ -133,6 +133,23 @@ def test_deferred_delivery_rechecks_disabled_preference(monkeypatch):
     assert skipped == [(7, "preference_disabled")]
 
 
+def test_deferred_day_nudge_is_retired_even_with_legacy_enabled_preference(monkeypatch):
+    from services import automatic_notifications as mod
+
+    monkeypatch.setattr(
+        "services.notification_preferences.get_notification_preferences",
+        lambda _user_id: {"morning_enabled": True, "quiet_hours_enabled": False, "timezone": "Europe/Moscow"},
+    )
+
+    reason = mod._automatic_delivery_skip_reason({
+        "id": 7,
+        "user_id": 42,
+        "notification_type": "day_nudge",
+    })
+
+    assert reason == "preference_disabled"
+
+
 def test_deferred_evening_delivery_outside_new_time_window_is_detected(monkeypatch):
     from services import automatic_notifications as mod
 
@@ -167,7 +184,7 @@ def test_deferred_evening_delivery_outside_new_time_window_is_detected(monkeypat
     assert reason == "outside_delivery_window"
 
 
-def test_grouped_daily_toggle_updates_morning_and_evening(monkeypatch):
+def test_grouped_daily_toggle_forces_morning_off_and_sets_evening(monkeypatch):
     from services import notification_preferences as prefs
 
     executed = []
@@ -204,7 +221,7 @@ def test_grouped_daily_toggle_updates_morning_and_evening(monkeypatch):
     assert result["daily_notifications"]["enabled"] is False
     assert "morning_enabled" in executed[0][0]
     assert "evening_enabled" in executed[0][0]
-    assert executed[0][1] == (42, False, False, False, False)
+    assert executed[0][1] == (42, False, False)
 
 
 def test_grouped_plans_toggle_updates_hidden_financial_control_fields(monkeypatch):

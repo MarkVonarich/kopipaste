@@ -7,7 +7,7 @@ type PersistedState = {
   workspaceId?: number | 'all' | null;
   period?: Partial<PeriodState> & { period?: PeriodState['period'] | 'last_30' };
   globalFilters?: Partial<GlobalFinancialFilters>;
-  profileAccordion?: ProfileSection;
+  profileAccordion?: ProfileSection | null;
 };
 
 export const TAB_ORDER: TabKey[] = ['operations', 'analytics', 'home', 'plans', 'profile'];
@@ -71,7 +71,7 @@ export function initialState(): AppState {
     saving: false,
     dirty: false,
     sheet: null,
-    profileAccordion: persisted.profileAccordion || 'user',
+    profileAccordion: persisted.profileAccordion ?? null,
     plansMode: 'goals',
     homeChallengeIndex: 0,
     homeFocusIndex: 0,

@@ -23,12 +23,12 @@ This inventory is based on the current repository code in `routers/`, `services/
 | Регулярные платежи | Да | Да | `services.reminders`, recurring `repeat_rule` fields | Parity | Polish/history PR | Recording a recurring reminder advances the existing reminder to the next event date. |
 | Недельные отчёты | Да | Нет | `jobs.daily.build_weekly_report_text`, admin/report callbacks | Bot only | Reports PR | Mini App has analytics, not report generation. |
 | Месячные отчёты | Да | Нет | `jobs.daily.build_monthly_report_text`, report callbacks | Bot only | Reports PR | Mini App has analytics, not monthly report delivery. |
-| Excel export | Да | Да | `services.export_xlsx`; `GET/POST /miniapp/api/profile/export` | Parity | Export polish | Mini App previews a period and sends XLSX to the Telegram chat. |
+| Excel export | Да | Да | `services.export_xlsx`; `GET/POST /miniapp/api/profile/export` | Parity | Export polish | Mini App exposes export from Analytics, previews a period and sends XLSX to the Telegram chat. |
 | Валюта | Да | Да | `db.queries.get_user_currency`; `POST /miniapp/api/profile/currency` | Parity | Currency polish | Mini App edits future default currency only; operation history is unchanged. |
 | Часовой пояс | Да | Да | `services.user_time`, `services.notification_preferences`; `POST /miniapp/api/profile/timezone` | Parity | Timezone polish | Mini App exposes bot timezone presets plus custom IANA input. |
 | Quiet hours | Да | Да | `services.notification_preferences`, `services.automatic_notifications`; `POST /miniapp/api/profile/notifications` | Parity | Notification polish | Mini App saves enabled/start/end atomically through the editor. |
 | Пространства | Да | Да | `services.workspaces`; `GET /miniapp/api/workspaces`, `POST /miniapp/api/profile/active-workspace`, `PATCH /miniapp/api/workspaces/:id` | Parity | Workspace polish | Mini App switches active workspace and lets owner/admin rename accessible workspaces. |
-| Уведомления | Да | Да | `services.notification_preferences`; `GET/POST /miniapp/api/profile/notifications` | Parity | Notification polish | Mini App and bot expose grouped Daily, Plans/Control, Reports and Quiet Hours controls. |
+| Уведомления | Да | Да | `services.notification_preferences`; `GET/POST /miniapp/api/profile/notifications` | Parity | Notification polish | Mini App and bot expose evening Daily, Plans/Control, Reports and Quiet Hours controls. Morning automatic nudges are retired. |
 | Аналитика | Частично | Да | `services.analytics` concepts; `/miniapp/api/analytics` | Mini App lead | Analytics PRs | Mini App owns charts, radar, and multicurrency structure. |
 | Экспорт персональных данных | Да | Частично | privacy/export bot flow; `profile/export` info | Partial | Privacy/data PR | Mini App does not generate personal export file directly. |
 | Удаление данных | Да | Нет | `services.analytics_privacy.apply_account_deletion`, `services.personal_data_deletion` | Bot only | Privacy/data PR | No Mini App deletion confirmation flow. |
@@ -40,7 +40,8 @@ This inventory is based on the current repository code in `routers/`, `services/
 
 ## Current Mini App Home/Profile Additions
 
-- Home now shows at most three recent operations, challenge/focus/reminder carousels, and a rule-based period insight.
+- Home now shows at most three recent operations, equal Challenge/Focus/Reminder smart-card carousels, and a full-width rule-based period insight.
+- Home challenge carousel shows at most one current day, week and month card in that order.
 - Home insight never adds mixed currencies together and falls back safely when previous-period data is unavailable.
 - Global financial filters now cover period, current week, operation type and category across Home, Operations and Analytics.
 - Analytics Radar compares absolute category amounts in one selected currency with adaptive money ticks and full category labels.
@@ -51,7 +52,8 @@ This inventory is based on the current repository code in `routers/`, `services/
 - Plans now has `Цели`, `Лимиты и бюджеты`, `Напоминания`, and `Категории`; reminders support create/edit/toggle/snooze/delete/record through the existing `user_reminders` domain.
 - Plans separates Общие лимиты, Бюджеты категорий and Лимиты категорий. General limits use `general_spending_limits`; category budgets use `category_budget_groups`.
 - Telegram launch supports the persistent menu button label `Открыть`, `/app`, and manual BotFather Main Mini App setup.
-- Profile uses single-open accordion sections for User, Appearance, Workspaces, Notifications, Export/Data, Premium, Help and Legal.
-- Profile export previews the selected period and sends the XLSX file to Telegram.
+- Profile uses accordion sections for User, Appearance, Workspaces, Notifications, Premium, Help and Legal; tapping an open section closes it.
+- Analytics owns the Mini App export entry. Custom export preset shows date fields immediately and preserves chosen dates.
+- The global three-dot menu is available from every Mini App tab and uses Telegram native Add to Home Screen when supported.
 - Preferred name is shared with bot confirmations through `public.users.preferred_name`.
 - Currency, timezone, active workspace, workspace rename and quiet-hours editor are available from Profile without changing historical operations.

@@ -303,7 +303,8 @@ async def send_operation_limit_alert(recorded: RecordedOperation | None, context
 async def record_operation(cat: str, amt, dt,
                            typ: str, update: Update,
                            context: ContextTypes.DEFAULT_TYPE,
-                           note: Optional[str] = None):
+                           note: Optional[str] = None,
+                           merchant: Optional[str] = None):
     """
     Финальная фиксация операции + ответ пользователю.
     Важные моменты:
@@ -360,6 +361,7 @@ async def record_operation(cat: str, amt, dt,
     chat_type = getattr(chat, 'type', 'private') or 'private'
     pending = context.user_data.get('pending') or {}
     source = pending.get('source') or context.user_data.get('operation_source') or 'text'
+    operation_comment = (merchant or pending.get('merch') or note or '').strip()[:200]
 
     # Сохраняем операцию в БД через единый слой.
     recorded = record_financial_operation(
@@ -369,7 +371,7 @@ async def record_operation(cat: str, amt, dt,
         op_type=typ,
         category=cat,
         amount=amt,
-        comment=(pending.get('merch') or note or ''),
+        comment=operation_comment,
         source=source,
         chat_type=chat_type,
         raw_text=orig_text if orig_text and not _is_bot_hint(orig_text) else None,

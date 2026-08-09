@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from miniapp.api import MiniAppAPI, MiniAppError
+from miniapp.api import MiniAppAPI, MiniAppError, TransactionFilters
 from services.goals import Goal, GoalMovement
 from services.workspaces import WorkspaceContext
 
@@ -221,7 +221,7 @@ def test_analytics_returns_summary_category_other_dynamics_and_radar(monkeypatch
     data = api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month"})["data"]
 
     assert data["summary"]["result_by_currency"]["RUB"] == "350.00"
-    assert data["category_structure"]["items"][-1]["category"] == "Прочее"
+    assert data["category_structure"]["items"][-1]["category"] == "Остальные"
     assert data["time_dynamics"]["grouping"] == "day"
     assert data["radar"]["insufficient_data"] is False
     assert data["radar"]["metric"] == "absolute_amount"
@@ -342,6 +342,43 @@ def test_mixed_currency_analytics_groups_without_arithmetic(monkeypatch):
     assert filtered["selected_currency"] == "RUB"
     assert filtered["radar"]["currency"] == "RUB"
     assert filtered["radar"]["insufficient_data"] is False
+
+
+def test_category_structure_keeps_real_other_separate_from_synthetic_remainder(monkeypatch):
+    api = _api(monkeypatch)
+
+    def _fetch(sql, params=()):
+        assert "GROUP BY category, COALESCE(currency" in sql
+        assert params[-2] == "Расходы"
+        return [
+            ("Прочее", "RUB", Decimal("1000.00"), 1),
+            ("прочее ", "RUB", Decimal("500.00"), 1),
+            ("Категория A", "RUB", Decimal("900.00"), 1),
+            ("Категория B", "RUB", Decimal("800.00"), 1),
+            ("Категория C", "RUB", Decimal("700.00"), 1),
+            ("Категория D", "RUB", Decimal("600.00"), 1),
+            ("Категория E", "RUB", Decimal("500.00"), 1),
+            ("Категория F", "RUB", Decimal("400.00"), 1),
+            ("Категория G", "RUB", Decimal("300.00"), 1),
+            ("Прочее", "EUR", Decimal("999.00"), 1),
+        ]
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 7), "current_week", "all", None, "workspace_id=ANY(%s)", ([10],))
+
+    structure = api._category_structure(api.request(42), tx, "Расходы", currencies=["RUB"])
+
+    rub_items = structure["currency_groups"]["RUB"]["items"]
+    assert [item["category"] for item in rub_items].count("Прочее") == 1
+    real_other = next(item for item in rub_items if item["category"] == "Прочее")
+    synthetic_other = next(item for item in rub_items if item["category"] == "Остальные")
+    assert real_other["total"] == Decimal("1500.00")
+    assert real_other["count"] == 2
+    assert real_other["share"] == 26
+    assert synthetic_other["total"] == Decimal("1200.00")
+    assert synthetic_other["count"] == 3
+    assert synthetic_other["share"] == 21
+    assert "EUR" not in structure["currency_groups"]
 
 
 def test_radar_currency_discovery_uses_previous_period_when_current_empty(monkeypatch):

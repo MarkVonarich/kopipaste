@@ -52,16 +52,18 @@ function progressBar(percent?: number): string {
   return `<div class="progress-line" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><span style="width:${value}%"></span></div><small>${value}%</small>`;
 }
 
-function carousel(id: 'challenge' | 'focus' | 'reminder', items: string[], index: number, label: string): string {
+function carousel(id: 'challenge' | 'focus' | 'reminder', items: string[], index: number, label: string, action: string, actionAttrs: string[] = []): string {
   if (!items.length) return '';
   const current = Math.max(0, Math.min(index || 0, items.length - 1));
   return `
-    <div class="home-carousel" data-carousel="${id}" data-index="${current}" tabindex="0" role="group" aria-label="${esc(label)}">
-      <div class="home-carousel-track">${items[current]}</div>
+    <article class="smart-card home-carousel" data-carousel="${id}" data-index="${current}" tabindex="0" role="group" aria-label="${esc(label)}">
+      <button class="smart-card-action" data-action="${esc(action)}" type="button" ${actionAttrs[current] || ''}>
+        <div class="home-carousel-track">${items[current]}</div>
+      </button>
       ${items.length > 1 ? `<div class="carousel-dots" aria-label="${esc(label)}: страницы">
         ${items.map((_item, dot) => `<button type="button" data-action="carousel-dot" data-carousel="${id}" data-index="${dot}" aria-label="${dot + 1}/${items.length}" class="${dot === current ? 'active' : ''}"></button>`).join('')}
       </div>` : ''}
-    </div>
+    </article>
   `;
 }
 
@@ -75,14 +77,14 @@ function reminderCard(reminder: HomeReminderSummary | null | undefined): string 
   const label = state === 'overdue' ? 'Просрочено' : 'Ближайшее напоминание';
   const action = state === 'overdue' ? 'Записать оплату' : state === 'upcoming' ? 'Записать сейчас' : 'Все напоминания';
   return `
-    <button class="smart-card reminder-card ${esc(state)}" data-action="home-reminder" type="button">
+    <div class="reminder-card ${esc(state)}">
       <span>${esc(label)}</span>
       <strong>${esc(title)}${esc(amount)}</strong>
       ${date ? `<small>${esc(date)}</small>` : ''}
       <small>${esc(status)}</small>
       ${next}
       <small class="cta-text">${esc(action)}</small>
-    </button>
+    </div>
   `;
 }
 
@@ -117,23 +119,25 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
   const focusItems = overview?.focus_items?.length ? overview.focus_items : focus ? [focus] : [];
   const reminders = overview?.reminders?.length ? overview.reminders : overview?.reminder ? [overview.reminder] : [];
   const challengeCards = challenges.map((item) => `
-    <button class="smart-card" data-action="home-challenge" type="button">
-      <span>Челлендж · ${esc(item.period_key === 'week' ? 'Неделя' : item.period_key === 'month' ? 'Месяц' : 'Сегодня')}</span>
+    <div>
+      <span>Челлендж · ${esc(item.period_type === 'week' ? 'Неделя' : item.period_type === 'month' ? 'Месяц' : 'Сегодня')}</span>
       <strong>${esc(item.completed ? 'Готово' : item.title)}</strong>
       <small>${esc(`${item.progress}/${item.target} · ${item.description}`)}</small>
       ${progressBar(Math.round((Number(item.progress || 0) / Math.max(1, Number(item.target || 1))) * 100))}
-    </button>
+    </div>
   `);
   const focusCards = focusItems.map((item) => `
-    <button class="smart-card" data-action="home-focus" data-mode="${esc(item.target_mode || 'goals')}" type="button">
+    <div>
       <span>Фокус</span>
       <strong>${esc(item.title || 'Фокус свободен')}</strong>
       <small>${esc(item.description || 'Цели и лимиты появятся здесь')}</small>
       ${item.percent !== undefined ? progressBar(item.percent) : ''}
       ${item.projected_percent ? `<small>Прогноз к концу периода: ${esc(item.projected_percent)}%</small>` : ''}
-    </button>
+    </div>
   `);
+  const focusActionAttrs = focusItems.map((item) => `data-mode="${esc(item.target_mode || 'goals')}"`);
   const reminderCards = reminders.map((item) => reminderCard(item));
+  const reminderActionAttrs = reminders.map((item) => `${item?.id ? `data-id="${esc(item.id)}"` : ''} data-state="${esc(item?.state || 'empty')}"`);
   return `
     <section class="screen home-screen">
       <div class="home-hero-grid">
@@ -142,17 +146,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
           <strong>${esc(heroAmount(overview, filters, fallbackCurrency))}</strong>
           ${period ? `<p>${esc(period)}</p>` : ''}
           <p>${esc(heroSubtitle(filters))}</p>
-          <div class="currency-lines" aria-label="Финансовый результат по валютам">
-            ${Object.keys(overview?.totals_by_currency || {}).map((currency) => {
-              const totals = overview?.totals_by_currency[currency];
-              const result = filters.operation_type === 'expense'
-                ? totals?.expense || '0.00'
-                : filters.operation_type === 'income'
-                  ? totals?.income || '0.00'
-                  : totals ? subtractMoneyStrings(totals.income, totals.expense) : '0.00';
-              return `<span>${esc(currency)} · ${esc(formatMoneyString(result, currency))}</span>`;
-            }).join('') || `<span>${esc(formatMoneyString('0.00', fallbackCurrency))}</span>`}
-          </div>
+          <p class="hero-insight">${esc(overview?.insight?.text || overview?.info?.text || 'Показан выбранный период.')}</p>
           ${overview && !overview.aggregation_available ? '<p class="caption">Валюты показаны отдельно. Разные валюты не складываются.</p>' : ''}
         </div>
         ${activityCard(overview)}
@@ -174,14 +168,14 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
         </div>
       </div>
       <div class="smart-home-grid" data-testid="smart-home-grid">
-        ${carousel('challenge', challengeCards, indices.challenge, 'Челленджи')}
-        ${carousel('focus', focusCards, indices.focus, 'Фокус')}
-        <button class="smart-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
+        ${carousel('challenge', challengeCards, indices.challenge, 'Челленджи', 'home-challenge')}
+        ${carousel('focus', focusCards, indices.focus, 'Фокус', 'home-focus', focusActionAttrs)}
+        ${carousel('reminder', reminderCards, indices.reminder, 'Напоминания', 'home-reminder', reminderActionAttrs)}
+        <button class="smart-card insight-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
           <span>Инсайт периода</span>
           <strong>${esc(insight?.title || overview?.info?.text || 'Период')}</strong>
           <small>${esc(insight?.text || overview?.info?.text || 'Данные обновятся после операций')}</small>
         </button>
-        ${carousel('reminder', reminderCards, indices.reminder, 'Напоминания')}
       </div>
       ${SectionHeader(
         'Последние операции',

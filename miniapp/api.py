@@ -1005,7 +1005,10 @@ class MiniAppAPI:
             except Exception as exc:
                 log.info("miniapp_home_challenge_unavailable section=%s reason=%s", section, type(exc).__name__)
                 cards = []
-            all_cards.extend(cards)
+            if not cards:
+                continue
+            active = [card for card in cards if not card.completed]
+            all_cards.append(active[0] if active else cards[0])
         return [self._challenge_dict(card) for card in all_cards]
 
     def _home_challenge_legacy(self, req: MiniAppRequest) -> dict | None:
@@ -1029,6 +1032,7 @@ class MiniAppAPI:
             "target": card.target,
             "completed": bool(card.completed),
             "cta_label": card.definition.cta_label,
+            "period_type": card.definition.period_type,
             "period_key": card.period_key,
             "period_end": card.period_end,
         }
@@ -1567,14 +1571,29 @@ class MiniAppAPI:
             """,
             (get_user_currency(req.user_id), *tx.params, op_type, get_user_currency(req.user_id)),
         )
-        by_currency: dict[str, list[tuple[str, Decimal, int]]] = defaultdict(list)
+        by_currency: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         for category, currency, total, count in rows:
-            if currencies and str(currency) not in currencies:
+            currency_code = str(currency)
+            if currencies and currency_code not in currencies:
                 continue
-            by_currency[str(currency)].append((str(category), to_decimal_money(total), int(count or 0)))
+            display_name = str(category or "Прочее")
+            try:
+                category_key = normalized_category_key(display_name)
+            except ValueError:
+                category_key = normalized_category_key("Прочее")
+            bucket = by_currency[currency_code].setdefault(
+                category_key,
+                {"category": display_name, "total": Decimal("0.00"), "count": 0},
+            )
+            bucket["total"] += to_decimal_money(total)
+            bucket["count"] += int(count or 0)
         items = []
         groups: dict[str, dict[str, Any]] = {}
-        for currency, values in by_currency.items():
+        for currency, grouped in by_currency.items():
+            values = sorted(
+                ((str(row["category"]), row["total"], row["count"]) for row in grouped.values()),
+                key=lambda row: (-row[1], row[0]),
+            )
             currency_total = sum((row[1] for row in values), Decimal("0.00"))
             top = values[:CHART_TOP_N]
             other_total = sum((row[1] for row in values[CHART_TOP_N:]), Decimal("0.00"))
@@ -1587,7 +1606,7 @@ class MiniAppAPI:
                 group_items.append(item)
             if other_total > 0:
                 share = int((other_total / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0
-                item = {"category": "Прочее", "currency": currency, "total": other_total, "count": other_count, "share": share}
+                item = {"category": "Остальные", "currency": currency, "total": other_total, "count": other_count, "share": share}
                 items.append(item)
                 group_items.append(item)
             groups[currency] = {"currency": currency, "total": currency_total, "items": group_items}
@@ -2595,6 +2614,8 @@ class MiniAppAPI:
                 set_quiet_hours_time(req.user_id, key, str(body.get("value") or ""))
                 self._track(req, "mini_app_notification_setting_changed", properties={"action": "quiet_hours_time", "result": "success", "source": "mini_app"})
             elif action == "daily_time":
+                if key == "morning":
+                    raise MiniAppError(400, "retired_notification_time", "Morning notifications are disabled.")
                 set_daily_notification_time(req.user_id, key, str(body.get("value") or ""))
                 self._track(req, "mini_app_notification_setting_changed", properties={"action": "daily_time", "result": "success", "source": "mini_app"})
             elif action == "quiet_hours_update":
