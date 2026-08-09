@@ -202,10 +202,74 @@ def suppress_pending_preference_notifications(user_id: int, preference_key: str,
         conn.close()
 
 
-def _automatic_type_preference_enabled(user_id: int, notification_type: str) -> bool:
-    if notification_type in {"challenge_prompt", "challenge_completed", "achievement_granted"}:
+CHALLENGE_NOTIFICATION_TYPES = {"challenge_prompt", "challenge_completed", "achievement_granted"}
+INDEPENDENT_NOTIFICATION_TYPES = {"user_reminder"}
+DAILY_NOTIFICATION_TYPES = {"day_nudge", "evening_reminder", "inactivity"}
+REPORT_NOTIFICATION_TYPES = {"weekly_report", "monthly_report", "period_comparison"}
+PLAN_NOTIFICATION_TYPES = {
+    "category_limit_warning",
+    "smart_morning_limit",
+    "limit_exceeded",
+    "limit_near",
+    "budget_exceeded",
+    "budget_near",
+    "pace_overspend",
+    "subscription_upcoming",
+    "recurring_spend_detected",
+    "goal_planned_contribution",
+    "goal_achieved",
+    "goal_salary_snooze",
+}
+
+
+def _notification_preference_group(notification_type: str) -> str | None:
+    if notification_type in CHALLENGE_NOTIFICATION_TYPES:
+        return "retired"
+    if notification_type in INDEPENDENT_NOTIFICATION_TYPES:
+        return "independent"
+    if notification_type in DAILY_NOTIFICATION_TYPES:
+        return "daily"
+    if notification_type in REPORT_NOTIFICATION_TYPES:
+        return "reports"
+    if notification_type in PLAN_NOTIFICATION_TYPES or notification_type.startswith(("goal_", "budget_", "limit_", "subscription_", "recurring_")):
+        return "plans"
+    return None
+
+
+def _notification_group_enabled(notification_type: str, prefs: dict) -> bool:
+    group = _notification_preference_group(notification_type)
+    if group == "retired":
         return False
-    if notification_type not in {"day_nudge", "evening_reminder"}:
+    if group in {None, "independent"}:
+        return True
+    if group == "daily":
+        if notification_type == "day_nudge":
+            return bool(prefs.get("morning_enabled", True))
+        if notification_type == "evening_reminder":
+            return bool(prefs.get("evening_enabled", True))
+        return bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))
+    if group == "plans":
+        return bool(
+            prefs.get("limit_alerts_enabled", True)
+            or prefs.get("budget_alerts_enabled", True)
+            or prefs.get("goal_notifications_enabled", False)
+            or prefs.get("subscription_alerts_enabled", True)
+            or prefs.get("recurring_spend_alerts_enabled", True)
+        )
+    if group == "reports":
+        if notification_type == "weekly_report":
+            return bool(prefs.get("weekly_reports_enabled", True))
+        if notification_type == "monthly_report":
+            return bool(prefs.get("monthly_reports_enabled", True))
+        return bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))
+    return True
+
+
+def _automatic_type_preference_enabled(user_id: int, notification_type: str) -> bool:
+    group = _notification_preference_group(notification_type)
+    if group == "retired":
+        return False
+    if group in {None, "independent"}:
         return True
     try:
         from services.notification_preferences import get_notification_preferences
@@ -213,28 +277,40 @@ def _automatic_type_preference_enabled(user_id: int, notification_type: str) -> 
         prefs = get_notification_preferences(user_id)
     except Exception as exc:
         log.info("automatic_notification_preference_check_failed type=%s reason=%s", notification_type, type(exc).__name__)
-        return True
+        return False
+    return _notification_group_enabled(notification_type, prefs)
+
+
+def _daily_delivery_kind(notification_type: str) -> str | None:
     if notification_type == "day_nudge":
-        return bool(prefs.get("morning_enabled", True))
+        return "morning"
     if notification_type == "evening_reminder":
-        return bool(prefs.get("evening_enabled", True))
-    return True
+        return "evening"
+    return None
 
 
 def _automatic_delivery_skip_reason(row: dict[str, Any], *, now_utc: datetime | None = None) -> str | None:
     notification_type = str(row.get("notification_type") or "")
-    kind = {"day_nudge": "morning", "evening_reminder": "evening"}.get(notification_type)
-    if not kind:
+    group = _notification_preference_group(notification_type)
+    if group == "retired":
+        return "preference_disabled"
+    if group in {None, "independent"}:
         return None
     user_id = int(row["user_id"])
+    kind = _daily_delivery_kind(notification_type)
     try:
         from jobs.daily import is_notification_due
         from services.notification_engine import preferences_from_dict, should_send_now
         from services.notification_preferences import get_notification_preferences
 
         prefs = get_notification_preferences(user_id)
-        enabled_key = "morning_enabled" if kind == "morning" else "evening_enabled"
-        if not prefs.get(enabled_key, True):
+        if not _notification_group_enabled(notification_type, prefs):
+            return "preference_disabled"
+        if not kind:
+            return None
+        if notification_type == "day_nudge" and not prefs.get("morning_enabled", True):
+            return "preference_disabled"
+        if notification_type == "evening_reminder" and not prefs.get("evening_enabled", True):
             return "preference_disabled"
         resolved = resolve_user_timezone(user_id)
         timezone_name = resolved.timezone_name
@@ -254,7 +330,7 @@ def _automatic_delivery_skip_reason(row: dict[str, Any], *, now_utc: datetime | 
             return "outside_delivery_window"
     except Exception as exc:
         log.info("automatic_notification_delivery_check_failed type=%s reason=%s", notification_type, type(exc).__name__)
-        return None
+        return "delivery_validation_failed"
     return None
 
 
@@ -790,10 +866,6 @@ async def process_due_notifications(context: ContextTypes.DEFAULT_TYPE, *, limit
     counts = {"claimed": len(rows), "sent": 0, "retrying": 0, "dead_letter": 0, "skipped": 0}
     for row in rows:
         try:
-            if not _automatic_type_preference_enabled(row["user_id"], row["notification_type"]):
-                mark_notification_skipped(row["id"], "preference_disabled")
-                counts["skipped"] += 1
-                continue
             skip_reason = _automatic_delivery_skip_reason(row)
             if skip_reason:
                 mark_notification_skipped(row["id"], skip_reason)

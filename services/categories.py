@@ -312,6 +312,173 @@ def category_reference_counts(*, user_id: int, workspace_id: int | None, op_type
         conn.close()
 
 
+def _count_keys(values: list[str]) -> list[str]:
+    keys = []
+    seen = set()
+    for value in values:
+        try:
+            key = normalized_category_key(value)
+        except ValueError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def _merge_count_rows(target: dict[str, dict[str, int]], field: str, rows) -> None:
+    for key, count in rows:
+        if key is None:
+            continue
+        bucket = target.setdefault(str(key), {})
+        bucket[field] = int(count or 0)
+
+
+def category_reference_counts_many(*, user_id: int, workspace_id: int | None, op_type: str, category_keys: list[str]) -> dict[str, CategoryReferenceCounts]:
+    keys = _count_keys(category_keys)
+    values: dict[str, dict[str, int]] = {key: {} for key in keys}
+    if not keys:
+        return {}
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            op_columns = _table_columns(cur, "operations")
+            if {"category", "type"} <= op_columns:
+                scope, params = _legacy_personal_clause(user_id, workspace_id)
+                cur.execute(
+                    f"""
+                    SELECT lower(category), COUNT(*)::int
+                      FROM public.operations
+                     WHERE {scope}
+                       AND type=%s
+                       AND lower(category)=ANY(%s)
+                     GROUP BY lower(category)
+                    """,
+                    (*params, op_type, keys),
+                )
+                _merge_count_rows(values, "operations", cur.fetchall())
+
+            draft_columns = _table_columns(cur, "operation_drafts")
+            if {"payload", "actor_user_id"} <= draft_columns:
+                scope = ""
+                params = [user_id]
+                if "workspace_id" in draft_columns:
+                    if workspace_id is None:
+                        scope = "AND workspace_id IS NULL"
+                    else:
+                        scope = "AND workspace_id=%s"
+                        params.append(workspace_id)
+                cur.execute(
+                    f"""
+                    SELECT lower(COALESCE(payload->>'category', payload->>'merchant', '')), COUNT(*)::int
+                      FROM public.operation_drafts
+                     WHERE actor_user_id=%s
+                       {scope}
+                       AND COALESCE(payload->>'type', payload->>'op_type', %s)=%s
+                       AND lower(COALESCE(payload->>'category', payload->>'merchant', ''))=ANY(%s)
+                     GROUP BY lower(COALESCE(payload->>'category', payload->>'merchant', ''))
+                    """,
+                    tuple(params + [op_type, op_type, keys]),
+                )
+                _merge_count_rows(values, "drafts", cur.fetchall())
+
+            limit_columns = _table_columns(cur, "category_limits")
+            if {"category", "user_id"} <= limit_columns:
+                filters = ["user_id=%s", "lower(category)=ANY(%s)"]
+                params = [user_id, keys]
+                if "workspace_id" in limit_columns:
+                    if workspace_id is None:
+                        filters.append("workspace_id IS NULL")
+                    else:
+                        filters.append("workspace_id=%s")
+                        params.append(workspace_id)
+                if "type" in limit_columns:
+                    filters.append("type=%s")
+                    params.append(op_type)
+                cur.execute(
+                    f"""
+                    SELECT lower(category), COUNT(*)::int
+                      FROM public.category_limits
+                     WHERE {' AND '.join(filters)}
+                     GROUP BY lower(category)
+                    """,
+                    tuple(params),
+                )
+                _merge_count_rows(values, "category_limits", cur.fetchall())
+
+            cbg_columns = _table_columns(cur, "category_budget_group_members")
+            if cbg_columns:
+                cur.execute(
+                    """
+                    SELECT m.normalized_category_name, COUNT(*)::int
+                      FROM public.category_budget_group_members m
+                      JOIN public.category_budget_groups g ON g.id=m.group_id
+                     WHERE g.owner_user_id=%s
+                       AND (%s::bigint IS NULL OR g.workspace_id=%s)
+                       AND m.normalized_category_name=ANY(%s)
+                     GROUP BY m.normalized_category_name
+                    """,
+                    (user_id, workspace_id, workspace_id, keys),
+                )
+                _merge_count_rows(values, "category_budget_groups", cur.fetchall())
+
+            reminder_columns = _table_columns(cur, "user_reminders")
+            if {"category", "user_id"} <= reminder_columns:
+                filters = ["user_id=%s", "lower(category)=ANY(%s)"]
+                params = [user_id, keys]
+                if "workspace_id" in reminder_columns:
+                    if workspace_id is None:
+                        filters.append("workspace_id IS NULL")
+                    else:
+                        filters.append("workspace_id=%s")
+                        params.append(workspace_id)
+                if "type" in reminder_columns:
+                    filters.append("type=%s")
+                    params.append(op_type)
+                cur.execute(
+                    f"""
+                    SELECT lower(category), COUNT(*)::int
+                      FROM public.user_reminders
+                     WHERE {' AND '.join(filters)}
+                     GROUP BY lower(category)
+                    """,
+                    tuple(params),
+                )
+                _merge_count_rows(values, "reminders", cur.fetchall())
+
+            alias_columns = _table_columns(cur, "user_aliases")
+            if {"category", "user_id"} <= alias_columns:
+                cur.execute(
+                    """
+                    SELECT lower(category), COUNT(*)::int
+                      FROM public.user_aliases
+                     WHERE user_id=%s
+                       AND lower(category)=ANY(%s)
+                     GROUP BY lower(category)
+                    """,
+                    (user_id, keys),
+                )
+                _merge_count_rows(values, "aliases", cur.fetchall())
+
+            ml_columns = _table_columns(cur, "ml_observations")
+            if {"chosen_category", "user_id"} <= ml_columns:
+                cur.execute(
+                    """
+                    SELECT lower(chosen_category), COUNT(*)::int
+                      FROM public.ml_observations
+                     WHERE user_id=%s
+                       AND lower(chosen_category)=ANY(%s)
+                     GROUP BY lower(chosen_category)
+                    """,
+                    (user_id, keys),
+                )
+                _merge_count_rows(values, "ml_observations", cur.fetchall())
+        conn.rollback()
+    finally:
+        conn.close()
+    return {key: CategoryReferenceCounts(**values.get(key, {})) for key in keys}
+
+
 def _category_reference_counts_cur(cur, *, user_id: int, workspace_id: int | None, op_type: str, category_key: str) -> CategoryReferenceCounts:
     values: dict[str, int] = {}
     op_columns = _table_columns(cur, "operations")

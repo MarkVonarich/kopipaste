@@ -41,6 +41,10 @@ The transaction updates known category references:
 - `user_aliases`
 - `ml_observations.chosen_category`
 
+Mini App category management reads these reference counts with a batched helper
+for the whole visible category list. It uses one connection and grouped queries
+per related table instead of one full reference scan per category.
+
 Deleting a category with historical operations first requires selecting a
 destination. The source records are transferred, then the custom source category
 is archived with `archived_at` where possible. Deleting an empty category still

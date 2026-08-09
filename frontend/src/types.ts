@@ -263,6 +263,8 @@ export type NotificationPreferences = {
   evening_enabled: boolean;
   limit_alerts_enabled: boolean;
   budget_alerts_enabled: boolean;
+  subscription_alerts_enabled?: boolean;
+  recurring_spend_alerts_enabled?: boolean;
   weekly_reports_enabled: boolean;
   monthly_reports_enabled: boolean;
   challenge_notifications_enabled: boolean;

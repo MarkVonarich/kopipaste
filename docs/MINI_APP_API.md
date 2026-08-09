@@ -126,6 +126,8 @@ Category lifecycle management lives under `GET /miniapp/api/categories/manage`, 
 
 Categories are managed from Plans in the Mini App. Profile no longer shows category chips.
 
+Reference counts for the management screen are batched per category list. The API must not open one connection or run all reference-table queries per category.
+
 ## Analytics
 
 `GET /miniapp/api/analytics` returns:
@@ -160,13 +162,13 @@ Profile returns theme, spaces, notification preferences, Premium info-only data,
 Notification preferences expose grouped controls:
 
 - `daily_notifications`: morning/evening daily reminders, with editable `morning_time` and `evening_time`;
-- `plans_control`: limit, budget and goal notifications;
+- `plans_control`: limit, budget, goal, subscription and recurring-spend notifications;
 - `reports`: weekly and monthly reports;
 - `quiet_hours`: quiet-hour enabled/start/end state.
 
 Challenge notifications are retired from Telegram delivery and are not exposed as a live Profile toggle.
 
-`POST /miniapp/api/profile/export` supports `action=preview` and `action=send`. `send` builds an XLSX with the existing export builder and delivers it to the authenticated user's Telegram chat; no direct browser file download is returned.
+`POST /miniapp/api/profile/export` supports `action=preview` and `action=send`. `send` builds an XLSX with the existing export builder and delivers it to the authenticated user's Telegram chat; no direct browser file download is returned. The shared XLSX builder separates every monetary total by currency across summary, operation, category, month and week sheets.
 
 ## Analytics Events
 

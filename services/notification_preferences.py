@@ -22,7 +22,13 @@ TOGGLE_FIELDS = {
 
 GROUPED_NOTIFICATION_FIELDS = {
     "daily": ("morning_enabled", "evening_enabled"),
-    "plans": ("limit_alerts_enabled", "budget_alerts_enabled", "goal_notifications_enabled"),
+    "plans": (
+        "limit_alerts_enabled",
+        "budget_alerts_enabled",
+        "goal_notifications_enabled",
+        "subscription_alerts_enabled",
+        "recurring_spend_alerts_enabled",
+    ),
     "reports": ("weekly_reports_enabled", "monthly_reports_enabled"),
 }
 
@@ -124,6 +130,8 @@ def grouped_notification_preferences(user_id: int) -> dict:
         prefs.get("limit_alerts_enabled", True)
         or prefs.get("budget_alerts_enabled", True)
         or prefs.get("goal_notifications_enabled", False)
+        or prefs.get("subscription_alerts_enabled", True)
+        or prefs.get("recurring_spend_alerts_enabled", True)
     )
     reports_enabled = bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))
     return {

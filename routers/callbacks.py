@@ -276,11 +276,11 @@ def _export_done_kb() -> InlineKeyboardMarkup:
 
 
 def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
-    rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram') FROM public.operations
+    rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram'), COALESCE(currency, %s) FROM public.operations
                         WHERE chat_id=%s AND op_date BETWEEN %s AND %s
                           AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
-                        ORDER BY op_date, id""", (chat_id, dfrom, dto))
-    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': to_decimal_money(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
+                        ORDER BY op_date, id""", (get_user_currency(chat_id), chat_id, dfrom, dto))
+    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': to_decimal_money(r[4]), 'comment': r[5], 'source': r[6], 'currency': r[7]} for r in rows]
 
 
 async def _export_preview(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -294,15 +294,29 @@ async def _export_preview(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         msg = 'Дата конца не может быть раньше даты начала.' if error == 'end_before_start' else 'Период слишком большой. Выберите диапазон до 5 лет.'
         return await _safe_edit_or_reply(q, f'⚠️ {msg}\n\nВыбери конец периода:', reply_markup=_export_end_kb())
     rows = _export_rows(chat_id, dfrom, dto)
-    exp = sum((to_decimal_money(r['amount']) for r in rows if r['type'] == 'Расходы'), Decimal("0.00"))
-    inc = sum((to_decimal_money(r['amount']) for r in rows if r['type'] == 'Доходы'), Decimal("0.00"))
+    totals = {}
+    for row in rows:
+        currency = row.get('currency') or get_user_currency(chat_id)
+        bucket = totals.setdefault(currency, {"exp": Decimal("0.00"), "inc": Decimal("0.00")})
+        if row['type'] == 'Расходы':
+            bucket["exp"] += to_decimal_money(row['amount'])
+        elif row['type'] == 'Доходы':
+            bucket["inc"] += to_decimal_money(row['amount'])
+    if len(totals) <= 1:
+        currency, bucket = next(iter(totals.items()), (get_user_currency(chat_id), {"exp": Decimal("0.00"), "inc": Decimal("0.00")}))
+        totals_text = f"Расходы: {_fmt_money(bucket['exp'], currency)}\nДоходы: {_fmt_money(bucket['inc'], currency)}\nБаланс: {_fmt_money(bucket['inc'] - bucket['exp'], currency)}"
+    else:
+        parts = []
+        for currency, bucket in sorted(totals.items()):
+            parts.append(f"{currency}: расходы {_fmt_money(bucket['exp'], currency)}, доходы {_fmt_money(bucket['inc'], currency)}, баланс {_fmt_money(bucket['inc'] - bucket['exp'], currency)}")
+        totals_text = "\n".join(parts)
     st['count'] = len(rows)
     st['preview_rows'] = rows
     log.info('export_preview period=%s..%s count=%s user_id=%s', dfrom, dto, len(rows), chat_id)
     return await _safe_edit_or_reply(
         q,
         f'📤 Экспорт\n\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\n'
-        f'Операций: {len(rows)}\nРасходы: {_fmt_money(exp)}\nДоходы: {_fmt_money(inc)}\nБаланс: {_fmt_money(inc-exp)}\n\nСформировать файл?',
+        f'Операций: {len(rows)}\n{totals_text}\n\nСформировать файл?',
         reply_markup=_export_confirm_kb(),
     )
 
@@ -599,7 +613,13 @@ def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboard
 def grouped_notification_preferences_from_prefs(prefs: dict) -> dict:
     return {
         "daily_notifications": {"enabled": bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))},
-        "plans_control": {"enabled": bool(prefs.get("limit_alerts_enabled", True) or prefs.get("budget_alerts_enabled", True) or prefs.get("goal_notifications_enabled", False))},
+        "plans_control": {"enabled": bool(
+            prefs.get("limit_alerts_enabled", True)
+            or prefs.get("budget_alerts_enabled", True)
+            or prefs.get("goal_notifications_enabled", False)
+            or prefs.get("subscription_alerts_enabled", True)
+            or prefs.get("recurring_spend_alerts_enabled", True)
+        )},
         "reports": {"enabled": bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))},
     }
 
@@ -627,7 +647,7 @@ async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAU
         f"Утро {prefs['morning_time']} · Вечер {prefs['evening_time']}\n"
         "Короткие сообщения утром и вечером помогают не забывать записывать операции.\n\n"
         f"📊 Планы и контроль: {plans}\n"
-        "Предупреждает о лимитах и бюджетах и напоминает о финансовых целях.\n\n"
+        "Предупреждает о лимитах, бюджетах, целях и важных регулярных расходах.\n\n"
         f"📅 Отчёты: {reports}\n"
         "Присылает финансовую сводку за неделю и месяц.\n\n"
         f"🌙 Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'} · {qh_start}–{qh_end}\n"
@@ -1438,8 +1458,8 @@ def _lim_card_kb(period: str, category: str):
     ])
 
 
-def _fmt_money(v) -> str:
-    return format_money_value(v, "RUB")
+def _fmt_money(v, currency: str = "RUB") -> str:
+    return format_money_value(v, currency or "RUB")
 
 
 async def _lim_show_list(q, user_id: int):
@@ -4238,7 +4258,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         fd, p = tempfile.mkstemp(prefix='kopipaste_report_export_', suffix='.xlsx')
         os.close(fd)
         try:
-            build_export_xlsx(p, rows, dfrom, dto)
+            build_export_xlsx(p, rows, dfrom, dto, fallback_currency=get_user_currency(cid))
             label = 'неделю' if kind == 'w' else 'месяц'
             fname = f'kopipaste_{kind}_{dfrom.isoformat()}_{dto.isoformat()}.xlsx'
             with open(p, 'rb') as f:
@@ -4345,7 +4365,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         fd, p = tempfile.mkstemp(prefix='kopipaste_export_', suffix='.xlsx')
         os.close(fd)
         try:
-            build_export_xlsx(p, st.get('preview_rows') or [], dfrom, dto)
+            build_export_xlsx(p, st.get('preview_rows') or [], dfrom, dto, fallback_currency=get_user_currency(cid))
             fname = f'kopipaste_export_{dfrom.isoformat()}_{dto.isoformat()}.xlsx'
             with open(p, 'rb') as f:
                 await context.bot.send_document(chat_id=cid, document=f, filename=fname, caption=f'📤 Экспорт готов\nПериод: {dfrom.strftime("%d.%m.%Y")}–{dto.strftime("%d.%m.%Y")}\nОпераций: {st.get("count", 0)}')

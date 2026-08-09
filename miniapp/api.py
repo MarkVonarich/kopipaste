@@ -31,7 +31,8 @@ from services.budgeting import (
 )
 from services.categories import list_managed_categories, normalized_category_key
 from services.categories import (
-    category_reference_counts,
+    CategoryReferenceCounts,
+    category_reference_counts_many,
     delete_category_without_operations,
     get_or_create_custom_category,
     is_protected_category,
@@ -147,7 +148,13 @@ def notification_read_model(user_id: int) -> dict:
                 "morning_time": prefs.get("morning_time") or "08:30",
                 "evening_time": prefs.get("evening_time") or "20:30",
             },
-            "plans_control": {"enabled": bool(prefs.get("limit_alerts_enabled", True) or prefs.get("budget_alerts_enabled", True) or prefs.get("goal_notifications_enabled", False))},
+            "plans_control": {"enabled": bool(
+                prefs.get("limit_alerts_enabled", True)
+                or prefs.get("budget_alerts_enabled", True)
+                or prefs.get("goal_notifications_enabled", False)
+                or prefs.get("subscription_alerts_enabled", True)
+                or prefs.get("recurring_spend_alerts_enabled", True)
+            )},
             "reports": {"enabled": bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))},
             "quiet_hours": {"enabled": bool(prefs.get("quiet_hours_enabled")), "start": prefs.get("quiet_hours_start") or "22:30", "end": prefs.get("quiet_hours_end") or "08:00"},
             "timezone": prefs.get("timezone") or "Europe/Moscow",
@@ -365,6 +372,14 @@ class MiniAppAPI:
 
     def _managed_categories(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, *, include_references: bool = False) -> list[dict]:
         items = list_managed_categories(user_id=req.user_id, workspace_id=workspace_id, op_type=op_type, limit=100)
+        reference_counts = {}
+        if include_references:
+            reference_counts = category_reference_counts_many(
+                user_id=req.user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                category_keys=[item.normalized_name for item in items],
+            )
         result = []
         for item in items:
             data = {
@@ -378,7 +393,7 @@ class MiniAppAPI:
                 "protected": is_protected_category(item.name),
             }
             if include_references:
-                counts = category_reference_counts(user_id=req.user_id, workspace_id=workspace_id, op_type=op_type, category=item.name)
+                counts = reference_counts.get(item.normalized_name) or CategoryReferenceCounts()
                 data["references"] = {**counts.as_dict(), "total": counts.total}
             result.append(data)
         return result
@@ -413,7 +428,7 @@ class MiniAppAPI:
 
     def _category_by_token(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, token: str) -> dict:
         token = unquote(str(token or "")).strip()
-        for item in self._managed_categories(req, workspace_id, op_type, include_references=True):
+        for item in self._managed_categories(req, workspace_id, op_type, include_references=False):
             if item["token"] == token:
                 return item
         raise MiniAppError(404, "category_not_found", "Category was not found.")
@@ -2639,7 +2654,7 @@ class MiniAppAPI:
         fd, path = tempfile.mkstemp(prefix="kopipaste_miniapp_export_", suffix=".xlsx")
         os.close(fd)
         try:
-            build_export_xlsx(path, rows, dfrom, dto, get_user_locale(req.user_id))
+            build_export_xlsx(path, rows, dfrom, dto, get_user_locale(req.user_id), fallback_currency=get_user_currency(req.user_id))
             async def _send() -> None:
                 bot = Bot(TELEGRAM_TOKEN)
                 with open(path, "rb") as fh:

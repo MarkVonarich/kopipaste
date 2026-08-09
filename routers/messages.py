@@ -345,11 +345,11 @@ def _export_confirm_kb() -> InlineKeyboardMarkup:
 
 
 def _export_rows(chat_id: int, dfrom: date, dto: date) -> list[dict]:
-    rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram') FROM public.operations
+    rows = pg_fetchall("""SELECT id, op_date, type, category, amount, COALESCE(comment,''), COALESCE(to_jsonb(operations)->>'source', 'telegram'), COALESCE(currency, %s) FROM public.operations
                         WHERE chat_id=%s AND op_date BETWEEN %s AND %s
                           AND COALESCE(type,'') <> 'noop' AND COALESCE(category,'') <> 'Без операций'
-                        ORDER BY op_date, id""", (chat_id, dfrom, dto))
-    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': to_decimal_money(r[4]), 'comment': r[5], 'source': r[6]} for r in rows]
+                        ORDER BY op_date, id""", (get_user_currency(chat_id), chat_id, dfrom, dto))
+    return [{'id': r[0], 'op_date': r[1], 'type': r[2], 'category': r[3], 'amount': to_decimal_money(r[4]), 'comment': r[5], 'source': r[6], 'currency': r[7]} for r in rows]
 
 
 def _ocr_warning_message(warning: str | None) -> str:

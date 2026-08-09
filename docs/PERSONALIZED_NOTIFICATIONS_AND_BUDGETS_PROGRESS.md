@@ -32,7 +32,7 @@ Current root causes found before implementation:
 
 - Telegram and Mini App notification settings are grouped into Daily, Plans and Control, Reports, and Quiet Hours.
 - Daily keeps the existing morning/evening preferences and exposes both delivery times from one settings area.
-- Plans and Control controls limit, budget and goal notifications together.
+- Plans and Control controls limit, budget, goal, subscription and recurring-spend notifications together.
 - Reports controls weekly and monthly financial summaries together.
 - Challenge notifications are retired from Telegram delivery. Existing challenge progress and achievements remain, while legacy challenge callbacks direct users to the Mini App.
-- Deferred daily notifications are rechecked at send time against current enablement, user-local date, quiet hours and the configured HH:MM window. A queued old evening reminder cannot be delivered later only because `earliest_delivery_at` has passed.
+- Deferred notifications are rechecked at send time against their grouped preference. Daily notifications additionally require a confirmed user-local date, quiet-hours state and configured HH:MM window. If preference/timezone/time-window validation fails, delivery is skipped fail-closed for that attempt.

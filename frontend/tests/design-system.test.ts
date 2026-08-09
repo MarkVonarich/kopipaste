@@ -115,7 +115,7 @@ describe('mini app design system semantics', () => {
     const readOnlyHome = doc(HomeScreen(overview, [], 'RUB', false));
 
     expect(plans.querySelector('.segmented')?.getAttribute('role')).toBe('tablist');
-    expect(plans.querySelectorAll('[role="tab"]')).toHaveLength(3);
+    expect(plans.querySelectorAll('[role="tab"]')).toHaveLength(4);
     expect(readOnlyHome.querySelector('button[data-action="open-actions"]')?.hasAttribute('disabled')).toBe(true);
     expect(readOnlyHome.querySelector('button[data-kind="expense"]')?.hasAttribute('disabled')).toBe(true);
   });
