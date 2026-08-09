@@ -1,6 +1,6 @@
 import logging
 import hashlib
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update, WebAppInfo
 from telegram.error import BadRequest
 from db.database import get_conn, pg_fetchall, pg_exec
 from datetime import datetime, timedelta, date
@@ -63,11 +63,12 @@ from services.budgeting import create_category_budget_group, list_active_expense
 from services.automatic_notifications import DeliveryPolicy, is_quiet_local, queue_automatic_notification, quiet_hours_window, suppress_stale_timezone_sensitive_notifications
 from services.challenges import achievements_for_user, upsert_assignments
 from services.i18n import t
-from services.notification_preferences import get_notification_preferences, set_notification_timezone, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
+from services.notification_preferences import get_notification_preferences, grouped_notification_preferences, set_daily_notification_time, set_grouped_notification_preference, set_notification_timezone, set_quiet_hours_time, toggle_notification_preference, toggle_quiet_hours
 from services.personal_data_deletion import delete_financial_history, delete_user_data, history_period_bounds, preview_delete_financial_history
 from services.analytics_privacy import apply_account_deletion
 from services.product_events import ProductEvent, track_product_event
 from services.user_time import TIMEZONE_CHOICES, resolve_user_timezone, user_local_date
+from settings import MINIAPP_PUBLIC_URL
 from services.goals import (
     GoalError,
     add_goal_movement,
@@ -569,6 +570,12 @@ NOTIFICATION_TOGGLE_LABELS = {
     'goals': ('Цели', 'goal_notifications_enabled', '🎯 Цели: включены', '🎯 Цели: выключены'),
 }
 
+GROUPED_NOTIFICATION_LABELS = {
+    "daily": ("Ежедневные уведомления", "✅ Ежедневные уведомления", "⛔ Ежедневные уведомления"),
+    "plans": ("Планы и контроль", "✅ Планы и контроль", "⛔ Планы и контроль"),
+    "reports": ("Отчёты", "✅ Отчёты", "⛔ Отчёты"),
+}
+
 
 def _notif_label(prefs: dict, key: str) -> str:
     _, field, on_label, off_label = NOTIFICATION_TOGGLE_LABELS[key]
@@ -577,21 +584,30 @@ def _notif_label(prefs: dict, key: str) -> str:
 
 
 def _notification_settings_markup(prefs: dict, back_dest: str) -> InlineKeyboardMarkup:
+    grouped = grouped_notification_preferences_from_prefs(prefs)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_notif_label(prefs, 'morning'), callback_data='notif_toggle|morning'),
-         InlineKeyboardButton(_notif_label(prefs, 'evening'), callback_data='notif_toggle|evening')],
-        [InlineKeyboardButton(_notif_label(prefs, 'limits'), callback_data='notif_toggle|limits'),
-         InlineKeyboardButton(_notif_label(prefs, 'budgets'), callback_data='notif_toggle|budgets')],
-        [InlineKeyboardButton(_notif_label(prefs, 'subscriptions'), callback_data='notif_toggle|subscriptions'),
-         InlineKeyboardButton(_notif_label(prefs, 'recurring'), callback_data='notif_toggle|recurring')],
-        [InlineKeyboardButton(_notif_label(prefs, 'weekly'), callback_data='notif_toggle|weekly'),
-         InlineKeyboardButton(_notif_label(prefs, 'monthly'), callback_data='notif_toggle|monthly')],
-        [InlineKeyboardButton(_notif_label(prefs, 'goals'), callback_data='notif_toggle|goals')],
-        [InlineKeyboardButton(_notif_label(prefs, 'challenges'), callback_data='notif_challenges')],
+        [InlineKeyboardButton(_grouped_notif_label(grouped, 'daily'), callback_data='notif_group|daily')],
+        [InlineKeyboardButton(_grouped_notif_label(grouped, 'plans'), callback_data='notif_group|plans')],
+        [InlineKeyboardButton(_grouped_notif_label(grouped, 'reports'), callback_data='notif_group|reports')],
         [InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')],
+        [InlineKeyboardButton('🕒 Время уведомлений', callback_data='notif_times')],
         [InlineKeyboardButton('🕒 Часовой пояс', callback_data='notif_tz')],
         [InlineKeyboardButton('⬅️ Назад', callback_data=back_dest)],
     ])
+
+
+def grouped_notification_preferences_from_prefs(prefs: dict) -> dict:
+    return {
+        "daily_notifications": {"enabled": bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))},
+        "plans_control": {"enabled": bool(prefs.get("limit_alerts_enabled", True) or prefs.get("budget_alerts_enabled", True) or prefs.get("goal_notifications_enabled", False))},
+        "reports": {"enabled": bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))},
+    }
+
+
+def _grouped_notif_label(grouped: dict, key: str) -> str:
+    title, on_label, off_label = GROUPED_NOTIFICATION_LABELS[key]
+    enabled_key = "daily_notifications" if key == "daily" else "plans_control" if key == "plans" else "reports"
+    return on_label if (grouped.get(enabled_key) or {}).get("enabled") else off_label
 
 
 async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAULT_TYPE):
@@ -599,12 +615,23 @@ async def _render_notification_settings(q, cid: int, context: ContextTypes.DEFAU
     if back_dest not in {'menu_settings', 'lb_hub', 'rem_menu', 'start_main', 'chal|home'}:
         back_dest = 'menu_settings'
     prefs = get_notification_preferences(cid)
+    grouped = grouped_notification_preferences_from_prefs(prefs)
+    daily = "включены" if grouped["daily_notifications"]["enabled"] else "выключены"
+    plans = "включены" if grouped["plans_control"]["enabled"] else "выключены"
+    reports = "включены" if grouped["reports"]["enabled"] else "выключены"
+    qh_start = prefs.get("quiet_hours_start") or "22:30"
+    qh_end = prefs.get("quiet_hours_end") or "08:00"
     text = (
         '🔔 Оповещения\n\n'
-        'Автоматические сообщения учитывают тихие часы. Ответы на ваши действия приходят сразу.\n\n'
-        f"Утро: {prefs['morning_time']}\n"
-        f"Вечер: {prefs['evening_time']}\n"
-        f"Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'}\n"
+        f"Ежедневные уведомления: {daily}\n"
+        f"Утро {prefs['morning_time']} · Вечер {prefs['evening_time']}\n"
+        "Короткие сообщения утром и вечером помогают не забывать записывать операции.\n\n"
+        f"📊 Планы и контроль: {plans}\n"
+        "Предупреждает о лимитах и бюджетах и напоминает о финансовых целях.\n\n"
+        f"📅 Отчёты: {reports}\n"
+        "Присылает финансовую сводку за неделю и месяц.\n\n"
+        f"🌙 Тихие часы: {'включены' if prefs.get('quiet_hours_enabled') else 'выключены'} · {qh_start}–{qh_end}\n"
+        "В это время автоматические сообщения не будут вас беспокоить.\n\n"
         f"Часовой пояс: {_notification_timezone_label(cid)}"
     )
     return await _safe_edit_or_reply(q, text, reply_markup=_notification_settings_markup(prefs, back_dest))
@@ -620,22 +647,25 @@ def _challenge_notification_settings_markup(enabled: bool) -> InlineKeyboardMark
 
 
 async def _render_challenge_notification_settings(q, cid: int):
+    return await _legacy_challenge_response(q, cta=False, text="Оповещения о челленджах больше не используются.\nЧелленджи доступны в приложении.")
+
+
+def _notification_times_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('☀️ Изменить утро', callback_data='notif_time|morning'), InlineKeyboardButton('🌙 Изменить вечер', callback_data='notif_time|evening')],
+        [InlineKeyboardButton('⬅️ Назад', callback_data='menu_notifications')],
+    ])
+
+
+async def _render_notification_times(q, cid: int):
     prefs = get_notification_preferences(cid)
-    enabled = bool(prefs.get('challenge_notifications_enabled', False))
-    if enabled:
-        text = (
-            '🏆 Челленджи: включены\n\n'
-            'Бот может присылать не более одного планового напоминания в день, а также сообщать о выполненных заданиях. '
-            'Тихие часы соблюдаются.'
-        )
-    else:
-        text = (
-            '🏆 Челленджи: выключены\n\n'
-            'Уведомления о челленджах выключены по умолчанию.\n\n'
-            'Челленджи и прогресс доступны в разделе «Челленджи». '
-            'Включите оповещения, если хотите получать напоминания и сообщения о выполнении заданий.'
-        )
-    return await _safe_edit_or_reply(q, text, reply_markup=_challenge_notification_settings_markup(enabled))
+    text = (
+        "🕒 Время уведомлений\n\n"
+        f"Утро: {prefs.get('morning_time') or '08:30'}\n"
+        f"Вечер: {prefs.get('evening_time') or '20:30'}\n\n"
+        "Ежедневные уведомления включаются одной настройкой, а время можно менять отдельно."
+    )
+    return await _safe_edit_or_reply(q, text, reply_markup=_notification_times_markup())
 
 
 def _quiet_hours_markup(prefs: dict) -> InlineKeyboardMarkup:
@@ -788,6 +818,21 @@ def _challenge_destination(callback_data: str) -> str:
     if callback_data == "menu_tz":
         return "timezone"
     return callback_data.split("|", 1)[0]
+
+
+def _legacy_challenge_markup() -> InlineKeyboardMarkup:
+    rows = []
+    if MINIAPP_PUBLIC_URL:
+        rows.append([InlineKeyboardButton("Открыть", web_app=WebAppInfo(url=MINIAPP_PUBLIC_URL))])
+    rows.append([InlineKeyboardButton("Главное меню", callback_data="start_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _legacy_challenge_response(q, *, cta: bool = False, text: str | None = None):
+    body = text or "Челленджи теперь доступны в КопиPaste."
+    if cta:
+        body += "\n\nОтправьте операцию сообщением, например:\nкофе 250"
+    return await _safe_edit_or_reply(q, body, reply_markup=_legacy_challenge_markup())
 
 
 def _goal_workspace(update) -> int | None:
@@ -1698,38 +1743,20 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith(('gpick|', 'gadd|', 'gcancel|')):
         return await _handle_group_draft_callback(update, context, data)
 
-    if data == "chal|home":
+    if data == "chal|home" or data.startswith("chal|sec|") or data in {"chal|ach", "chal|how"}:
         await q.answer()
-        return await _render_challenge_home(q, update.effective_user.id)
-
-    if data.startswith("chal|sec|"):
-        section = data.split("|", 2)[2]
-        await q.answer()
-        return await _render_challenge_section(q, update.effective_user.id, section)
-
-    if data == "chal|ach":
-        await q.answer()
-        return await _render_challenge_achievements(q, update.effective_user.id)
-
-    if data == "chal|how":
-        await q.answer()
-        return await _render_challenge_how(q)
+        return await _legacy_challenge_response(q)
 
     if data.startswith("chal|cta|"):
+        await q.answer()
         key = data.split("|", 2)[2]
-        from services.challenges import ALL_CHALLENGES
-
-        definition = ALL_CHALLENGES.get(key)
-        if not definition:
-            return await q.answer("Челлендж недоступен", show_alert=True)
         track_product_event(ProductEvent(
             event_name="challenge_cta_opened",
             user_id=update.effective_user.id,
             status="success",
-            properties={"challenge_key": definition.key, "destination": _challenge_destination(definition.cta_callback)},
+            properties={"challenge_key": key, "destination": "miniapp_only"},
         ))
-        q.data = definition.cta_callback
-        return await callback_handler(update, context)
+        return await _legacy_challenge_response(q, cta=True)
 
     if data == "goal|home":
         await q.answer()
@@ -3344,21 +3371,30 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await _render_challenge_notification_settings(q, cid)
 
+    if data.startswith('notif_group|'):
+        key = data.split('|', 1)[1]
+        group_key = "daily_notifications" if key == "daily" else "plans_control" if key == "plans" else "reports"
+        try:
+            current = grouped_notification_preferences(cid)
+            enabled = not bool((current.get(group_key) or {}).get("enabled"))
+            set_grouped_notification_preference(cid, key, enabled)
+        except Exception:
+            return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
+        label = GROUPED_NOTIFICATION_LABELS.get(key, ("Оповещения", "", ""))[0]
+        await q.answer(f'{label} {"включены" if enabled else "выключены"}')
+        return await _render_notification_settings(q, cid, context)
+
     if data.startswith('notif_toggle|'):
         key = data.split('|', 1)[1]
+        if key == 'challenges':
+            await q.answer('Оповещения о челленджах больше не используются.', show_alert=True)
+            return await _render_challenge_notification_settings(q, cid)
         try:
             enabled = toggle_notification_preference(cid, key)
         except Exception:
             return await q.answer('Настройка станет доступна после миграции.', show_alert=True)
         label = NOTIFICATION_TOGGLE_LABELS.get(key, ('Оповещения', '', '', ''))[0]
         await q.answer(f'{label} {"включены" if enabled else "выключены"}')
-        if key == 'challenges':
-            track_product_event(ProductEvent(
-                event_name="challenge_notifications_enabled" if enabled else "challenge_notifications_disabled",
-                user_id=update.effective_user.id,
-                status="success",
-            ))
-            return await _render_challenge_notification_settings(q, cid)
         if key == 'goals':
             track_product_event(ProductEvent(
                 event_name="goal_notifications_enabled" if enabled else "goal_notifications_disabled",
@@ -3369,6 +3405,19 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'notif_quiet_hours':
         return await _render_quiet_hours(q, cid)
+
+    if data == 'notif_times':
+        await q.answer()
+        return await _render_notification_times(q, cid)
+
+    if data.startswith('notif_time|'):
+        field = data.split('|', 1)[1]
+        if field not in {'morning', 'evening'}:
+            return await q.answer('Настройка недоступна', show_alert=True)
+        context.user_data['await_daily_notification_time'] = {'field': field}
+        await q.answer()
+        label = 'утра' if field == 'morning' else 'вечера'
+        return await q.message.reply_text(f'Введите время для {label} в формате HH:MM, например 08:30')
 
     if data in {'notif_tz', 'menu_tz'}:
         return await _render_notification_timezone(q, cid, back_dest='menu_settings' if data == 'menu_tz' else 'menu_notifications')
@@ -4030,7 +4079,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('ml_pick|'):
         cat = data.split('|', 1)[1]
-        p = context.user_data.pop('pending', {})
+        p = context.user_data.get('pending') or {}
         typ = p.get('type') or 'Расходы'
         merch = p.get('merch', 'операция')
         amt = p.get('amt', 0)
@@ -4113,7 +4162,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
         # обычный поток записи операции
         cat = data.split('|', 1)[1]
-        p = context.user_data.pop('pending', {})
+        p = context.user_data.get('pending') or {}
         typ = p.get('type') or 'Расходы'
         merch = p.get('merch', 'операция')
         amt = p.get('amt', 0)
@@ -4138,6 +4187,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
         if context.user_data.pop('edit_mode', False):
             edit_operation_id = p.get('edit_operation_id') or context.user_data.pop('edit_operation_id', None)
+            context.user_data.pop('pending', None)
             row = (
                 update_operation_fields_by_id(cid, int(edit_operation_id), category=cat, op_type=typ)
                 if str(edit_operation_id or '').isdigit()

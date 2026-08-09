@@ -44,9 +44,12 @@ export type Overview = {
   recent_operations: Operation[];
   info?: { kind: string; text: string } | null;
   challenge?: { key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_key: string; period_end?: string | null } | null;
+  challenges?: Array<{ key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_key: string; period_end?: string | null }>;
   focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
+  focus_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean }>;
   insight?: { kind: string; tone: string; title: string; text: string; currency?: string } | null;
   reminder?: HomeReminderSummary | null;
+  reminders?: HomeReminderSummary[];
   activity?: ActivityCalendar;
 };
 
@@ -105,6 +108,9 @@ export type PlansResponse = {
   general_limits: GeneralSpendingLimit[];
   category_budgets: CategoryBudgetGroup[];
   reminders: Reminder[];
+  categories?: CategoryOption[];
+  categories_read_only?: boolean;
+  category_type?: 'expense' | 'income';
   all_scope_note?: string | null;
 };
 
@@ -205,6 +211,14 @@ export const api = {
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
   categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),
+  managedCategories: (workspaceId: number | 'all' | null, type: 'expense' | 'income') =>
+    apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories/manage${query({ workspace_id: workspaceId, type })}`),
+  createCategory: (payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
+    apiFetch<{ category: CategoryOption; created: boolean }>('/miniapp/api/categories', { method: 'POST', body: JSON.stringify(payload) }),
+  renameCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
+    apiFetch<{ category: CategoryOption; result: string }>(`/miniapp/api/categories/${encodeURIComponent(token)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; transfer_to?: string }) =>
+    apiFetch<{ deleted: boolean; references: Record<string, number> }>(`/miniapp/api/categories/${encodeURIComponent(token)}`, { method: 'DELETE', body: JSON.stringify(payload) }),
   operationDetail: (id: number) => apiFetch<Operation>(`/miniapp/api/operations/${id}`),
   createOperation: (payload: OperationPayload) =>
     apiFetch<{ operation: Operation }>('/miniapp/api/operations', {
@@ -272,6 +286,10 @@ export const api = {
     apiFetch<NotificationPreferences>('/miniapp/api/profile/notifications', { method: 'POST', body: JSON.stringify(payload) }),
   premium: () => apiFetch<PremiumInfo>('/miniapp/api/profile/premium'),
   exportInfo: () => apiFetch<{ available: boolean; status: string; presets: string[]; privacy_note: string }>('/miniapp/api/profile/export'),
+  exportPreview: (payload: Record<string, unknown>) =>
+    apiFetch<{ preset: string; period: { start_date: string; end_date: string }; count: number; totals_by_currency: Record<string, { income: string; expense: string; count: number }> }>('/miniapp/api/profile/export', { method: 'POST', body: JSON.stringify({ ...payload, action: 'preview' }) }),
+  sendExport: (payload: Record<string, unknown>) =>
+    apiFetch<{ result: string; filename: string; preset: string; period: { start_date: string; end_date: string }; count: number; totals_by_currency: Record<string, { income: string; expense: string; count: number }> }>('/miniapp/api/profile/export', { method: 'POST', body: JSON.stringify({ ...payload, action: 'send' }) }),
   track: (event: string, properties: Record<string, string>) =>
     apiFetch<{ tracked: boolean }>('/miniapp/api/analytics/event', { method: 'POST', body: JSON.stringify({ event, properties }) }).catch(() => undefined)
 };

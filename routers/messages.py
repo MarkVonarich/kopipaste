@@ -33,7 +33,7 @@ from services.ml_suggest import get_top2_suggestions
 from services.receipt_parser import parse_receipt_image
 from services.budgeting import create_category_budget_group, list_active_expense_categories, upsert_general_limit
 from services.automatic_notifications import suppress_stale_timezone_sensitive_notifications
-from services.notification_preferences import set_notification_timezone, set_quiet_hours_time
+from services.notification_preferences import set_daily_notification_time, set_notification_timezone, set_quiet_hours_time
 from services.i18n import resolve_locale, t
 from services.personal_data_deletion import preview_delete_financial_history
 from services.api_usage import ApiUsageEvent, track_api_usage
@@ -505,6 +505,9 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
 
     if _is_group_chat(update):
         return await _process_group_text(update, context, text)
+
+    for key in ("edit_mode", "edit_operation_id", "edit_ctx"):
+        context.user_data.pop(key, None)
 
     try:
         merch_display, amt_raw, dt, src_curr = parse_user_input(text)
@@ -1456,6 +1459,19 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
         ))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('🌙 Тихие часы', callback_data='notif_quiet_hours')]])
         return await emsg.reply_text(f'✅ Тихие часы обновлены: {start}–{end}', reply_markup=kb)
+
+    daily_time_state = context.user_data.pop('await_daily_notification_time', None)
+    if daily_time_state:
+        field = daily_time_state.get('field')
+        try:
+            prefs = set_daily_notification_time(cid, field, text.strip())
+        except Exception:
+            context.user_data['await_daily_notification_time'] = daily_time_state
+            return await emsg.reply_text('⚠️ Введите время в формате HH:MM, например 08:30')
+        value = prefs.get('morning_time') if field == 'morning' else prefs.get('evening_time')
+        label = 'Утро' if field == 'morning' else 'Вечер'
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('🕒 Время уведомлений', callback_data='notif_times')]])
+        return await emsg.reply_text(f'✅ {label}: {value}', reply_markup=kb)
 
     if context.user_data.pop('await_timezone_name', False):
         tz_name = text.strip()

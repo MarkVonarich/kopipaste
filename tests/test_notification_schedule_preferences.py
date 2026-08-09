@@ -1,4 +1,6 @@
-from datetime import datetime, time
+import asyncio
+from datetime import datetime, timezone, time
+from types import SimpleNamespace
 
 from services.automatic_notifications import suppress_pending_preference_notifications
 
@@ -129,6 +131,80 @@ def test_deferred_delivery_rechecks_disabled_preference(monkeypatch):
 
     assert counts["skipped"] == 1
     assert skipped == [(7, "preference_disabled")]
+
+
+def test_deferred_evening_delivery_outside_new_time_window_is_detected(monkeypatch):
+    from services import automatic_notifications as mod
+
+    monkeypatch.setattr(mod, "resolve_user_timezone", lambda _user_id: SimpleNamespace(timezone_name="UTC"))
+    monkeypatch.setattr(
+        "services.notification_preferences.get_notification_preferences",
+        lambda _user_id: {
+            "evening_enabled": True,
+            "evening_time": "20:30",
+            "quiet_hours_enabled": False,
+            "timezone": "UTC",
+        },
+    )
+    monkeypatch.setattr("jobs.daily.pg_fetchall", lambda *_args, **_kwargs: [("20:30",)])
+
+    reason = mod._automatic_delivery_skip_reason(
+        {
+        "id": 8,
+        "user_id": 42,
+        "workspace_id": None,
+        "notification_type": "evening_reminder",
+        "dedupe_key": "evening:42:2026-08-07",
+        "template_key": "evening_reminder",
+        "payload": {"text": "hello"},
+        "original_scheduled_at": datetime(2026, 8, 7, 8, 0, tzinfo=timezone.utc),
+        "timezone_name": "UTC",
+        "attempts": 0,
+        },
+        now_utc=datetime(2026, 8, 7, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert reason == "outside_delivery_window"
+
+
+def test_grouped_daily_toggle_updates_morning_and_evening(monkeypatch):
+    from services import notification_preferences as prefs
+
+    executed = []
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            executed.append((" ".join(sql.split()), params))
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def commit(self):
+            executed.append(("commit", ()))
+
+        def rollback(self):
+            executed.append(("rollback", ()))
+
+        def close(self):
+            executed.append(("close", ()))
+
+    monkeypatch.setattr(prefs, "get_conn", lambda: _Conn())
+    monkeypatch.setattr(prefs, "grouped_notification_preferences", lambda _user_id: {"daily_notifications": {"enabled": False}})
+    monkeypatch.setattr("services.automatic_notifications.suppress_pending_preference_notifications", lambda *_args, **_kwargs: 0)
+
+    result = prefs.set_grouped_notification_preference(42, "daily", False)
+
+    assert result["daily_notifications"]["enabled"] is False
+    assert "morning_enabled" in executed[0][0]
+    assert "evening_enabled" in executed[0][0]
+    assert executed[0][1] == (42, False, False, False, False)
 
 
 def test_quiet_hours_still_block_due_window(monkeypatch):

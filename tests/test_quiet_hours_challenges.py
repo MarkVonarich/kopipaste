@@ -157,9 +157,9 @@ def test_dispatcher_immediate_send_is_deduped(monkeypatch):
         text="prompt",
     ))
 
-    assert first.status == "sent"
-    assert second.status == "duplicate"
-    assert len(context.bot.sent) == 1
+    assert first.status in {"skipped", "duplicate"}
+    assert second.status in {"skipped", "duplicate"}
+    assert len(context.bot.sent) == 0
 
 
 def test_queue_claim_is_durable_idempotent_and_skip_locked():
@@ -180,11 +180,13 @@ def test_challenge_home_navigation_has_no_duplicate_notifications_button(monkeyp
     home = _CallbackQuery("chal|home")
     asyncio.run(callbacks.callback_handler(_update(home), context))
     displayed = _callbacks(home.edits[-1][1]["reply_markup"])
-    assert displayed == ["chal|sec|today", "chal|sec|week", "chal|sec|month", "chal|sec|onboarding", "chal|ach", "chal|how", "start_main"]
+    assert "start_main" in displayed
+    assert "chal|sec|today" not in displayed
     assert "chal|notif" not in displayed
+    assert "Челленджи теперь доступны" in home.edits[-1][0]
 
 
-def test_challenge_notification_settings_remain_available_from_settings(monkeypatch):
+def test_challenge_notification_settings_removed_from_settings(monkeypatch):
     from routers import callbacks
 
     prefs = {
@@ -208,17 +210,19 @@ def test_challenge_notification_settings_remain_available_from_settings(monkeypa
     asyncio.run(callbacks.callback_handler(_update(query), context))
 
     displayed = _callbacks(query.edits[-1][1]["reply_markup"])
-    assert "notif_challenges" in displayed
+    assert "notif_challenges" not in displayed
+    assert "notif_group|daily" in displayed
+    assert "notif_group|plans" in displayed
+    assert "notif_group|reports" in displayed
     assert "menu_settings" in displayed
-    assert any(button.text == "🏆 Челленджи: выключены" for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
 
     detail = _CallbackQuery("notif_challenges")
     asyncio.run(callbacks.callback_handler(_update(detail), context))
-    assert "Уведомления о челленджах выключены по умолчанию" in detail.edits[-1][0]
-    assert "notif_toggle|challenges" in _callbacks(detail.edits[-1][1]["reply_markup"])
+    assert "Оповещения о челленджах больше не используются" in detail.edits[-1][0]
+    assert "notif_toggle|challenges" not in _callbacks(detail.edits[-1][1]["reply_markup"])
 
 
-def test_challenge_notification_preference_toggle_still_works(monkeypatch):
+def test_challenge_notification_preference_toggle_cannot_reenable(monkeypatch):
     from routers import callbacks
 
     state = {"enabled": True}
@@ -252,9 +256,10 @@ def test_challenge_notification_preference_toggle_still_works(monkeypatch):
     query = _CallbackQuery("notif_toggle|challenges")
     asyncio.run(callbacks.callback_handler(_update(query), context))
 
-    assert query.answers[-1][0] == "Челленджи выключены"
-    assert "🏆 Челленджи: выключены" in query.edits[-1][0]
-    assert any(button.text == "Включить" for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
+    assert "больше не используются" in query.answers[-1][0]
+    assert state["enabled"] is True
+    assert "Оповещения о челленджах больше не используются" in query.edits[-1][0]
+    assert not any(button.callback_data == "notif_toggle|challenges" for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
 
 
 def test_default_challenge_preference_is_false_for_missing_rows(monkeypatch):

@@ -27,3 +27,12 @@ Current root causes found before implementation:
 - Do not build Telegram Mini App UI in this branch.
 - Additive migrations only; do not apply migrations from Codex.
 - Keep reusable services testable without a live database where possible.
+
+## Current Notification Behavior
+
+- Telegram and Mini App notification settings are grouped into Daily, Plans and Control, Reports, and Quiet Hours.
+- Daily keeps the existing morning/evening preferences and exposes both delivery times from one settings area.
+- Plans and Control controls limit, budget and goal notifications together.
+- Reports controls weekly and monthly financial summaries together.
+- Challenge notifications are retired from Telegram delivery. Existing challenge progress and achievements remain, while legacy challenge callbacks direct users to the Mini App.
+- Deferred daily notifications are rechecked at send time against current enablement, user-local date, quiet hours and the configured HH:MM window. A queued old evening reminder cannot be delivered later only because `earliest_delivery_at` has passed.

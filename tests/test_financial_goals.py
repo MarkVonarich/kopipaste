@@ -49,9 +49,10 @@ def _callbacks(markup):
     return [button.callback_data for row in markup.inline_keyboard for button in row]
 
 
-def test_main_menu_contains_financial_goals_next_to_challenges():
-    rows = main_menu_kb("ru").inline_keyboard
-    assert any([button.callback_data for button in row] == ["goal|home", "chal|home"] for row in rows)
+def test_main_menu_contains_financial_goals_without_challenges():
+    callbacks = _callbacks(main_menu_kb("ru"))
+    assert "goal|home" in callbacks
+    assert "chal|home" not in callbacks
     assert all(len(cb.encode("utf-8")) <= 64 for cb in _callbacks(main_menu_kb("ru")))
 
 

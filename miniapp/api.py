@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import logging
 import os
 import math
+import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, timedelta
@@ -15,6 +17,7 @@ from uuid import uuid4
 
 from psycopg2 import errors
 from psycopg2.extras import Json
+from telegram import Bot
 
 from db.database import get_conn, pg_fetchall
 from db.queries import get_user_currency, get_user_locale
@@ -27,6 +30,14 @@ from services.budgeting import (
     update_category_budget_group,
 )
 from services.categories import list_managed_categories, normalized_category_key
+from services.categories import (
+    category_reference_counts,
+    delete_category_without_operations,
+    get_or_create_custom_category,
+    is_protected_category,
+    rename_category,
+    transfer_category,
+)
 from services.challenges import ChallengeCard, upsert_assignments
 from services.goal_planning import (
     FREQUENCY_MONTHLY,
@@ -63,6 +74,7 @@ from services.operations import (
     update_financial_operation,
 )
 from services.product_events import ProductEvent, track_product_event
+from services.export_xlsx import build_export_xlsx
 from services.reminders import (
     ReminderError,
     create_reminder,
@@ -88,6 +100,9 @@ from services.miniapp_limits import (
 from services.notification_preferences import (
     TOGGLE_FIELDS,
     get_notification_preferences,
+    grouped_notification_preferences,
+    set_daily_notification_time,
+    set_grouped_notification_preference,
     set_notification_timezone,
     set_quiet_hours,
     set_quiet_hours_time,
@@ -98,6 +113,7 @@ from services.user_profile import ALLOWED_CURRENCIES, display_name_from_parts, g
 from services.user_time import TIMEZONE_CHOICES, user_local_date, user_timezone_name
 from services.workspaces import WRITE_ROLES, WorkspaceContext, can_edit_operation, list_accessible_workspaces, rename_workspace, set_active_workspace
 from utils.money import MoneyParseError, format_money, to_decimal_money
+from settings import TELEGRAM_TOKEN
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +133,25 @@ GOAL_FREQUENCIES = {FREQUENCY_NONE, FREQUENCY_MONTHLY, FREQUENCY_TWICE_MONTHLY, 
 GOAL_STRATEGIES = {STRATEGY_NONE, STRATEGY_DEADLINE, STRATEGY_CONTRIBUTION}
 LIMIT_PERIODS = {"week", "month"}
 NOTIFICATION_KEYS = set(TOGGLE_FIELDS)
+
+
+def notification_read_model(user_id: int) -> dict:
+    try:
+        return grouped_notification_preferences(user_id)
+    except Exception:
+        prefs = get_notification_preferences(user_id)
+        return {
+            **prefs,
+            "daily_notifications": {
+                "enabled": bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True)),
+                "morning_time": prefs.get("morning_time") or "08:30",
+                "evening_time": prefs.get("evening_time") or "20:30",
+            },
+            "plans_control": {"enabled": bool(prefs.get("limit_alerts_enabled", True) or prefs.get("budget_alerts_enabled", True) or prefs.get("goal_notifications_enabled", False))},
+            "reports": {"enabled": bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))},
+            "quiet_hours": {"enabled": bool(prefs.get("quiet_hours_enabled")), "start": prefs.get("quiet_hours_start") or "22:30", "end": prefs.get("quiet_hours_end") or "08:00"},
+            "timezone": prefs.get("timezone") or "Europe/Moscow",
+        }
 
 
 class MiniAppError(Exception):
@@ -328,19 +363,25 @@ class MiniAppAPI:
             return WorkspaceContext(None, req.user_id, req.user_id, "legacy_personal", "owner", "Личное", True)
         return self._write_workspace(req, workspace_id)
 
-    def _managed_categories(self, req: MiniAppRequest, workspace_id: int | None, op_type: str) -> list[dict]:
+    def _managed_categories(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, *, include_references: bool = False) -> list[dict]:
         items = list_managed_categories(user_id=req.user_id, workspace_id=workspace_id, op_type=op_type, limit=100)
-        return [
-            {
+        result = []
+        for item in items:
+            data = {
                 "name": item.name,
                 "normalized_name": item.normalized_name,
+                "token": item.normalized_name,
                 "type": item.op_type,
                 "source": item.source,
                 "operation_count": item.operation_count,
                 "has_budget": item.has_budget,
+                "protected": is_protected_category(item.name),
             }
-            for item in items
-        ]
+            if include_references:
+                counts = category_reference_counts(user_id=req.user_id, workspace_id=workspace_id, op_type=op_type, category=item.name)
+                data["references"] = {**counts.as_dict(), "total": counts.total}
+            result.append(data)
+        return result
 
     def _validate_category(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, category: str) -> str:
         name = str(category or "").strip()[:64]
@@ -360,6 +401,75 @@ class MiniAppAPI:
         if all_scope:
             return success({"items": [], "read_only": True, "note": "Выберите одно пространство, чтобы увидеть категории."}, request_id=req.request_id)
         return success({"items": self._managed_categories(req, workspace_ids[0], op_type), "read_only": False}, request_id=req.request_id)
+
+    def managed_categories(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
+        workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
+        op_type = OP_TYPES.get(str(params.get("type") or "expense"))
+        if not op_type:
+            raise MiniAppError(400, "bad_type", "Invalid operation type.")
+        if all_scope:
+            return success({"items": [], "read_only": True, "note": "Выберите одно пространство, чтобы управлять категориями."}, request_id=req.request_id)
+        return success({"items": self._managed_categories(req, workspace_ids[0], op_type, include_references=True), "read_only": False}, request_id=req.request_id)
+
+    def _category_by_token(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, token: str) -> dict:
+        token = unquote(str(token or "")).strip()
+        for item in self._managed_categories(req, workspace_id, op_type, include_references=True):
+            if item["token"] == token:
+                return item
+        raise MiniAppError(404, "category_not_found", "Category was not found.")
+
+    def create_category(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        op_type = OP_TYPES.get(str(body.get("type") or "expense"))
+        if not op_type:
+            raise MiniAppError(400, "bad_type", "Invalid operation type.")
+        try:
+            result = get_or_create_custom_category(workspace_id=ctx.workspace_id, user_id=req.user_id, op_type=op_type, name=str(body.get("name") or ""))
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_category_name", "Invalid category name.") from exc
+        self._track(req, "mini_app_category_created", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense"})
+        return success({"category": self._category_by_token(req, ctx.workspace_id, op_type, result.normalized_name), "created": result.created}, request_id=req.request_id)
+
+    def update_category(self, req: MiniAppRequest, token: str, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        op_type = OP_TYPES.get(str(body.get("type") or "expense"))
+        if not op_type:
+            raise MiniAppError(400, "bad_type", "Invalid operation type.")
+        current = self._category_by_token(req, ctx.workspace_id, op_type, token)
+        if current.get("protected"):
+            raise MiniAppError(400, "category_protected", "Protected categories cannot be renamed.")
+        try:
+            result = rename_category(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, source=current["name"], destination=str(body.get("name") or ""))
+        except ValueError as exc:
+            raise MiniAppError(400, "category_rename_failed", "Category could not be renamed.") from exc
+        self._track(req, "mini_app_category_renamed", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense"})
+        return success({"category": self._category_by_token(req, ctx.workspace_id, op_type, normalized_category_key(result.destination)), "result": "renamed"}, request_id=req.request_id)
+
+    def delete_category(self, req: MiniAppRequest, token: str, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        op_type = OP_TYPES.get(str(body.get("type") or "expense"))
+        if not op_type:
+            raise MiniAppError(400, "bad_type", "Invalid operation type.")
+        current = self._category_by_token(req, ctx.workspace_id, op_type, token)
+        if current.get("protected"):
+            raise MiniAppError(400, "category_protected", "Protected categories cannot be deleted.")
+        destination = str(body.get("transfer_to") or "").strip()
+        try:
+            if destination:
+                result = transfer_category(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, source=current["name"], destination=destination, archive_source=True)
+                deleted = True
+                counts = result.counts.as_dict()
+            else:
+                result = delete_category_without_operations(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, category=current["name"])
+                deleted = bool(result.changed)
+                counts = result.counts.as_dict()
+        except ValueError as exc:
+            raise MiniAppError(400, "category_delete_failed", "Category is used. Transfer records before deleting it.") from exc
+        self._track(req, "mini_app_category_deleted", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense", "mode": "transfer" if destination else "empty"})
+        return success({"deleted": deleted, "references": counts}, request_id=req.request_id)
 
     def _period(self, req: MiniAppRequest, params: dict[str, Any], workspace_id: int | None = None) -> tuple[date, date, str]:
         today = user_local_date(req.user_id, workspace_id)
@@ -847,6 +957,9 @@ class MiniAppAPI:
             info = {"kind": "period", "text": "Показаны подтверждённые операции за выбранный период."}
         else:
             info = {"kind": "currencies", "text": "Валюты различаются, поэтому суммы сгруппированы без автоматической конвертации."}
+        challenges = self._home_challenges(req)
+        focus_items = self._home_focus_items(req, params, tx)
+        reminders = self._home_reminders(req)
         return success({
             "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
             "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
@@ -855,14 +968,32 @@ class MiniAppAPI:
             "totals_by_currency": totals,
             "recent_operations": recent,
             "info": info,
-            "challenge": self._home_challenge(req),
-            "focus": self._home_focus(req, params, tx),
+            "challenges": challenges,
+            "challenge": challenges[0] if challenges else None,
+            "focus_items": focus_items,
+            "focus": focus_items[0] if focus_items else {"kind": "empty", "title": "Фокус свободен", "description": "Добавьте цель или лимит, чтобы видеть главный приоритет.", "target_mode": "goals"},
             "insight": self._home_insight(req, tx, totals),
-            "reminder": self._home_reminder(req),
+            "reminders": reminders,
+            "reminder": reminders[0] if reminders else self._home_reminder(req),
             "activity": self._activity_calendar(req, tx),
         }, request_id=req.request_id)
 
     def _home_challenge(self, req: MiniAppRequest) -> dict | None:
+        cards = self._home_challenges(req)
+        return cards[0] if cards else None
+
+    def _home_challenges(self, req: MiniAppRequest) -> list[dict]:
+        all_cards: list[ChallengeCard] = []
+        for section in ("today", "week", "month"):
+            try:
+                cards = upsert_assignments(req.user_id, section)
+            except Exception as exc:
+                log.info("miniapp_home_challenge_unavailable section=%s reason=%s", section, type(exc).__name__)
+                cards = []
+            all_cards.extend(cards)
+        return [self._challenge_dict(card) for card in all_cards]
+
+    def _home_challenge_legacy(self, req: MiniAppRequest) -> dict | None:
         try:
             cards = upsert_assignments(req.user_id, "today")
         except Exception as exc:
@@ -888,8 +1019,12 @@ class MiniAppAPI:
         }
 
     def _home_focus(self, req: MiniAppRequest, params: dict[str, Any], tx: TransactionFilters) -> dict | None:
+        items = self._home_focus_items(req, params, tx)
+        return items[0] if items else None
+
+    def _home_focus_items(self, req: MiniAppRequest, params: dict[str, Any], tx: TransactionFilters) -> list[dict]:
         if tx.all_scope:
-            return {"kind": "empty", "title": "Выберите пространство", "description": "Фокус доступен для одного пространства.", "read_only": True}
+            return [{"kind": "empty", "title": "Выберите пространство", "description": "Фокус доступен для одного пространства.", "read_only": True}]
         candidates: list[dict] = []
         severity_rank = {"critical": 400, "high": 300, "medium": 200, "normal": 100}
         today = user_local_date(req.user_id, tx.workspace_ids[0])
@@ -1000,11 +1135,14 @@ class MiniAppAPI:
         except Exception as exc:
             log.info("miniapp_home_focus_limits_unavailable reason=%s", type(exc).__name__)
         if not candidates:
-            return {"kind": "empty", "title": "Фокус свободен", "description": "Добавьте цель или лимит, чтобы видеть главный приоритет.", "target_mode": "goals"}
+            return []
         candidates.sort(key=lambda item: (-int(item["score"]), str(item["kind"]), str(item.get("id") or "")))
-        item = dict(candidates[0])
-        item.pop("score", None)
-        return item
+        items = []
+        for candidate in candidates:
+            item = dict(candidate)
+            item.pop("score", None)
+            items.append(item)
+        return items
 
     def _home_insight(
         self,
@@ -1590,49 +1728,9 @@ class MiniAppAPI:
         }
 
     def _home_reminder(self, req: MiniAppRequest) -> dict:
-        local_today = user_local_date(req.user_id)
-        try:
-            reminders = list_reminders(req.user_id, active_only=True, today=local_today)
-        except Exception as exc:
-            log.info("miniapp_home_reminders_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
-            reminders = []
-        overdue = next((item for item in reminders if item["status"] == "overdue"), None)
-        if overdue:
-            overdue_days = (local_today - overdue["event_date"]).days
-            return {
-                "state": "overdue",
-                "id": int(overdue["id"]),
-                "title": str(overdue["title"]),
-                "event_date": overdue["event_date"],
-                "amount_text": format_money(to_decimal_money(overdue["amount"]), overdue["currency"]),
-                "category": str(overdue["category"]),
-                "next_event_date": None,
-                "status_text": f"Нужно было оплатить {overdue['event_date'].isoformat()}",
-                "overdue_days": overdue_days,
-                "repeat_rule": overdue["repeat_rule"],
-            }
-        upcoming = next((item for item in reminders if item["status"] in {"today", "upcoming"}), None)
-        if upcoming:
-            event_date = upcoming["event_date"]
-            days = (event_date - local_today).days
-            if days == 0:
-                status = "Сегодня"
-            elif days == 1:
-                status = "Завтра"
-            else:
-                status = f"Через {days} дн."
-            return {
-                "state": "upcoming",
-                "id": int(upcoming["id"]),
-                "title": str(upcoming["title"]),
-                "event_date": event_date,
-                "amount_text": format_money(to_decimal_money(upcoming["amount"]), upcoming["currency"]),
-                "category": str(upcoming["category"]),
-                "next_event_date": None,
-                "status_text": status,
-                "overdue_days": 0,
-                "repeat_rule": upcoming["repeat_rule"],
-            }
+        reminders = self._home_reminders(req)
+        if reminders:
+            return reminders[0]
         return {
             "state": "empty",
             "id": None,
@@ -1645,6 +1743,42 @@ class MiniAppAPI:
             "overdue_days": 0,
             "repeat_rule": None,
         }
+
+    def _home_reminders(self, req: MiniAppRequest) -> list[dict]:
+        local_today = user_local_date(req.user_id)
+        try:
+            reminders = list_reminders(req.user_id, active_only=True, today=local_today)
+        except Exception as exc:
+            log.info("miniapp_home_reminders_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
+            reminders = []
+        rank = {"overdue": 0, "today": 1, "upcoming": 2}
+        active = [item for item in reminders if item.get("status") in rank]
+        active.sort(key=lambda item: (rank.get(str(item.get("status")), 9), item.get("event_date") or date.max, int(item.get("id") or 0)))
+        result = []
+        for item in active:
+            event_date = item["event_date"]
+            days = (event_date - local_today).days
+            if item["status"] == "overdue":
+                status = f"Нужно было оплатить {event_date.isoformat()}"
+            elif days == 0:
+                status = "Сегодня"
+            elif days == 1:
+                status = "Завтра"
+            else:
+                status = f"Через {days} дн."
+            result.append({
+                "state": "overdue" if item["status"] == "overdue" else "upcoming",
+                "id": int(item["id"]),
+                "title": str(item["title"]),
+                "event_date": event_date,
+                "amount_text": format_money(to_decimal_money(item["amount"]), item["currency"]),
+                "category": str(item["category"]),
+                "next_event_date": None,
+                "status_text": status,
+                "overdue_days": max(0, -days),
+                "repeat_rule": item["repeat_rule"],
+            })
+        return result
 
     def _activity_calendar(self, req: MiniAppRequest, tx: TransactionFilters) -> dict:
         rows = pg_fetchall(
@@ -1680,6 +1814,8 @@ class MiniAppAPI:
             current += timedelta(days=1)
         today = user_local_date(req.user_id, None if tx.all_scope else tx.workspace_ids[0])
         streak_cursor = min(today, tx.end)
+        if tx.start <= today <= tx.end and counts.get(today, 0) <= 0:
+            streak_cursor = today - timedelta(days=1)
         current_streak = 0
         while streak_cursor >= tx.start and counts.get(streak_cursor, 0) > 0:
             current_streak += 1
@@ -2323,7 +2459,7 @@ class MiniAppAPI:
     def profile(self, req: MiniAppRequest) -> dict:
         timezone_name, _reason = user_timezone_name(req.user_id)
         try:
-            notifications = get_notification_preferences(req.user_id)
+            notifications = notification_read_model(req.user_id)
         except Exception as exc:
             log.info("miniapp_notification_preferences_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
             notifications = {}
@@ -2365,7 +2501,7 @@ class MiniAppAPI:
         return success({"items": self._managed_categories(req, workspace_ids[0], op_type), "read_only": False}, request_id=req.request_id)
 
     def notification_preferences(self, req: MiniAppRequest) -> dict:
-        return success(get_notification_preferences(req.user_id), request_id=req.request_id)
+        return success(notification_read_model(req.user_id), request_id=req.request_id)
 
     def set_profile_preferred_name(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
@@ -2424,16 +2560,28 @@ class MiniAppAPI:
         key = str(body.get("key") or "")
         try:
             if action == "toggle":
-                if key not in NOTIFICATION_KEYS:
+                if key in {"daily", "plans", "reports"}:
+                    current = notification_read_model(req.user_id)
+                    read_key = "daily_notifications" if key == "daily" else "plans_control" if key == "plans" else "reports"
+                    value = not bool((current.get(read_key) or {}).get("enabled"))
+                    set_grouped_notification_preference(req.user_id, key, value)
+                    self._track(req, "mini_app_notification_setting_changed", properties={"action": key, "result": "enabled" if value else "disabled", "source": "mini_app"})
+                elif key == "challenges":
+                    self._track(req, "mini_app_notification_setting_changed", properties={"action": "challenges", "result": "retired", "source": "mini_app"})
+                elif key not in NOTIFICATION_KEYS:
                     raise MiniAppError(400, "bad_notification_key", "Unknown notification setting.")
-                value = toggle_notification_preference(req.user_id, key)
-                self._track(req, "mini_app_notification_setting_changed", properties={"action": key, "result": "enabled" if value else "disabled", "source": "mini_app"})
+                else:
+                    value = toggle_notification_preference(req.user_id, key)
+                    self._track(req, "mini_app_notification_setting_changed", properties={"action": key, "result": "enabled" if value else "disabled", "source": "mini_app"})
             elif action == "quiet_toggle":
                 value = toggle_quiet_hours(req.user_id)
                 self._track(req, "mini_app_notification_setting_changed", properties={"action": "quiet_hours", "result": "enabled" if value else "disabled", "source": "mini_app"})
             elif action == "quiet_time":
                 set_quiet_hours_time(req.user_id, key, str(body.get("value") or ""))
                 self._track(req, "mini_app_notification_setting_changed", properties={"action": "quiet_hours_time", "result": "success", "source": "mini_app"})
+            elif action == "daily_time":
+                set_daily_notification_time(req.user_id, key, str(body.get("value") or ""))
+                self._track(req, "mini_app_notification_setting_changed", properties={"action": "daily_time", "result": "success", "source": "mini_app"})
             elif action == "quiet_hours_update":
                 set_quiet_hours(
                     req.user_id,
@@ -2449,7 +2597,7 @@ class MiniAppAPI:
                 raise MiniAppError(400, "bad_notification_action", "Unknown notification action.")
         except ValueError as exc:
             raise MiniAppError(400, "bad_notification_value", "Invalid notification setting.") from exc
-        return success(get_notification_preferences(req.user_id), request_id=req.request_id)
+        return success(notification_read_model(req.user_id), request_id=req.request_id)
 
     def _premium_info(self) -> dict:
         return {
@@ -2467,14 +2615,109 @@ class MiniAppAPI:
     def _export_info(self, req: MiniAppRequest) -> dict:
         return {
             "available": True,
-            "presets": ["today", "7", "14", "month", "previous_month", "year"],
+            "presets": ["today", "7", "14", "month", "previous_month", "year", "previous_year", "custom"],
             "status": "ready",
-            "privacy_note": "Экспорт использует существующий Telegram flow; Mini App не хранит отдельные файлы.",
+            "privacy_note": "XLSX формируется по выбранному периоду и отправляется в чат с КопиPaste.",
         }
 
     def export_entry(self, req: MiniAppRequest, body: dict[str, Any] | None = None) -> dict:
-        self._track(req, "mini_app_export_opened", properties={"source": "mini_app", "action": "open"})
-        return success(self._export_info(req), request_id=req.request_id)
+        body = body or {}
+        action = str(body.get("action") or "open")
+        if action == "open":
+            self._track(req, "mini_app_export_opened", properties={"source": "mini_app", "action": "open"})
+            return success(self._export_info(req), request_id=req.request_id)
+        dfrom, dto, preset = self._export_period(req, body)
+        rows = self._export_rows(req, body, dfrom, dto)
+        preview = self._export_preview_payload(rows, dfrom, dto, preset)
+        if action == "preview":
+            return success(preview, request_id=req.request_id)
+        if action != "send":
+            raise MiniAppError(400, "bad_export_action", "Unknown export action.")
+        if not TELEGRAM_TOKEN:
+            raise MiniAppError(503, "export_send_unavailable", "Telegram delivery is unavailable.")
+        filename = f"kopipaste_export_{dfrom.isoformat()}_{dto.isoformat()}.xlsx"
+        fd, path = tempfile.mkstemp(prefix="kopipaste_miniapp_export_", suffix=".xlsx")
+        os.close(fd)
+        try:
+            build_export_xlsx(path, rows, dfrom, dto, get_user_locale(req.user_id))
+            async def _send() -> None:
+                bot = Bot(TELEGRAM_TOKEN)
+                with open(path, "rb") as fh:
+                    await bot.send_document(chat_id=req.user_id, document=fh, filename=filename, caption=f"📤 Экспорт готов\nПериод: {dfrom:%d.%m.%Y}–{dto:%d.%m.%Y}\nОпераций: {len(rows)}")
+            asyncio.run(_send())
+        except Exception as exc:
+            log.warning("miniapp_export_send_failed user=%s reason=%s", req.user_id, type(exc).__name__)
+            raise MiniAppError(502, "export_send_failed", "Export could not be sent.") from exc
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._track(req, "mini_app_export_sent", properties={"source": "mini_app", "preset": preset, "result": "success"})
+        return success({**preview, "result": "sent", "filename": filename}, request_id=req.request_id)
+
+    def _export_period(self, req: MiniAppRequest, body: dict[str, Any]) -> tuple[date, date, str]:
+        today = user_local_date(req.user_id)
+        preset = str(body.get("preset") or "month")
+        if preset == "today":
+            return today, today, preset
+        if preset == "7":
+            return today - timedelta(days=6), today, preset
+        if preset == "14":
+            return today - timedelta(days=13), today, preset
+        if preset == "month":
+            return today.replace(day=1), today, preset
+        if preset == "previous_month":
+            first = today.replace(day=1)
+            end = first - timedelta(days=1)
+            return end.replace(day=1), end, preset
+        if preset == "year":
+            return today.replace(month=1, day=1), today, preset
+        if preset == "previous_year":
+            year = today.year - 1
+            return date(year, 1, 1), date(year, 12, 31), preset
+        if preset == "custom":
+            try:
+                start = date.fromisoformat(str(body.get("start_date") or ""))
+                end = date.fromisoformat(str(body.get("end_date") or ""))
+            except Exception as exc:
+                raise MiniAppError(400, "bad_export_period", "Invalid export period.") from exc
+            if start > end or (end - start).days + 1 > MAX_PERIOD_DAYS:
+                raise MiniAppError(400, "bad_export_period", "Invalid export period.")
+            return start, end, preset
+        raise MiniAppError(400, "bad_export_preset", "Invalid export preset.")
+
+    def _export_rows(self, req: MiniAppRequest, body: dict[str, Any], start: date, end: date) -> list[dict]:
+        tx = self._transaction_filters(req, {
+            "workspace_id": body.get("workspace_id", body.get("workspace_scope", None)),
+            "period": "custom",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "operation_type": body.get("operation_type") or "all",
+            "category": body.get("category") or "all",
+        }, alias="o")
+        rows = pg_fetchall(
+            f"""
+            SELECT o.id, o.op_date, o.type, o.category, o.amount, COALESCE(o.comment,''), COALESCE(to_jsonb(o)->>'source', 'miniapp'), COALESCE(o.currency, %s)
+              FROM public.operations o
+             WHERE {tx.where_sql}
+             ORDER BY o.op_date, o.id
+            """,
+            (get_user_currency(req.user_id), *tx.params),
+        )
+        return [{"id": r[0], "op_date": r[1], "type": r[2], "category": r[3], "amount": to_decimal_money(r[4]), "comment": r[5], "source": r[6], "currency": r[7]} for r in rows]
+
+    def _export_preview_payload(self, rows: list[dict], start: date, end: date, preset: str) -> dict:
+        totals: dict[str, dict[str, Decimal | int]] = defaultdict(lambda: {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
+        # Legacy export rows do not store currency per row in the builder query; preserve count and avoid cross-currency summing.
+        for row in rows:
+            currency = str(row.get("currency") or "RUB")
+            if row["type"] == "Доходы":
+                totals[currency]["income"] = to_decimal_money(totals[currency]["income"]) + to_decimal_money(row["amount"])
+            elif row["type"] == "Расходы":
+                totals[currency]["expense"] = to_decimal_money(totals[currency]["expense"]) + to_decimal_money(row["amount"])
+            totals[currency]["count"] = int(totals[currency]["count"]) + 1
+        return {"preset": preset, "period": {"start_date": start, "end_date": end}, "count": len(rows), "totals_by_currency": dict(totals)}
 
     def set_theme(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
@@ -2532,13 +2775,16 @@ class MiniAppAPI:
             "mini_app_home_insight_opened",
             "mini_app_profile_section_opened",
             "mini_app_profile_setting_changed",
+            "mini_app_challenge_carousel_changed",
+            "mini_app_focus_carousel_changed",
+            "mini_app_reminder_carousel_changed",
         }
         if event not in allowed:
             raise MiniAppError(400, "bad_event", "Invalid analytics event.")
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section", "reminder_state", "budget_kind"}
+            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total"}
         }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)

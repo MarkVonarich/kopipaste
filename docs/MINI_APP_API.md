@@ -36,6 +36,10 @@ Authorization: tma <initData>
 - `GET /miniapp/api/bootstrap`
 - `GET /miniapp/api/workspaces`
 - `GET /miniapp/api/categories`
+- `GET /miniapp/api/categories/manage`
+- `POST /miniapp/api/categories`
+- `PATCH /miniapp/api/categories/{token}`
+- `DELETE /miniapp/api/categories/{token}`
 - `GET /miniapp/api/overview`
 - `GET /miniapp/api/operations`
 - `POST /miniapp/api/operations`
@@ -60,6 +64,12 @@ Authorization: tma <initData>
 - `POST /miniapp/api/limits`
 - `PATCH /miniapp/api/limits/{id}`
 - `DELETE /miniapp/api/limits/{id}`
+- `GET /miniapp/api/reminders`
+- `POST /miniapp/api/reminders`
+- `PATCH /miniapp/api/reminders/{id}`
+- `DELETE /miniapp/api/reminders/{id}`
+- `POST /miniapp/api/reminders/{id}/record`
+- `POST /miniapp/api/reminders/{id}/snooze`
 - `GET /miniapp/api/profile`
 - `GET /miniapp/api/profile/categories`
 - `GET /miniapp/api/profile/notifications`
@@ -85,8 +95,9 @@ Write endpoints require one concrete writable workspace. `all` is rejected for w
 Supported values:
 
 - `current_month`
+- `current_week`
 - `previous_month`
-- `last_30`
+- `previous_year`
 - `custom` with `start_date` and `end_date`
 
 Custom periods are capped at 366 days.
@@ -109,7 +120,11 @@ The `idempotency_key` must be generated when the form opens and reused for retry
 
 ## Categories
 
-`GET /miniapp/api/categories` accepts `workspace_id` and `type`. It returns existing managed categories available to the authenticated user for the selected workspace and operation type. PR 1 create/edit uses this picker and does not create new categories directly.
+`GET /miniapp/api/categories` accepts `workspace_id` and `type`. It returns existing managed categories available to the authenticated user for the selected workspace and operation type.
+
+Category lifecycle management lives under `GET /miniapp/api/categories/manage`, `POST /miniapp/api/categories`, `PATCH /miniapp/api/categories/{token}` and `DELETE /miniapp/api/categories/{token}`. Writes require one concrete writable workspace; aggregate `workspace_id=all` is read-only. Delete returns reference counts and requires a transfer target when operations or related limits, budgets, reminders, aliases or ML observations still point to the category. Protected system categories cannot be renamed or deleted.
+
+Categories are managed from Plans in the Mini App. Profile no longer shows category chips.
 
 ## Analytics
 
@@ -140,7 +155,18 @@ General-limit and category-limit creation require an `idempotency_key`. Limit cr
 
 ## Profile
 
-Profile returns theme, spaces, categories, notification preferences, Premium info-only data, export entry metadata, help/privacy/terms links and version. Notification updates persist one setting at a time and emit sanitized product analytics only after backend confirmation.
+Profile returns theme, spaces, notification preferences, Premium info-only data, export entry metadata, help/privacy/terms links and version. Notification updates persist one setting at a time and emit sanitized product analytics only after backend confirmation.
+
+Notification preferences expose grouped controls:
+
+- `daily_notifications`: morning/evening daily reminders, with editable `morning_time` and `evening_time`;
+- `plans_control`: limit, budget and goal notifications;
+- `reports`: weekly and monthly reports;
+- `quiet_hours`: quiet-hour enabled/start/end state.
+
+Challenge notifications are retired from Telegram delivery and are not exposed as a live Profile toggle.
+
+`POST /miniapp/api/profile/export` supports `action=preview` and `action=send`. `send` builds an XLSX with the existing export builder and delivers it to the authenticated user's Telegram chat; no direct browser file download is returned.
 
 ## Analytics Events
 
@@ -150,8 +176,21 @@ Allowed client events:
 - `mini_app_workspace_changed`
 - `mini_app_period_changed`
 - `mini_app_transaction_add_opened`
+- `mini_app_global_filter_opened`
+- `mini_app_global_filter_applied`
 - `mini_app_analytics_chart_filter_changed`
+- `mini_app_analytics_grouping_changed`
+- `mini_app_analytics_details_toggled`
 - `mini_app_premium_opened`
 - `mini_app_export_opened`
+- `mini_app_home_challenge_opened`
+- `mini_app_home_focus_opened`
+- `mini_app_home_insight_opened`
+- `mini_app_home_reminder_opened`
+- `mini_app_challenge_carousel_changed`
+- `mini_app_focus_carousel_changed`
+- `mini_app_reminder_carousel_changed`
+- `mini_app_profile_section_opened`
+- `mini_app_profile_setting_changed`
 
-Only safe coarse properties are accepted: `tab`, `period`, `scope`, `action`, `chart_type`, `filter_kind`, `period_kind`, `result`, `source`.
+Only safe coarse properties are accepted: `tab`, `period`, `scope`, `action`, `chart_type`, `filter_kind`, `period_kind`, `operation_type`, `has_category_filter`, `grouping`, `result`, `source`, `kind`, `setting`, `section`, `reminder_state`, `budget_kind`, `direction`, `position`, `total`.

@@ -1,4 +1,5 @@
 import type { CategoryOption, NotificationPreferences, PremiumInfo, ProfileSection, ThemeMode, Workspace } from '../types';
+import { formatMoneyString } from '../money';
 import { SectionHeader, esc, icon } from './ui';
 
 export type ProfileData = {
@@ -23,7 +24,6 @@ const SECTIONS: Array<[ProfileSection, string]> = [
   ['user', 'Пользователь'],
   ['appearance', 'Внешний вид'],
   ['workspaces', 'Пространства'],
-  ['categories', 'Категории'],
   ['notifications', 'Уведомления'],
   ['export-data', 'Экспорт и данные'],
   ['premium', 'Premium'],
@@ -44,10 +44,14 @@ function row(label: string, value = '', description = '', action = '', attrs = '
   `;
 }
 
-function switchRow(label: string, key: string, enabled: boolean): string {
+function notificationBlock(label: string, key: string, enabled: boolean, description: string, meta = ''): string {
   return `
-    <button class="settings-row switch-row" type="button" data-action="notification-toggle" data-key="${esc(key)}" role="switch" aria-checked="${enabled ? 'true' : 'false'}">
-      <span><strong>${esc(label)}</strong></span>
+    <button class="settings-row switch-row notification-block" type="button" data-action="notification-toggle" data-key="${esc(key)}" role="switch" aria-checked="${enabled ? 'true' : 'false'}">
+      <span>
+        <strong>${esc(label)}</strong>
+        ${meta ? `<small>${esc(meta)}</small>` : ''}
+        <small>${esc(description)}</small>
+      </span>
       <em><span class="switch-control ${enabled ? 'on' : ''}" aria-hidden="true"></span></em>
     </button>
   `;
@@ -70,7 +74,6 @@ function panel(section: ProfileSection, active: ProfileSection, body: string): s
 
 export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace[], activeTheme: ThemeMode, activeSection: ProfileSection): string {
   const prefs = profile?.notifications;
-  const cats = profile?.categories;
   const visibleWorkspaces = profile?.workspaces || workspaces.filter((item) => item.workspace_id !== 'all');
   const activeWorkspace = visibleWorkspaces.find((workspace) => workspace.active);
   return `
@@ -95,25 +98,13 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
             ${visibleWorkspaces.map((workspace) => row(workspace.name, `${workspace.role}${workspace.active ? ' · активно' : ''}`, workspace.kind, workspace.role === 'owner' || workspace.role === 'admin' ? 'profile-workspace-open' : 'profile-active-workspace-set', `data-id="${esc(workspace.workspace_id)}"`)).join('') || '<p class="caption">Нет доступных пространств.</p>'}
           </div>
         `)}
-        ${panel('categories', activeSection, `
-          <p class="caption">Категории используют существующие правила Telegram-бота.</p>
-          <div class="chips">
-            ${(cats?.expense || []).slice(0, 8).map((cat) => `<span>${esc(cat.name)}</span>`).join('') || '<span>Расходы</span>'}
-            ${(cats?.income || []).slice(0, 4).map((cat) => `<span>${esc(cat.name)}</span>`).join('')}
-          </div>
-        `)}
         ${panel('notifications', activeSection, `
           <div class="settings-list">
             ${prefs ? `
-              ${switchRow('Утро', 'morning', prefs.morning_enabled)}
-              ${switchRow('Вечер', 'evening', prefs.evening_enabled)}
-              ${switchRow('Лимиты', 'limits', prefs.limit_alerts_enabled)}
-              ${switchRow('Бюджеты', 'budgets', prefs.budget_alerts_enabled)}
-              ${switchRow('Цели', 'goals', prefs.goal_notifications_enabled)}
-              ${switchRow('Челленджи', 'challenges', prefs.challenge_notifications_enabled)}
-              ${switchRow('Еженедельные отчёты', 'weekly', prefs.weekly_reports_enabled)}
-              ${switchRow('Ежемесячные отчёты', 'monthly', prefs.monthly_reports_enabled)}
-              ${row('Тихие часы', prefs.quiet_hours_enabled ? `${prefs.quiet_hours_start}–${prefs.quiet_hours_end}` : 'Выкл', 'Открывает редактор времени', 'quiet-hours-open')}
+              ${notificationBlock('Ежедневные уведомления', 'daily', prefs.daily_notifications?.enabled ?? (prefs.morning_enabled || prefs.evening_enabled), 'Короткие сообщения утром и вечером помогают не забывать записывать операции.', `Утро ${prefs.daily_notifications?.morning_time || prefs.morning_time} · Вечер ${prefs.daily_notifications?.evening_time || prefs.evening_time}`)}
+              ${notificationBlock('Планы и контроль', 'plans', prefs.plans_control?.enabled ?? (prefs.limit_alerts_enabled || prefs.budget_alerts_enabled || prefs.goal_notifications_enabled), 'Предупреждает о лимитах и бюджетах и напоминает о финансовых целях.')}
+              ${notificationBlock('Отчёты', 'reports', prefs.reports?.enabled ?? (prefs.weekly_reports_enabled || prefs.monthly_reports_enabled), 'Присылает финансовую сводку за неделю и месяц.')}
+              ${row('Тихие часы', prefs.quiet_hours?.enabled || prefs.quiet_hours_enabled ? `${prefs.quiet_hours?.start || prefs.quiet_hours_start || '22:30'}–${prefs.quiet_hours?.end || prefs.quiet_hours_end || '08:00'}` : 'Выкл', 'В это время автоматические сообщения не будут вас беспокоить.', 'quiet-hours-open')}
             ` : '<p class="caption">Настройки недоступны.</p>'}
           </div>
         `)}
@@ -198,4 +189,39 @@ export function AdditionalMenu(profile: ProfileData | null, canAddToHome: boolea
 
 export function InfoPanel(_title: string, body: string): string {
   return `<div class="form-grid"><p class="caption">${esc(body)}</p><button class="button primary" data-action="close-sheet" type="button">Готово</button></div>`;
+}
+
+export function ExportForm(draft: Record<string, unknown> | undefined, preview: { period: { start_date: string; end_date: string }; count: number; totals_by_currency: Record<string, { income: string; expense: string; count: number }> } | undefined, sent = false, saving = false, error = ''): string {
+  const preset = String(draft?.preset || 'month');
+  const totals = preview?.totals_by_currency || {};
+  return `
+    <form class="form-grid" data-action="export-preview">
+      <label class="field">Период<select class="select" name="preset">
+        ${[
+          ['today', 'Сегодня'],
+          ['7', '7 дней'],
+          ['14', '14 дней'],
+          ['month', 'Этот месяц'],
+          ['previous_month', 'Прошлый месяц'],
+          ['year', 'Этот год'],
+          ['previous_year', 'Прошлый год'],
+          ['custom', 'Свой период'],
+        ].map(([key, label]) => `<option value="${key}" ${preset === key ? 'selected' : ''}>${label}</option>`).join('')}
+      </select></label>
+      <div class="custom-export-fields" ${preset === 'custom' ? '' : 'hidden'}>
+        <label class="field">Дата начала<input class="input" type="date" name="start_date" value="${esc(String(draft?.start_date || ''))}" /></label>
+        <label class="field">Дата конца<input class="input" type="date" name="end_date" value="${esc(String(draft?.end_date || ''))}" /></label>
+      </div>
+      <button class="button secondary" type="submit" ${saving ? 'disabled' : ''}>Показать предпросмотр</button>
+    </form>
+    ${preview ? `<div class="preview-panel">
+      <strong>Экспорт операций</strong>
+      <div class="detail-row light"><span>Период</span><strong>${esc(preview.period.start_date)} — ${esc(preview.period.end_date)}</strong></div>
+      <div class="detail-row light"><span>Операций</span><strong>${preview.count}</strong></div>
+      ${Object.entries(totals).map(([currency, total]) => `<div class="detail-row light"><span>${esc(currency)}</span><strong>Расходы ${formatMoneyString(total.expense, currency)} · Доходы ${formatMoneyString(total.income, currency)}</strong></div>`).join('') || '<p class="caption">За период операций нет.</p>'}
+      <button class="button primary" data-action="export-send" type="button" ${saving ? 'disabled' : ''}>Получить XLSX в Telegram</button>
+    </div>` : ''}
+    ${sent ? '<div class="success-panel"><strong>Готово.</strong><p>Файл отправлен в чат с КопиPaste.</p></div>' : ''}
+    ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+  `;
 }

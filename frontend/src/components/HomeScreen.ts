@@ -52,6 +52,19 @@ function progressBar(percent?: number): string {
   return `<div class="progress-line" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><span style="width:${value}%"></span></div><small>${value}%</small>`;
 }
 
+function carousel(id: 'challenge' | 'focus' | 'reminder', items: string[], index: number, label: string): string {
+  if (!items.length) return '';
+  const current = Math.max(0, Math.min(index || 0, items.length - 1));
+  return `
+    <div class="home-carousel" data-carousel="${id}" data-index="${current}" tabindex="0" role="group" aria-label="${esc(label)}">
+      <div class="home-carousel-track">${items[current]}</div>
+      ${items.length > 1 ? `<div class="carousel-dots" aria-label="${esc(label)}: страницы">
+        ${items.map((_item, dot) => `<button type="button" data-action="carousel-dot" data-carousel="${id}" data-index="${dot}" aria-label="${dot + 1}/${items.length}" class="${dot === current ? 'active' : ''}"></button>`).join('')}
+      </div>` : ''}
+    </div>
+  `;
+}
+
 function reminderCard(reminder: HomeReminderSummary | null | undefined): string {
   const state = reminder?.state || 'empty';
   const title = reminder?.title || 'Нет запланированных событий';
@@ -73,6 +86,12 @@ function reminderCard(reminder: HomeReminderSummary | null | undefined): string 
   `;
 }
 
+type HomeIndices = {
+  challenge: number;
+  focus: number;
+  reminder: number;
+};
+
 function activityCard(overview: Overview | null): string {
   const activity = overview?.activity;
   const streak = activity?.current_streak || 0;
@@ -88,12 +107,33 @@ function activityCard(overview: Overview | null): string {
   `;
 }
 
-export function HomeScreen(overview: Overview | null, recent: Operation[], fallbackCurrency: string, canWrite: boolean, filters: GlobalFinancialFilters = { period: 'current_month', operation_type: 'all', category: 'all' }): string {
+export function HomeScreen(overview: Overview | null, recent: Operation[], fallbackCurrency: string, canWrite: boolean, filters: GlobalFinancialFilters = { period: 'current_month', operation_type: 'all', category: 'all' }, indices: HomeIndices = { challenge: 0, focus: 0, reminder: 0 }): string {
   const period = overview?.period ? `${overview.period.start_date} — ${overview.period.end_date}` : '';
   const emptyAction = canWrite ? `<button class="button primary" data-action="open-add" data-kind="expense">${icon('expense')}Добавить первую операцию</button>` : '';
   const challenge = overview?.challenge;
   const focus = overview?.focus;
   const insight = overview?.insight;
+  const challenges = overview?.challenges?.length ? overview.challenges : challenge ? [challenge] : [];
+  const focusItems = overview?.focus_items?.length ? overview.focus_items : focus ? [focus] : [];
+  const reminders = overview?.reminders?.length ? overview.reminders : overview?.reminder ? [overview.reminder] : [];
+  const challengeCards = challenges.map((item) => `
+    <button class="smart-card" data-action="home-challenge" type="button">
+      <span>Челлендж · ${esc(item.period_key === 'week' ? 'Неделя' : item.period_key === 'month' ? 'Месяц' : 'Сегодня')}</span>
+      <strong>${esc(item.completed ? 'Готово' : item.title)}</strong>
+      <small>${esc(`${item.progress}/${item.target} · ${item.description}`)}</small>
+      ${progressBar(Math.round((Number(item.progress || 0) / Math.max(1, Number(item.target || 1))) * 100))}
+    </button>
+  `);
+  const focusCards = focusItems.map((item) => `
+    <button class="smart-card" data-action="home-focus" data-mode="${esc(item.target_mode || 'goals')}" type="button">
+      <span>Фокус</span>
+      <strong>${esc(item.title || 'Фокус свободен')}</strong>
+      <small>${esc(item.description || 'Цели и лимиты появятся здесь')}</small>
+      ${item.percent !== undefined ? progressBar(item.percent) : ''}
+      ${item.projected_percent ? `<small>Прогноз к концу периода: ${esc(item.projected_percent)}%</small>` : ''}
+    </button>
+  `);
+  const reminderCards = reminders.map((item) => reminderCard(item));
   return `
     <section class="screen home-screen">
       <div class="home-hero-grid">
@@ -134,24 +174,14 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
         </div>
       </div>
       <div class="smart-home-grid" data-testid="smart-home-grid">
-        <button class="smart-card" data-action="home-challenge" type="button" ${challenge ? '' : 'disabled'}>
-          <span>Челлендж дня</span>
-          <strong>${esc(challenge?.completed ? 'Готово' : challenge?.title || 'Нет задания')}</strong>
-          <small>${esc(challenge ? `${challenge.progress}/${challenge.target} · ${challenge.description}` : 'Появится после загрузки')}</small>
-        </button>
-        <button class="smart-card" data-action="home-focus" data-mode="${esc(focus?.target_mode || 'goals')}" type="button">
-          <span>Фокус</span>
-          <strong>${esc(focus?.title || 'Фокус свободен')}</strong>
-          <small>${esc(focus?.description || 'Цели и лимиты появятся здесь')}</small>
-          ${focus?.percent !== undefined ? progressBar(focus.percent) : ''}
-          ${focus?.projected_percent ? `<small>Прогноз к концу периода: ${esc(focus.projected_percent)}%</small>` : ''}
-        </button>
+        ${carousel('challenge', challengeCards, indices.challenge, 'Челленджи')}
+        ${carousel('focus', focusCards, indices.focus, 'Фокус')}
         <button class="smart-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
           <span>Инсайт периода</span>
           <strong>${esc(insight?.title || overview?.info?.text || 'Период')}</strong>
           <small>${esc(insight?.text || overview?.info?.text || 'Данные обновятся после операций')}</small>
         </button>
-        ${reminderCard(overview?.reminder)}
+        ${carousel('reminder', reminderCards, indices.reminder, 'Напоминания')}
       </div>
       ${SectionHeader(
         'Последние операции',
