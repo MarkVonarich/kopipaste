@@ -38,6 +38,7 @@ let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 let chartInstances: Chart[] = [];
+let homeScreenEventsRegistered = false;
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -83,6 +84,18 @@ function applyTheme(mode: ThemeMode): void {
     const value = params[source];
     if (value) root.setProperty(target, value);
   }
+}
+
+function registerHomeScreenEvents(): void {
+  if (homeScreenEventsRegistered) return;
+  const tg = getTelegramWebApp();
+  if (typeof tg?.onEvent !== 'function') return;
+  homeScreenEventsRegistered = true;
+  tg.onEvent('homeScreenAdded', () => {
+    state.homeScreenStatus = 'added';
+    showToast('КопиPaste добавлен на главный экран');
+    if (state.sheet === 'menu') render();
+  });
 }
 
 function workspaceLabel(workspace: Workspace): string {
@@ -347,7 +360,7 @@ function renderSheet(): string {
     return BottomSheet('Тихие часы', QuietHoursForm(profile?.notifications, state.saving, state.saveError));
   }
   if (state.sheet === 'menu') {
-    return BottomSheet('Меню', AdditionalMenu(profile, state.homeScreenStatus || 'unknown'));
+    return BottomSheet('Меню', AdditionalMenu(profile, state.homeScreenStatus || 'unknown', getTelegramWebApp()?.platform || ''));
   }
   if (state.sheet === 'actions') {
     return BottomSheet('Добавить операцию', `
@@ -519,7 +532,8 @@ async function bootstrap(): Promise<void> {
   }
   initTelegramShell();
   const tg = getTelegramWebApp();
-  tg?.onEvent('themeChanged', () => applyTheme(state.theme));
+  tg?.onEvent?.('themeChanged', () => applyTheme(state.theme));
+  registerHomeScreenEvents();
   tg?.BackButton?.onClick(() => closeSheet());
   try {
     const boot = await api.bootstrap();
@@ -928,9 +942,10 @@ function wireEvents(): void {
     state.tab = 'analytics';
     await loadScreen();
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async () => {
-    await api.track('mini_app_home_reminder_opened', { result: overview?.reminder?.state || 'empty', source: 'mini_app' });
-    const reminderId = overview?.reminder?.id;
+  app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const reminderId = Number(button.dataset.id || 0);
+    await api.track('mini_app_home_reminder_opened', { result: button.dataset.state || 'empty', source: 'mini_app' });
     if (!reminderId) {
       state.tab = 'plans';
       state.plansMode = 'reminders';
@@ -1249,11 +1264,13 @@ function wireEvents(): void {
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
+    registerHomeScreenEvents();
     state.sheet = 'menu';
-    state.homeScreenStatus = 'unknown';
+    if (state.homeScreenStatus !== 'added' && state.homeScreenStatus !== 'pending') state.homeScreenStatus = 'unknown';
     render();
     void checkHomeScreenStatus().then((status) => {
       if (state.sheet !== 'menu') return;
+      if (state.homeScreenStatus === 'added' || state.homeScreenStatus === 'pending') return;
       state.homeScreenStatus = status;
       render();
     });
@@ -1344,15 +1361,17 @@ function wireEvents(): void {
     if (navigator.share) await navigator.share({ title: 'Finuchet', text: 'КопиPaste для учёта финансов' }).catch(() => undefined);
   });
   app.querySelector<HTMLButtonElement>('[data-action="add-to-home"]')?.addEventListener('click', async () => {
+    if (state.homeScreenStatus === 'added') return;
+    registerHomeScreenEvents();
     const requested = requestAddToHomeScreen();
     if (!requested) {
       state.homeScreenStatus = 'unsupported';
       render();
       return;
     }
-    showToast('Запрос отправлен в Telegram');
+    state.homeScreenStatus = 'pending';
+    showToast('Подтвердите добавление в Telegram');
     await api.track('mini_app_add_to_home_requested', { source: 'mini_app' });
-    state.homeScreenStatus = await checkHomeScreenStatus();
     render();
   });
   app.querySelector<HTMLButtonElement>('[data-action="report-issue"]')?.addEventListener('click', () => {

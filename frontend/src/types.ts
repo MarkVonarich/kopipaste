@@ -374,5 +374,5 @@ export type AppState = {
     totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
   };
   exportSent?: boolean;
-  homeScreenStatus?: 'unsupported' | 'unknown' | 'added' | 'missed';
+  homeScreenStatus?: 'unsupported' | 'unknown' | 'added' | 'missed' | 'pending';
 };

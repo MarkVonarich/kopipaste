@@ -1606,16 +1606,9 @@ class MiniAppAPI:
                 group_items.append(item)
             if other_total > 0:
                 share = int((other_total / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0
-                other_key = normalized_category_key("Прочее")
-                existing_other = next((item for item in group_items if normalized_category_key(item["category"]) == other_key), None)
-                if existing_other:
-                    existing_other["total"] += other_total
-                    existing_other["count"] += other_count
-                    existing_other["share"] = int((existing_other["total"] / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0
-                else:
-                    item = {"category": "Прочее", "currency": currency, "total": other_total, "count": other_count, "share": share}
-                    items.append(item)
-                    group_items.append(item)
+                item = {"category": "Остальные", "currency": currency, "total": other_total, "count": other_count, "share": share}
+                items.append(item)
+                group_items.append(item)
             groups[currency] = {"currency": currency, "total": currency_total, "items": group_items}
         return {"type": "income" if op_type == "Доходы" else "expense", "top_n": CHART_TOP_N, "currency_groups": groups, "items": items}
 

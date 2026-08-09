@@ -137,6 +137,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
   `);
   const focusActionAttrs = focusItems.map((item) => `data-mode="${esc(item.target_mode || 'goals')}"`);
   const reminderCards = reminders.map((item) => reminderCard(item));
+  const reminderActionAttrs = reminders.map((item) => `${item?.id ? `data-id="${esc(item.id)}"` : ''} data-state="${esc(item?.state || 'empty')}"`);
   return `
     <section class="screen home-screen">
       <div class="home-hero-grid">
@@ -169,7 +170,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
       <div class="smart-home-grid" data-testid="smart-home-grid">
         ${carousel('challenge', challengeCards, indices.challenge, 'Челленджи', 'home-challenge')}
         ${carousel('focus', focusCards, indices.focus, 'Фокус', 'home-focus', focusActionAttrs)}
-        ${carousel('reminder', reminderCards, indices.reminder, 'Напоминания', 'home-reminder')}
+        ${carousel('reminder', reminderCards, indices.reminder, 'Напоминания', 'home-reminder', reminderActionAttrs)}
         <button class="smart-card insight-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
           <span>Инсайт периода</span>
           <strong>${esc(insight?.title || overview?.info?.text || 'Период')}</strong>

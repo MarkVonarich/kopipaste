@@ -497,15 +497,26 @@ textarea:disabled {
 }
 
 .carousel-dots button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.carousel-dots button::before {
+  content: "";
   width: 7px;
   height: 7px;
-  flex: 0 0 7px;
-  border: 0;
   border-radius: 999px;
   background: var(--divider);
 }
 
-.carousel-dots button.active {
+.carousel-dots button.active::before {
   background: var(--accent);
 }
 

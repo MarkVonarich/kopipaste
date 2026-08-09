@@ -1,11 +1,13 @@
 import asyncio
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 
 class _Message:
     def __init__(self, chat_id: int, text: str = ""):
         self.chat = SimpleNamespace(id=chat_id)
+        self.message_id = 1
         self.text = text
         self.replies = []
 
@@ -226,3 +228,46 @@ def test_alias_hit_passes_merchant_to_final_operation_commit(monkeypatch):
         "merchant": "дринкит",
         "pending": {},
     }]
+
+
+def test_record_operation_explicit_merchant_beats_stale_pending_comment(monkeypatch):
+    from services import records
+    from services.operations import RecordedOperation
+
+    captured = {}
+
+    def _record_financial_operation(**kwargs):
+        captured.update(kwargs)
+        return RecordedOperation(
+            operation_id=77,
+            workspace_id=None,
+            actor_user_id=55,
+            user_id=55,
+            chat_id=55,
+            amount=Decimal("590"),
+            currency="RUB",
+            type=kwargs["op_type"],
+            category=kwargs["category"],
+            operation_date=kwargs["op_date"],
+            source=kwargs["source"],
+            comment=kwargs["comment"],
+        )
+
+    class _Bot:
+        async def send_message(self, **_kwargs):
+            return SimpleNamespace(message_id=1)
+
+    async def _skip_limit_alert(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(records, "record_financial_operation", _record_financial_operation)
+    monkeypatch.setattr(records, "get_user_display_name", lambda *_args, **_kwargs: "User")
+    monkeypatch.setattr(records, "get_user_currency", lambda _user_id: "RUB")
+    monkeypatch.setattr(records, "send_operation_limit_alert", _skip_limit_alert)
+
+    context = SimpleNamespace(user_data={"pending": {"merch": "кофе"}}, bot=_Bot())
+    message = _Message(chat_id=55, text="пятерочка 590")
+
+    asyncio.run(records.record_operation("Продукты", 590, datetime(2026, 8, 9), "Расходы", _text_update(message), context, merchant="пятерочка"))
+
+    assert captured["comment"] == "пятерочка"

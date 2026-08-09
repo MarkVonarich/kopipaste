@@ -8,7 +8,7 @@ export type TelegramWebApp = {
   themeParams?: TelegramThemeParams;
   ready: () => void;
   expand: () => void;
-  onEvent: (event: 'themeChanged' | 'backButtonClicked' | 'homeScreenAdded' | 'homeScreenChecked', callback: (eventData?: { status?: HomeScreenStatus }) => void) => void;
+  onEvent?: (event: 'themeChanged' | 'backButtonClicked' | 'homeScreenAdded' | 'homeScreenChecked', callback: (eventData?: { status?: HomeScreenStatus }) => void) => void;
   offEvent?: (event: 'themeChanged' | 'backButtonClicked' | 'homeScreenAdded' | 'homeScreenChecked', callback: (eventData?: { status?: HomeScreenStatus }) => void) => void;
   addToHomeScreen?: () => void;
   checkHomeScreenStatus?: (callback?: (status: HomeScreenStatus) => void) => void;
@@ -25,7 +25,7 @@ export type TelegramWebApp = {
   };
 };
 
-export type HomeScreenStatus = 'unsupported' | 'unknown' | 'added' | 'missed';
+export type HomeScreenStatus = 'unsupported' | 'unknown' | 'added' | 'missed' | 'pending';
 
 const TELEGRAM_LAUNCH_MESSAGE = 'Откройте приложение через кнопку в Telegram-боте';
 
@@ -119,12 +119,20 @@ export function checkHomeScreenStatus(): Promise<HomeScreenStatus> {
   }
   return new Promise((resolve) => {
     let settled = false;
+    let checkedEvent: (eventData?: { status?: HomeScreenStatus }) => void = () => undefined;
     const done = (status: HomeScreenStatus | undefined) => {
       if (settled) return;
       settled = true;
+      try {
+        tg?.offEvent?.('homeScreenChecked', checkedEvent);
+      } catch {
+        // Optional Telegram event cleanup must not break status checks.
+      }
       resolve(status || 'unknown');
     };
+    checkedEvent = (eventData?: { status?: HomeScreenStatus }) => done(eventData?.status);
     try {
+      tg?.onEvent?.('homeScreenChecked', checkedEvent);
       checkStatus((status) => done(status));
     } catch {
       done('unknown');

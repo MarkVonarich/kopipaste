@@ -102,6 +102,31 @@ describe('acceptance components', () => {
     expect(html).not.toContain('<button class="smart-card"');
   });
 
+  it('renders the current Home reminder slide id on the action button', () => {
+    const second = HomeScreen({
+      ...overview,
+      reminders: [
+        { state: 'upcoming', id: 10, title: 'A', event_date: '2026-08-10', status_text: 'A status', overdue_days: 0 },
+        { state: 'overdue', id: 20, title: 'B', event_date: '2026-08-11', status_text: 'B status', overdue_days: 1 },
+        { state: 'upcoming', id: 30, title: 'C', event_date: '2026-08-12', status_text: 'C status', overdue_days: 0 },
+      ],
+    }, [], 'RUB', true, { period: 'current_month', operation_type: 'all', category: 'all' }, { challenge: 0, focus: 0, reminder: 1 });
+    const third = HomeScreen({
+      ...overview,
+      reminders: [
+        { state: 'upcoming', id: 10, title: 'A', event_date: '2026-08-10', status_text: 'A status', overdue_days: 0 },
+        { state: 'overdue', id: 20, title: 'B', event_date: '2026-08-11', status_text: 'B status', overdue_days: 1 },
+        { state: 'upcoming', id: 30, title: 'C', event_date: '2026-08-12', status_text: 'C status', overdue_days: 0 },
+      ],
+    }, [], 'RUB', true, { period: 'current_month', operation_type: 'all', category: 'all' }, { challenge: 0, focus: 0, reminder: 2 });
+
+    expect(second).toContain('data-action="home-reminder" type="button" data-id="20" data-state="overdue"');
+    expect(second).toContain('<strong>B</strong>');
+    expect(second).not.toContain('<strong>A</strong>');
+    expect(third).toContain('data-action="home-reminder" type="button" data-id="30" data-state="upcoming"');
+    expect(third).toContain('<strong>C</strong>');
+  });
+
   it('renders focus projected risk without replacing actual progress', () => {
     const html = HomeScreen({
       ...overview,
@@ -585,6 +610,19 @@ describe('acceptance components', () => {
     expect(html).toContain('class="custom-export-fields" >');
     expect(html).toContain('value="2026-08-01"');
     expect(html).toContain('value="2026-08-09"');
+  });
+
+  it('renders platform-aware Add to Home unsupported fallback copy', () => {
+    const ios = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, 'unsupported', 'ios');
+    const android = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, 'unsupported', 'android');
+    const desktop = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, 'unsupported', 'tdesktop');
+    const added = AdditionalMenu({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test' }, 'added', 'ios');
+
+    expect(ios).toContain('Обновите Telegram');
+    expect(android).toContain('Telegram для Android');
+    expect(desktop).toContain('поддерживаемых мобильных версиях Telegram');
+    expect(added).toContain('Добавлено');
+    expect(added).not.toContain('data-action="add-to-home"');
   });
 
   it('shows Telegram display name before preferred name, then returns to it after clear', () => {

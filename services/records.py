@@ -361,7 +361,7 @@ async def record_operation(cat: str, amt, dt,
     chat_type = getattr(chat, 'type', 'private') or 'private'
     pending = context.user_data.get('pending') or {}
     source = pending.get('source') or context.user_data.get('operation_source') or 'text'
-    operation_comment = (pending.get('merch') or merchant or note or '').strip()[:200]
+    operation_comment = (merchant or pending.get('merch') or note or '').strip()[:200]
 
     # Сохраняем операцию в БД через единый слой.
     recorded = record_financial_operation(

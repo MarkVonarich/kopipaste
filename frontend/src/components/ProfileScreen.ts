@@ -171,13 +171,25 @@ export function QuietHoursForm(prefs: NotificationPreferences | undefined, savin
   </form>`;
 }
 
-export function AdditionalMenu(profile: ProfileData | null, homeScreenStatus: 'unsupported' | 'unknown' | 'added' | 'missed' = 'unknown'): string {
+function addToHomeUnsupportedText(platform = ''): string {
+  const value = platform.toLowerCase();
+  if (value.includes('ios')) {
+    return 'В этой версии Telegram автоматическое добавление на главный экран недоступно. Обновите Telegram и попробуйте снова.';
+  }
+  if (value.includes('android')) {
+    return 'В этой версии Telegram для Android автоматическое добавление на главный экран недоступно. Обновите Telegram и попробуйте снова.';
+  }
+  return 'Добавление на главный экран доступно в поддерживаемых мобильных версиях Telegram.';
+}
+
+export function AdditionalMenu(profile: ProfileData | null, homeScreenStatus: 'unsupported' | 'unknown' | 'added' | 'missed' | 'pending' = 'unknown', platform = ''): string {
   const canAddToHome = homeScreenStatus === 'unknown' || homeScreenStatus === 'missed';
   return `
     <div class="form-grid">
       ${canAddToHome ? '<button class="button" data-action="add-to-home">Добавить на главный экран</button>' : ''}
       ${homeScreenStatus === 'added' ? '<div class="detail-row"><span>Главный экран</span><strong>Добавлено</strong></div>' : ''}
-      ${homeScreenStatus === 'unsupported' ? '<div class="detail-row"><span>Главный экран</span><strong>Недоступно</strong></div>' : ''}
+      ${homeScreenStatus === 'pending' ? '<div class="detail-row"><span>Главный экран</span><strong>Подтвердите добавление в Telegram</strong></div>' : ''}
+      ${homeScreenStatus === 'unsupported' ? `<div class="detail-row"><span>Главный экран</span><strong>${esc(addToHomeUnsupportedText(platform))}</strong></div>` : ''}
       <button class="button" data-action="share-app">Поделиться Finuchet</button>
       ${profile?.help_url ? `<a class="button" href="${esc(profile.help_url)}" target="_blank" rel="noreferrer">Помощь</a>` : ''}
       <button class="button" data-action="report-issue">Сообщить о проблеме</button>
