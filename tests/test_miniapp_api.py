@@ -156,6 +156,28 @@ def test_activity_calendar_summary_counts_streak_for_selected_slice(monkeypatch)
     assert activity["label"] == "Активность · Food"
 
 
+def test_activity_calendar_keeps_yesterday_streak_on_open_current_day(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters(
+        workspace_ids=[10],
+        all_scope=False,
+        start=date(2026, 8, 1),
+        end=date(2026, 8, 4),
+        period_key="custom",
+        operation_type="all",
+        category=None,
+        where_sql="workspace_id = ANY(%s) AND op_date BETWEEN %s AND %s",
+        params=([10], date(2026, 8, 1), date(2026, 8, 4)),
+    )
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 4))
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda *_args, **_kwargs: [(date(2026, 8, 2), 1), (date(2026, 8, 3), 2)])
+
+    activity = api._activity_calendar(api.request(42), tx)
+
+    assert activity["current_streak"] == 2
+    assert activity["days"][-1]["count"] == 0
+
+
 def test_home_reminder_ignores_completed_today_events(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr("miniapp.api.list_reminders", lambda *_args, **_kwargs: [])

@@ -172,12 +172,12 @@ def test_notification_toggle_refreshes_same_message_and_label(monkeypatch):
     asyncio.run(callbacks.callback_handler(_update(query), context))
 
     assert query.answers[-1][0] == "Утренние уведомления включены"
-    assert any("✅ Утро: включено" == button.text for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
+    assert any("✅ Ежедневные уведомления" == button.text for row in query.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
 
     second = _CallbackQuery("notif_toggle|morning")
     asyncio.run(callbacks.callback_handler(_update(second), context))
     assert state["morning_enabled"] is False
-    assert any("⛔ Утро: выключено" == button.text for row in second.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
+    assert any("✅ Ежедневные уведомления" == button.text for row in second.edits[-1][1]["reply_markup"].inline_keyboard for button in row)
 
 
 def test_quiet_hours_cross_midnight_boundaries():

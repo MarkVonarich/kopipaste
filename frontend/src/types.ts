@@ -3,7 +3,7 @@ export type ThemeMode = 'telegram' | 'light' | 'dark';
 export type PeriodKey = 'current_week' | 'current_month' | 'previous_month' | 'custom';
 export type GlobalOperationType = 'all' | 'expense' | 'income';
 export type OperationType = 'Расходы' | 'Доходы';
-export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'categories' | 'notifications' | 'export-data' | 'premium' | 'help' | 'legal';
+export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'notifications' | 'export-data' | 'premium' | 'help' | 'legal';
 
 export type Workspace = {
   workspace_id: number | 'all' | null;
@@ -273,6 +273,10 @@ export type NotificationPreferences = {
   quiet_hours_start?: string | null;
   quiet_hours_end?: string | null;
   timezone: string;
+  daily_notifications?: { enabled: boolean; morning_time: string; evening_time: string };
+  plans_control?: { enabled: boolean };
+  reports?: { enabled: boolean };
+  quiet_hours?: { enabled: boolean; start: string; end: string };
 };
 
 export type PremiumInfo = {
@@ -290,6 +294,18 @@ export type CategoryOption = {
   source: string;
   operation_count: number;
   has_budget: boolean;
+  token?: string;
+  protected?: boolean;
+  references?: {
+    operations: number;
+    drafts: number;
+    category_limits: number;
+    category_budget_groups: number;
+    reminders: number;
+    aliases: number;
+    ml_observations: number;
+    total: number;
+  };
 };
 
 export type Bootstrap = {
@@ -324,10 +340,11 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
   profileAccordion?: ProfileSection;
   selectedWorkspaceId?: number;
-  plansMode?: 'goals' | 'limits' | 'reminders';
+  plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';
+  categoryType?: 'expense' | 'income';
   analyticsFilters?: {
     categoryType: 'expense' | 'income';
     dynamicsType: 'expense' | 'income' | 'both';
@@ -344,4 +361,15 @@ export type AppState = {
   reminderIdempotencyKey?: string;
   limitCreateScope?: 'all_expenses' | 'category';
   reminderDraft?: Partial<ReminderPayload>;
+  homeChallengeIndex?: number;
+  homeFocusIndex?: number;
+  homeReminderIndex?: number;
+  exportDraft?: Record<string, unknown>;
+  exportPreview?: {
+    preset: string;
+    period: { start_date: string; end_date: string };
+    count: number;
+    totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
+  };
+  exportSent?: boolean;
 };

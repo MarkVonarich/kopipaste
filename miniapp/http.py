@@ -88,6 +88,16 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.update_workspace(req, workspace_id, body))
         if method == "GET" and path == "/miniapp/api/categories":
             return _json_response(start_response, 200, api.categories(req, params))
+        if method == "GET" and path == "/miniapp/api/categories/manage":
+            return _json_response(start_response, 200, api.managed_categories(req, params))
+        if method == "POST" and path == "/miniapp/api/categories":
+            return _json_response(start_response, 200, api.create_category(req, body))
+        if path.startswith("/miniapp/api/categories/"):
+            token = path.rsplit("/", 1)[-1]
+            if method == "PATCH":
+                return _json_response(start_response, 200, api.update_category(req, token, body))
+            if method == "DELETE":
+                return _json_response(start_response, 200, api.delete_category(req, token, body))
         if method == "GET" and path == "/miniapp/api/overview":
             return _json_response(start_response, 200, api.overview(req, params))
         if method == "GET" and path == "/miniapp/api/operations":

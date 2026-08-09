@@ -20,6 +20,12 @@ TOGGLE_FIELDS = {
     "goals": "goal_notifications_enabled",
 }
 
+GROUPED_NOTIFICATION_FIELDS = {
+    "daily": ("morning_enabled", "evening_enabled"),
+    "plans": ("limit_alerts_enabled", "budget_alerts_enabled", "goal_notifications_enabled"),
+    "reports": ("weekly_reports_enabled", "monthly_reports_enabled"),
+}
+
 
 def _preferences_rows(user_id: int):
     try:
@@ -109,6 +115,90 @@ def get_notification_preferences(user_id: int) -> dict:
         "quiet_hours_end": r[14],
         "timezone": r[15] or DEFAULT_TIMEZONE,
     }
+
+
+def grouped_notification_preferences(user_id: int) -> dict:
+    prefs = get_notification_preferences(user_id)
+    daily_enabled = bool(prefs.get("morning_enabled", True) or prefs.get("evening_enabled", True))
+    plans_enabled = bool(
+        prefs.get("limit_alerts_enabled", True)
+        or prefs.get("budget_alerts_enabled", True)
+        or prefs.get("goal_notifications_enabled", False)
+    )
+    reports_enabled = bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))
+    return {
+        **prefs,
+        "daily_notifications": {
+            "enabled": daily_enabled,
+            "morning_time": prefs.get("morning_time") or "08:30",
+            "evening_time": prefs.get("evening_time") or "20:30",
+        },
+        "plans_control": {"enabled": plans_enabled},
+        "reports": {"enabled": reports_enabled},
+        "quiet_hours": {
+            "enabled": bool(prefs.get("quiet_hours_enabled")),
+            "start": prefs.get("quiet_hours_start") or "22:30",
+            "end": prefs.get("quiet_hours_end") or "08:00",
+        },
+        "timezone": prefs.get("timezone") or DEFAULT_TIMEZONE,
+    }
+
+
+def _set_fields(user_id: int, fields: tuple[str, ...], enabled: bool) -> dict:
+    assignments = ", ".join(f"{field}=%s" for field in fields)
+    values = [bool(enabled)] * len(fields)
+    insert_columns = ", ".join(fields)
+    insert_placeholders = ", ".join(["%s"] * len(fields))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO public.notification_preferences (user_id, {insert_columns})
+                VALUES (%s, {insert_placeholders})
+                ON CONFLICT (user_id) DO UPDATE
+                   SET {assignments}, updated_at=now()
+                """,
+                (user_id, *values, *values),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    if not enabled:
+        try:
+            from services.automatic_notifications import suppress_pending_preference_notifications
+
+            for key in ("morning", "evening"):
+                if key in {"morning", "evening"} and f"{key}_enabled" in fields:
+                    suppress_pending_preference_notifications(user_id, key)
+        except Exception:
+            pass
+    return grouped_notification_preferences(user_id)
+
+
+def set_daily_notifications_enabled(user_id: int, enabled: bool) -> dict:
+    return _set_fields(user_id, GROUPED_NOTIFICATION_FIELDS["daily"], enabled)
+
+
+def set_plans_notifications_enabled(user_id: int, enabled: bool) -> dict:
+    return _set_fields(user_id, GROUPED_NOTIFICATION_FIELDS["plans"], enabled)
+
+
+def set_reports_notifications_enabled(user_id: int, enabled: bool) -> dict:
+    return _set_fields(user_id, GROUPED_NOTIFICATION_FIELDS["reports"], enabled)
+
+
+def set_grouped_notification_preference(user_id: int, group: str, enabled: bool) -> dict:
+    if group == "daily":
+        return set_daily_notifications_enabled(user_id, enabled)
+    if group == "plans":
+        return set_plans_notifications_enabled(user_id, enabled)
+    if group == "reports":
+        return set_reports_notifications_enabled(user_id, enabled)
+    raise KeyError(group)
 
 
 def toggle_notification_preference(user_id: int, key: str) -> bool:
@@ -247,6 +337,33 @@ def set_quiet_hours_time(user_id: int, field: str, value: str) -> dict:
                     """,
                     (user_id, parsed, default_other),
                 )
+        conn.commit()
+        return get_notification_preferences(user_id)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def set_daily_notification_time(user_id: int, field: str, value: str) -> dict:
+    if field not in {"morning", "evening"}:
+        raise ValueError("invalid_field")
+    parsed = parse_hhmm(value)
+    column = "morning_time" if field == "morning" else "evening_time"
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO public.notification_preferences (user_id, {column})
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET {column}=EXCLUDED.{column},
+                       updated_at=now()
+                """,
+                (user_id, parsed),
+            )
         conn.commit()
         return get_notification_preferences(user_id)
     except Exception:

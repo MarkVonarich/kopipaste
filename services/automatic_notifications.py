@@ -203,6 +203,8 @@ def suppress_pending_preference_notifications(user_id: int, preference_key: str,
 
 
 def _automatic_type_preference_enabled(user_id: int, notification_type: str) -> bool:
+    if notification_type in {"challenge_prompt", "challenge_completed", "achievement_granted"}:
+        return False
     if notification_type not in {"day_nudge", "evening_reminder"}:
         return True
     try:
@@ -217,6 +219,70 @@ def _automatic_type_preference_enabled(user_id: int, notification_type: str) -> 
     if notification_type == "evening_reminder":
         return bool(prefs.get("evening_enabled", True))
     return True
+
+
+def _automatic_delivery_skip_reason(row: dict[str, Any], *, now_utc: datetime | None = None) -> str | None:
+    notification_type = str(row.get("notification_type") or "")
+    kind = {"day_nudge": "morning", "evening_reminder": "evening"}.get(notification_type)
+    if not kind:
+        return None
+    user_id = int(row["user_id"])
+    try:
+        from jobs.daily import is_notification_due
+        from services.notification_engine import preferences_from_dict, should_send_now
+        from services.notification_preferences import get_notification_preferences
+
+        prefs = get_notification_preferences(user_id)
+        enabled_key = "morning_enabled" if kind == "morning" else "evening_enabled"
+        if not prefs.get(enabled_key, True):
+            return "preference_disabled"
+        resolved = resolve_user_timezone(user_id)
+        timezone_name = resolved.timezone_name
+        now = now_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        local_now = now.astimezone(ZoneInfo(timezone_name))
+        original = row.get("original_scheduled_at")
+        if isinstance(original, datetime):
+            if original.tzinfo is None:
+                original = original.replace(tzinfo=timezone.utc)
+            if original.astimezone(ZoneInfo(timezone_name)).date() != local_now.date():
+                return "stale_schedule"
+        if not should_send_now(local_now, preferences_from_dict(prefs)):
+            return "quiet_hours"
+        if not is_notification_due(user_id, kind, local_now, prefs):
+            return "outside_delivery_window"
+    except Exception as exc:
+        log.info("automatic_notification_delivery_check_failed type=%s reason=%s", notification_type, type(exc).__name__)
+        return None
+    return None
+
+
+def _log_automatic_notification_skipped(row: dict[str, Any], reason: str) -> None:
+    user_id = int(row.get("user_id") or 0)
+    notification_type = str(row.get("notification_type") or "")
+    try:
+        from jobs.daily import _notification_time
+        from services.notification_preferences import get_notification_preferences
+
+        prefs = get_notification_preferences(user_id)
+        kind = "morning" if notification_type == "day_nudge" else "evening" if notification_type == "evening_reminder" else ""
+        configured = _notification_time(user_id, prefs, kind) if kind else None
+        tz_name = resolve_user_timezone(user_id).timezone_name
+        local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+        log.info(
+            "automatic_notification_skipped user_id=%s notification_type=%s reason=%s timezone_name=%s local_hour=%s local_minute=%s configured_hour=%s configured_minute=%s",
+            user_id,
+            notification_type,
+            reason,
+            tz_name,
+            local_now.hour,
+            local_now.minute,
+            configured.hour if configured else None,
+            configured.minute if configured else None,
+        )
+    except Exception:
+        log.info("automatic_notification_skipped user_id=%s notification_type=%s reason=%s", user_id, notification_type, reason)
 
 
 def _insert_deferred(
@@ -726,6 +792,12 @@ async def process_due_notifications(context: ContextTypes.DEFAULT_TYPE, *, limit
         try:
             if not _automatic_type_preference_enabled(row["user_id"], row["notification_type"]):
                 mark_notification_skipped(row["id"], "preference_disabled")
+                counts["skipped"] += 1
+                continue
+            skip_reason = _automatic_delivery_skip_reason(row)
+            if skip_reason:
+                mark_notification_skipped(row["id"], skip_reason)
+                _log_automatic_notification_skipped(row, skip_reason)
                 counts["skipped"] += 1
                 continue
             text, markup = render_deferred_notification(row)

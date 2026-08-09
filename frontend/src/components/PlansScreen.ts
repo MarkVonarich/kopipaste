@@ -1,5 +1,5 @@
 import { formatMoneyString } from '../money';
-import type { BudgetLimit, CategoryBudgetGroup, GeneralSpendingLimit, Goal, GoalPlanPreview, Reminder } from '../types';
+import type { BudgetLimit, CategoryBudgetGroup, CategoryOption, GeneralSpendingLimit, Goal, GoalPlanPreview, Reminder } from '../types';
 import { EmptyPanel, ProgressBar, SectionHeader, esc, icon } from './ui';
 
 type PlansData = {
@@ -10,6 +10,9 @@ type PlansData = {
   general_limits?: GeneralSpendingLimit[];
   category_budgets?: CategoryBudgetGroup[];
   reminders?: Reminder[];
+  categories?: CategoryOption[];
+  categories_read_only?: boolean;
+  category_type?: 'expense' | 'income';
 };
 
 function statusLabel(status: string): string {
@@ -137,8 +140,34 @@ function reminderCard(reminder: Reminder): string {
   `;
 }
 
-export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 'reminders' = 'goals', canWrite = false): string {
-  if (plans?.all_scope_note && mode !== 'reminders') {
+function categoryCard(category: CategoryOption, canWrite: boolean): string {
+  const refs = category.references;
+  const auto = (refs?.aliases || 0) + (refs?.ml_observations || 0);
+  return `
+    <article class="plan-card category-card" data-category-token="${esc(category.token || category.normalized_name)}">
+      <div class="entity-head">
+        <div>
+          <h3>${esc(category.name)}</h3>
+          <p>${category.operation_count} операций</p>
+        </div>
+        <span class="pill">${category.protected ? 'системная' : esc(category.source)}</span>
+      </div>
+      <div class="detail-grid compact">
+        <div class="detail-row light"><span>Лимиты</span><strong>${refs?.category_limits || 0}</strong></div>
+        <div class="detail-row light"><span>Бюджеты</span><strong>${refs?.category_budget_groups || 0}</strong></div>
+        <div class="detail-row light"><span>Напоминания</span><strong>${refs?.reminders || 0}</strong></div>
+        <div class="detail-row light"><span>Автокатегоризация</span><strong>${auto}</strong></div>
+      </div>
+      ${canWrite && !category.protected ? `<div class="actions">
+        <button class="button secondary" data-action="category-rename" data-token="${esc(category.token || category.normalized_name)}">Переименовать</button>
+        <button class="button danger" data-action="category-delete" data-token="${esc(category.token || category.normalized_name)}">Удалить</button>
+      </div>` : ''}
+    </article>
+  `;
+}
+
+export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 'reminders' | 'categories' = 'goals', canWrite = false): string {
+  if (plans?.all_scope_note && mode !== 'reminders' && mode !== 'categories') {
     return `<section class="screen">${EmptyPanel('Выберите пространство', plans.all_scope_note)}</section>`;
   }
   return `
@@ -147,6 +176,7 @@ export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 
         <button data-action="plans-mode" data-mode="goals" class="${mode === 'goals' ? 'active' : ''}" role="tab" aria-selected="${mode === 'goals'}">Цели</button>
         <button data-action="plans-mode" data-mode="limits" class="${mode === 'limits' ? 'active' : ''}" role="tab" aria-selected="${mode === 'limits'}">Лимиты и бюджеты</button>
         <button data-action="plans-mode" data-mode="reminders" class="${mode === 'reminders' ? 'active' : ''}" role="tab" aria-selected="${mode === 'reminders'}">Напоминания</button>
+        <button data-action="plans-mode" data-mode="categories" class="${mode === 'categories' ? 'active' : ''}" role="tab" aria-selected="${mode === 'categories'}">Категории</button>
       </div>
       ${mode === 'goals' ? `
         ${SectionHeader('Цели', 'Крупные намерения и план пополнения', canWrite ? `<button class="icon-button" data-action="goal-create" aria-label="Создать цель">${icon('plus')}</button>` : '')}
@@ -158,11 +188,45 @@ export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 
         ${(plans?.category_budgets || []).map(categoryBudgetCard).join('') || EmptyPanel('Бюджетов категорий пока нет', 'Соберите несколько категорий в один бюджет.')}
         ${SectionHeader('Лимиты категорий', 'Ограничение одной категории', canWrite ? `<button class="icon-button" data-action="limit-create" data-scope="category" aria-label="Создать лимит категории">${icon('plus')}</button>` : '')}
         ${(plans?.limits || []).map(limitCard).join('') || EmptyPanel('Лимитов категорий пока нет', 'Добавьте лимит на отдельную категорию.')}
-      ` : `
+      ` : mode === 'reminders' ? `
         ${SectionHeader('Личные напоминания', 'Те же напоминания, что и в Telegram-боте', canWrite ? `<button class="button secondary" data-action="reminder-create">+ Новое напоминание</button>` : '')}
         ${(plans?.reminders || []).map(reminderCard).join('') || EmptyPanel('Напоминаний пока нет', 'Создайте оплату, подписку или будущий доход.')}
+      ` : `
+        <div class="segmented compact" role="tablist" aria-label="Тип категорий">
+          <button data-action="category-type" data-type="expense" class="${(plans?.category_type || 'expense') === 'expense' ? 'active' : ''}">Расходы</button>
+          <button data-action="category-type" data-type="income" class="${plans?.category_type === 'income' ? 'active' : ''}">Доходы</button>
+        </div>
+        ${SectionHeader('Категории', 'Список, связи и безопасное управление', canWrite && !plans?.categories_read_only ? `<button class="icon-button" data-action="category-create" aria-label="Создать категорию">${icon('plus')}</button>` : '')}
+        ${(plans?.categories || []).map((category) => categoryCard(category, canWrite && !plans?.categories_read_only)).join('') || EmptyPanel('Категорий пока нет', 'Добавьте категорию или запишите операцию.')}
       `}
     </section>
+  `;
+}
+
+export function CategoryForm(category: CategoryOption | null, type: 'expense' | 'income', saving = false, error = ''): string {
+  return `
+    <form class="form-grid" data-action="${category ? 'save-category' : 'create-category'}" ${category ? `data-token="${esc(category.token || category.normalized_name)}"` : ''}>
+      <input type="hidden" name="type" value="${esc(type)}" />
+      <label class="field">Название<input class="input" name="name" maxlength="64" value="${esc(category?.name || '')}" required /></label>
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
+    </form>
+  `;
+}
+
+export function CategoryDeleteForm(category: CategoryOption, type: 'expense' | 'income', categories: CategoryOption[], saving = false, error = ''): string {
+  const refs = category.references;
+  const used = (refs?.total || 0) > 0;
+  return `
+    <form class="form-grid" data-action="delete-category" data-token="${esc(category.token || category.normalized_name)}">
+      <input type="hidden" name="type" value="${esc(type)}" />
+      <p class="caption">${used ? 'Категория используется. Выберите, куда перенести связанные записи и настройки.' : 'Категория не используется и может быть удалена.'}</p>
+      ${used ? `<label class="field">Перенести в<select class="select" name="transfer_to" required>
+        ${categories.filter((item) => (item.token || item.normalized_name) !== (category.token || category.normalized_name)).map((item) => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('')}
+      </select></label>` : ''}
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+      <button class="button danger" type="submit" ${saving ? 'disabled' : ''}>Удалить</button>
+    </form>
   `;
 }
 

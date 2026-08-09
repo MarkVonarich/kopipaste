@@ -417,27 +417,11 @@ def process_product_event(ev) -> None:
 
 
 def challenge_prompt_candidates() -> list[int]:
-    try:
-        rows = pg_fetchall(
-            """
-            SELECT np.user_id
-             FROM public.notification_preferences np
-              JOIN public.users u ON u.user_id=np.user_id
-             WHERE COALESCE(np.challenge_notifications_enabled, false)
-             ORDER BY np.user_id
-             LIMIT 500
-            """
-        )
-        return [int(r[0]) for r in rows]
-    except (errors.UndefinedTable, errors.UndefinedColumn, errors.InvalidSchemaName):
-        return []
-    except Exception as exc:
-        log.warning("challenge_prompt_candidates_failed reason=%s", safe_error_code(exc))
-        return []
+    return []
 
 
 def challenge_notifications_enabled(user_id: int) -> bool:
-    return bool(get_notification_preferences(user_id).get("challenge_notifications_enabled", False))
+    return False
 
 
 def build_challenge_prompt(user_id: int) -> ChallengePrompt | None:

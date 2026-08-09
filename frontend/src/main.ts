@@ -13,8 +13,8 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { HomeScreen } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
-import { CategoryBudgetForm, GoalContributionForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
-import { AdditionalMenu, CurrencyForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
+import { CategoryBudgetForm, CategoryDeleteForm, CategoryForm, GoalContributionForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
+import { AdditionalMenu, CurrencyForm, ExportForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
 
@@ -33,6 +33,7 @@ let selectedGoal: Goal | null = null;
 let selectedLimit: BudgetLimit | null = null;
 let selectedReminder: Reminder | null = null;
 let selectedCategoryBudget: CategoryBudgetGroup | null = null;
+let selectedCategory: CategoryOption | null = null;
 let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
@@ -175,13 +176,11 @@ function renderTopbar(): string {
     ...globalCategoryOptions.map((category) => `<option value="${esc(category.name)}" ${filters.category === category.name ? 'selected' : ''}>${esc(category.name)}</option>`)
   ].join('');
   return `
-    <div class="toolbar" aria-label="Период и пространство">
+    <div class="toolbar global-filter-strip" aria-label="Фильтры">
       <label class="toolbar-field"><span>Пространство</span><select class="select compact" data-action="workspace" aria-label="Пространство">${workspaceOptions}</select></label>
       <label class="toolbar-field"><span>Период</span><select class="select compact" data-action="period" aria-label="Период">
         ${periodOptions.map(([key, label]) => `<option value="${key}" ${filters.period === key ? 'selected' : ''}>${label}</option>`).join('')}
       </select></label>
-    </div>
-    <div class="toolbar filter-toolbar" aria-label="Финансовые фильтры">
       <label class="toolbar-field"><span>Тип</span><select class="select compact" data-action="operation-type" aria-label="Тип операции">
         <option value="all" ${filters.operation_type === 'all' ? 'selected' : ''}>Все операции</option>
         <option value="expense" ${filters.operation_type === 'expense' ? 'selected' : ''}>Расходы</option>
@@ -203,7 +202,11 @@ function renderNav(): string {
 }
 
 function renderHome(): string {
-  return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite(), activeFilters());
+  return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite(), activeFilters(), {
+    challenge: state.homeChallengeIndex || 0,
+    focus: state.homeFocusIndex || 0,
+    reminder: state.homeReminderIndex || 0,
+  });
 }
 
 function renderOperations(): string {
@@ -229,6 +232,21 @@ function writableWorkspaces(): Workspace[] {
 
 function renderProfile(): string {
   return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion || 'user');
+}
+
+function carouselTotal(kind: 'challenge' | 'focus' | 'reminder'): number {
+  if (kind === 'challenge') return Math.max(1, overview?.challenges?.length || (overview?.challenge ? 1 : 0));
+  if (kind === 'focus') return Math.max(1, overview?.focus_items?.length || (overview?.focus ? 1 : 0));
+  return Math.max(1, overview?.reminders?.length || (overview?.reminder ? 1 : 0));
+}
+
+function setHomeCarouselIndex(kind: 'challenge' | 'focus' | 'reminder', index: number, direction: string): void {
+  const total = carouselTotal(kind);
+  const clamped = Math.max(0, Math.min(index, total - 1));
+  if (kind === 'challenge') state.homeChallengeIndex = clamped;
+  if (kind === 'focus') state.homeFocusIndex = clamped;
+  if (kind === 'reminder') state.homeReminderIndex = clamped;
+  void api.track(`mini_app_${kind}_carousel_changed`, { direction, position: String(clamped + 1), total: String(total), source: 'mini_app' });
 }
 
 function renderSheet(): string {
@@ -297,11 +315,20 @@ function renderSheet(): string {
   if (state.sheet === 'category-budget-edit' && selectedCategoryBudget) {
     return BottomSheet('Изменить бюджет категорий', CategoryBudgetForm(selectedCategoryBudget, categoryOptions, state.saving, state.saveError, profile?.available_currencies, state.boot?.user.currency || 'RUB'));
   }
+  if (state.sheet === 'category-create') {
+    return BottomSheet('Новая категория', CategoryForm(null, state.categoryType || 'expense', state.saving, state.saveError));
+  }
+  if (state.sheet === 'category-rename' && selectedCategory) {
+    return BottomSheet('Переименовать категорию', CategoryForm(selectedCategory, state.categoryType || 'expense', state.saving, state.saveError));
+  }
+  if (state.sheet === 'category-delete' && selectedCategory) {
+    return BottomSheet('Удалить категорию', CategoryDeleteForm(selectedCategory, state.categoryType || 'expense', plans?.categories || [], state.saving, state.saveError));
+  }
   if (state.sheet === 'premium') {
     return BottomSheet('Premium', InfoPanel('Premium', profile?.premium?.description || 'Premium-раздел пока информационный.'));
   }
   if (state.sheet === 'export') {
-    return BottomSheet('Экспорт и данные', InfoPanel('Экспорт', profile?.export?.privacy_note || 'Экспорт использует существующий Telegram flow.'));
+    return BottomSheet('Экспорт и данные', ExportForm(state.exportDraft, state.exportPreview, state.exportSent, state.saving, state.saveError));
   }
   if (state.sheet === 'profile-name') {
     return BottomSheet('Профиль', PreferredNameForm(profile, state.saving, state.saveError));
@@ -463,7 +490,18 @@ async function loadScreen(): Promise<void> {
       overview = response.overview;
       analytics = response;
     }
-    if (state.tab === 'plans') plans = await api.plans(state.workspaceId);
+    if (state.tab === 'plans') {
+      plans = await api.plans(state.workspaceId);
+      if ((state.plansMode || 'goals') === 'categories') {
+        const categoryType = state.categoryType || 'expense';
+        try {
+          const managed = await api.managedCategories(state.workspaceId, categoryType);
+          plans = { ...plans, categories: managed.items, categories_read_only: managed.read_only, category_type: categoryType };
+        } catch {
+          plans = { ...plans, categories: [], categories_read_only: true, category_type: categoryType };
+        }
+      }
+    }
     if (state.tab === 'profile') profile = await api.profile();
   } catch (error) {
     state.error = safeError(error);
@@ -808,9 +846,46 @@ function wireEvents(): void {
     });
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="plans-mode"]').forEach((button) => {
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       hapticSelection();
-      state.plansMode = button.dataset.mode === 'limits' ? 'limits' : button.dataset.mode === 'reminders' ? 'reminders' : 'goals';
+      state.plansMode = button.dataset.mode === 'limits' ? 'limits' : button.dataset.mode === 'reminders' ? 'reminders' : button.dataset.mode === 'categories' ? 'categories' : 'goals';
+      await loadScreen();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="carousel-dot"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const kind = button.dataset.carousel as 'challenge' | 'focus' | 'reminder';
+      setHomeCarouselIndex(kind, Number(button.dataset.index || 0), 'dot');
+      hapticSelection();
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLElement>('[data-carousel]').forEach((node) => {
+    let startX = 0;
+    const kind = node.dataset.carousel as 'challenge' | 'focus' | 'reminder';
+    node.addEventListener('keydown', (event) => {
+      if (!(event instanceof KeyboardEvent)) return;
+      const current = Number(node.dataset.index || 0);
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setHomeCarouselIndex(kind, current - 1, 'prev');
+        render();
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        setHomeCarouselIndex(kind, current + 1, 'next');
+        render();
+      }
+    });
+    node.addEventListener('pointerdown', (event) => {
+      startX = event.clientX;
+    });
+    node.addEventListener('pointerup', (event) => {
+      const delta = event.clientX - startX;
+      if (Math.abs(delta) < 32) return;
+      const current = Number(node.dataset.index || 0);
+      setHomeCarouselIndex(kind, current + (delta < 0 ? 1 : -1), delta < 0 ? 'next' : 'prev');
+      hapticSelection();
       render();
     });
   });
@@ -1141,6 +1216,40 @@ function wireEvents(): void {
       await reloadActive();
     });
   });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-type"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      state.categoryType = button.dataset.type === 'income' ? 'income' : 'expense';
+      state.plansMode = 'categories';
+      hapticSelection();
+      await loadScreen();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="category-create"]')?.addEventListener('click', () => {
+    selectedCategory = null;
+    state.sheet = 'category-create';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-rename"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const token = button.dataset.token || '';
+      selectedCategory = (plans?.categories || []).find((item) => (item.token || item.normalized_name) === token) || null;
+      if (!selectedCategory) return;
+      state.sheet = 'category-rename';
+      state.saveError = undefined;
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-delete"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const token = button.dataset.token || '';
+      selectedCategory = (plans?.categories || []).find((item) => (item.token || item.normalized_name) === token) || null;
+      if (!selectedCategory) return;
+      state.sheet = 'category-delete';
+      state.saveError = undefined;
+      render();
+    });
+  });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
     state.sheet = 'menu';
     render();
@@ -1153,6 +1262,10 @@ function wireEvents(): void {
   app.querySelector<HTMLButtonElement>('[data-action="export-open"]')?.addEventListener('click', async () => {
     await api.exportInfo();
     state.sheet = 'export';
+    state.exportDraft = state.exportDraft || { preset: 'month' };
+    state.exportPreview = undefined;
+    state.exportSent = false;
+    state.saveError = undefined;
     render();
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="profile-section"]').forEach((button) => {
@@ -1703,6 +1816,105 @@ function wireEvents(): void {
       }
       closeSheet();
       showToast('Пространство обновлено');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="create-category"], form[data-action="save-category"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    const data = new FormData(form);
+    const type = String(data.get('type') || state.categoryType || 'expense') as 'expense' | 'income';
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const name = String(data.get('name') || '').trim();
+      if (form.dataset.action === 'save-category') {
+        await api.renameCategory(form.dataset.token || '', { workspace_id: state.workspaceId, type, name });
+        showToast('Категория переименована');
+      } else {
+        await api.createCategory({ workspace_id: state.workspaceId, type, name });
+        showToast('Категория добавлена');
+      }
+      closeSheet();
+      state.categoryType = type;
+      state.plansMode = 'categories';
+      await loadScreen();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="delete-category"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    const data = new FormData(form);
+    const type = String(data.get('type') || state.categoryType || 'expense') as 'expense' | 'income';
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.deleteCategory(form.dataset.token || '', { workspace_id: state.workspaceId, type, transfer_to: String(data.get('transfer_to') || '').trim() || undefined });
+      closeSheet();
+      showToast('Категория удалена');
+      state.categoryType = type;
+      state.plansMode = 'categories';
+      await loadScreen();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="export-preview"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const form = event.currentTarget as HTMLFormElement;
+    const data = new FormData(form);
+    const draft = {
+      workspace_id: state.workspaceId,
+      operation_type: state.globalFilters.operation_type,
+      category: state.globalFilters.category,
+      preset: String(data.get('preset') || 'month'),
+      start_date: String(data.get('start_date') || ''),
+      end_date: String(data.get('end_date') || ''),
+    };
+    state.exportDraft = draft;
+    state.saving = true;
+    state.saveError = undefined;
+    state.exportSent = false;
+    render();
+    try {
+      state.exportPreview = await api.exportPreview(draft);
+      state.saving = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLButtonElement>('[data-action="export-send"]')?.addEventListener('click', async () => {
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      state.exportPreview = await api.sendExport(state.exportDraft || { workspace_id: state.workspaceId, preset: 'month' });
+      state.exportSent = true;
+      state.saving = false;
+      showToast('Файл отправлен в Telegram');
       render();
     } catch (error) {
       state.saving = false;

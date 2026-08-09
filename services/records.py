@@ -492,6 +492,7 @@ async def record_operation(cat: str, amt, dt,
     # Очистим batch_item_text, чтобы не «липло»
     context.user_data["batch_item_text"] = ""
     context.user_data.pop("operation_source", None)
+    context.user_data.pop("pending", None)
 
     # После записи — проверяем лимиты по категории (только для Расходов)
     try:

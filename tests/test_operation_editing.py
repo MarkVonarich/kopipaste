@@ -11,6 +11,7 @@ class _Message:
 
     async def reply_text(self, text, **kwargs):
         self.replies.append((text, kwargs))
+        return SimpleNamespace(message_id=len(self.replies))
 
 
 class _CallbackQuery:
@@ -133,3 +134,59 @@ def test_operation_edit_category_updates_selected_operation_without_reinsert(mon
     assert updated == [(55, 7, {"category": "Food", "op_type": "Расходы"})]
     assert "edit_mode" not in context.user_data
     assert "edit_operation_id" not in context.user_data
+
+
+def test_new_operation_category_selection_ignores_stale_edit_state_and_preserves_comment(monkeypatch):
+    from routers import callbacks
+
+    recorded = []
+
+    async def _record_operation(cat, amt, dt, typ, update, context, note=None):
+        pending = context.user_data.get("pending") or {}
+        recorded.append({
+            "cat": cat,
+            "amount": amt,
+            "type": typ,
+            "note": note,
+            "comment": pending.get("merch") or note or "",
+        })
+
+    monkeypatch.setattr(callbacks, "record_category_confirmation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(callbacks, "log_category_feedback", lambda **_kwargs: None)
+    monkeypatch.setattr("services.records.record_operation", _record_operation)
+
+    context = SimpleNamespace(user_data={
+        "edit_mode": True,
+        "edit_operation_id": 7,
+        "pending": {
+            "type": "Расходы",
+            "merch": "coffee near office",
+            "amt": 250,
+            "time": date(2026, 7, 20),
+            "note": "receipt",
+        },
+    })
+    message = _Message(chat_id=55, text="кофе у офиса 250")
+
+    from routers import messages
+
+    monkeypatch.setattr(messages, "parse_user_input", lambda _text: ("кофе у офиса", 250, date(2026, 7, 20), None))
+    monkeypatch.setattr(messages, "convert_amount_if_needed", lambda *_args, **_kwargs: (250, None))
+    monkeypatch.setattr(messages, "get_user_alias", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(messages, "get_top2_suggestions", lambda *_args, **_kwargs: ([{"cat": "Кафе", "score": 0.9}, {"cat": "Другое", "score": 0.1}], {"source": "test"}))
+    monkeypatch.setattr(messages, "insert_ml_observation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(messages, "track_product_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(messages, "get_user_currency", lambda _user_id: "RUB")
+
+    asyncio.run(messages.handle_text(_text_update(message), context))
+    query = _CallbackQuery("use_cat|Кафе", _Message(chat_id=55))
+    asyncio.run(callbacks.callback_handler(_callback_update(query), context))
+
+    assert "edit_mode" not in context.user_data
+    assert recorded == [{
+        "cat": "Кафе",
+        "amount": 250,
+        "type": "Расходы",
+        "note": None,
+        "comment": "кофе у офиса",
+    }]
