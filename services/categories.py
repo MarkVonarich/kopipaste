@@ -19,6 +19,7 @@ class CategoryResult:
 
 
 PROTECTED_CATEGORY_NAMES = {"", "Без операций"}
+EXPENSE_CATEGORY_TYPE = "Расходы"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,10 @@ def is_protected_category(name: str) -> bool:
     return normalize_category_name(name) in PROTECTED_CATEGORY_NAMES
 
 
+def _is_expense_category_type(op_type: str) -> bool:
+    return op_type == EXPENSE_CATEGORY_TYPE
+
+
 def _scope_clause(workspace_id: int | None, *, alias: str = "") -> tuple[str, tuple]:
     prefix = f"{alias}." if alias else ""
     if workspace_id is None:
@@ -138,14 +143,16 @@ def _type_filter(columns: set[str], op_type: str, candidates: tuple[str, ...], *
     return f"AND {prefix}{column}=%s", [op_type]
 
 
-def _category_limit_scope(columns: set[str], user_id: int, workspace_id: int | None, op_type: str) -> tuple[list[str], list]:
+def _category_limit_scope(columns: set[str], user_id: int, workspace_id: int | None, op_type: str) -> tuple[list[str], list] | None:
+    type_sql, type_params = _type_filter(columns, op_type, ("type", "op_type"))
+    if not type_sql and not _is_expense_category_type(op_type):
+        return None
     filters = ["user_id=%s"]
     params: list = [user_id]
     workspace_sql, workspace_params = _workspace_filter(columns, workspace_id)
     if workspace_sql:
         filters.append(workspace_sql.removeprefix("AND "))
         params.extend(workspace_params)
-    type_sql, type_params = _type_filter(columns, op_type, ("type", "op_type"))
     if type_sql:
         filters.append(type_sql.removeprefix("AND "))
         params.extend(type_params)
@@ -333,14 +340,19 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
 
             limit_columns = _table_columns(cur, "category_limits")
             if {"category", "user_id"} <= limit_columns:
+                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                if not scope:
+                    conn.rollback()
+                    return sorted(found.values(), key=lambda item: (item.name.casefold(), item.source))
+                filters, params = scope
                 cur.execute(
-                    """
+                    f"""
                     SELECT lower(category), COUNT(*)::int
                       FROM public.category_limits
-                     WHERE user_id=%s
+                     WHERE {' AND '.join(filters)}
                      GROUP BY lower(category)
                     """,
-                    (user_id,),
+                    tuple(params),
                 )
                 budgeted = {str(r[0]) for r in cur.fetchall() if r[0]}
                 for key, item in list(found.items()):
@@ -436,22 +448,24 @@ def category_reference_counts_many(*, user_id: int, workspace_id: int | None, op
 
             limit_columns = _table_columns(cur, "category_limits")
             if {"category", "user_id"} <= limit_columns:
-                filters, params = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-                filters.append("lower(category)=ANY(%s)")
-                params.append(keys)
-                cur.execute(
-                    f"""
-                    SELECT lower(category), COUNT(*)::int
-                      FROM public.category_limits
-                     WHERE {' AND '.join(filters)}
-                     GROUP BY lower(category)
-                    """,
-                    tuple(params),
-                )
-                _merge_count_rows(values, "category_limits", cur.fetchall())
+                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                if scope:
+                    filters, params = scope
+                    filters.append("lower(category)=ANY(%s)")
+                    params.append(keys)
+                    cur.execute(
+                        f"""
+                        SELECT lower(category), COUNT(*)::int
+                          FROM public.category_limits
+                         WHERE {' AND '.join(filters)}
+                         GROUP BY lower(category)
+                        """,
+                        tuple(params),
+                    )
+                    _merge_count_rows(values, "category_limits", cur.fetchall())
 
             cbg_columns = _table_columns(cur, "category_budget_group_members")
-            if cbg_columns:
+            if cbg_columns and _is_expense_category_type(op_type):
                 cur.execute(
                     """
                     SELECT m.normalized_category_name, COUNT(*)::int
@@ -543,12 +557,14 @@ def _category_reference_counts_cur(cur, *, user_id: int, workspace_id: int | Non
         )
     limit_columns = _table_columns(cur, "category_limits")
     if {"category", "user_id"} <= limit_columns:
-        filters, params = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-        filters.append("lower(category)=%s")
-        params.append(category_key)
-        values["category_limits"] = _count_rows(cur, "category_limits", " AND ".join(filters), tuple(params))
+        scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+        if scope:
+            filters, params = scope
+            filters.append("lower(category)=%s")
+            params.append(category_key)
+            values["category_limits"] = _count_rows(cur, "category_limits", " AND ".join(filters), tuple(params))
     cbg_columns = _table_columns(cur, "category_budget_group_members")
-    if cbg_columns:
+    if cbg_columns and _is_expense_category_type(op_type):
         values["category_budget_groups"] = _count_rows(
             cur,
             "category_budget_group_members m JOIN public.category_budget_groups g ON g.id=m.group_id",
@@ -622,48 +638,50 @@ def transfer_category(
             transferred_budget_count = 0
             skipped_destination_budget_count = 0
             if {"category", "user_id"} <= limit_columns:
-                limit_filters, limit_params = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-                cur.execute(
-                    f"SELECT period, amount, currency FROM public.category_limits WHERE {' AND '.join(limit_filters)} AND lower(category)=%s",
-                    (*limit_params, source_key),
-                )
-                source_limits = cur.fetchall()
-                source_budget_count = len(source_limits)
-                for period, amount, currency in source_limits:
-                    destination_filters = list(limit_filters)
-                    destination_params = list(limit_params)
-                    destination_filters.extend(["period=%s", "lower(category)=%s"])
-                    destination_params.extend([period, destination_key])
+                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                if scope:
+                    limit_filters, limit_params = scope
                     cur.execute(
-                        f"SELECT 1 FROM public.category_limits WHERE {' AND '.join(destination_filters)} LIMIT 1",
-                        tuple(destination_params),
+                        f"SELECT period, amount, currency FROM public.category_limits WHERE {' AND '.join(limit_filters)} AND lower(category)=%s",
+                        (*limit_params, source_key),
                     )
-                    destination_has_budget = cur.fetchone() is not None
-                    source_period_filters = list(limit_filters)
-                    source_period_params = list(limit_params)
-                    source_period_filters.extend(["period=%s", "lower(category)=%s"])
-                    source_period_params.extend([period, source_key])
-                    if budget_resolution == "transfer_source" and not destination_has_budget:
+                    source_limits = cur.fetchall()
+                    source_budget_count = len(source_limits)
+                    for period, amount, currency in source_limits:
+                        destination_filters = list(limit_filters)
+                        destination_params = list(limit_params)
+                        destination_filters.extend(["period=%s", "lower(category)=%s"])
+                        destination_params.extend([period, destination_key])
                         cur.execute(
-                            f"""
-                            UPDATE public.category_limits
-                               SET category=%s, updated_at=now()
-                             WHERE {' AND '.join(source_period_filters)}
-                            """,
-                            (destination_name, *source_period_params),
+                            f"SELECT 1 FROM public.category_limits WHERE {' AND '.join(destination_filters)} LIMIT 1",
+                            tuple(destination_params),
                         )
-                        transferred_budget_count += int(cur.rowcount or 0)
-                    else:
-                        if destination_has_budget:
-                            skipped_destination_budget_count += 1
-                        cur.execute(
-                            f"DELETE FROM public.category_limits WHERE {' AND '.join(source_period_filters)}",
-                            tuple(source_period_params),
-                        )
-                changed["category_limits"] = source_budget_count
+                        destination_has_budget = cur.fetchone() is not None
+                        source_period_filters = list(limit_filters)
+                        source_period_params = list(limit_params)
+                        source_period_filters.extend(["period=%s", "lower(category)=%s"])
+                        source_period_params.extend([period, source_key])
+                        if budget_resolution == "transfer_source" and not destination_has_budget:
+                            cur.execute(
+                                f"""
+                                UPDATE public.category_limits
+                                   SET category=%s, updated_at=now()
+                                 WHERE {' AND '.join(source_period_filters)}
+                                """,
+                                (destination_name, *source_period_params),
+                            )
+                            transferred_budget_count += int(cur.rowcount or 0)
+                        else:
+                            if destination_has_budget:
+                                skipped_destination_budget_count += 1
+                            cur.execute(
+                                f"DELETE FROM public.category_limits WHERE {' AND '.join(source_period_filters)}",
+                                tuple(source_period_params),
+                            )
+                    changed["category_limits"] = source_budget_count
 
             cbg_columns = _table_columns(cur, "category_budget_group_members")
-            if cbg_columns:
+            if cbg_columns and _is_expense_category_type(op_type):
                 cur.execute(
                     """
                     SELECT m.group_id
@@ -819,19 +837,21 @@ def rename_category(
 
             limit_columns = _table_columns(cur, "category_limits")
             if {"category", "user_id"} <= limit_columns:
-                limit_filters, limit_params = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-                limit_filters.append("lower(category)=%s")
-                limit_params.append(source_key)
-                changed["category_limits"] = _update_rows(
-                    cur,
-                    "category_limits",
-                    "category=%s, updated_at=now()",
-                    " AND ".join(limit_filters),
-                    (destination_name, *limit_params),
-                )
+                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                if scope:
+                    limit_filters, limit_params = scope
+                    limit_filters.append("lower(category)=%s")
+                    limit_params.append(source_key)
+                    changed["category_limits"] = _update_rows(
+                        cur,
+                        "category_limits",
+                        "category=%s, updated_at=now()",
+                        " AND ".join(limit_filters),
+                        (destination_name, *limit_params),
+                    )
 
             cbg_columns = _table_columns(cur, "category_budget_group_members")
-            if cbg_columns:
+            if cbg_columns and _is_expense_category_type(op_type):
                 changed["category_budget_groups"] = _update_rows(
                     cur,
                     "category_budget_group_members",
@@ -980,11 +1000,13 @@ def hard_delete_category_with_operations(
 
             limit_columns = _table_columns(cur, "category_limits")
             if limit_columns:
-                limit_filters, limit_params = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-                limit_filters.append("lower(category)=%s")
-                limit_params.append(key)
-                cur.execute(f"DELETE FROM public.category_limits WHERE {' AND '.join(limit_filters)}", tuple(limit_params))
-            if _table_columns(cur, "category_budget_group_members"):
+                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                if scope:
+                    limit_filters, limit_params = scope
+                    limit_filters.append("lower(category)=%s")
+                    limit_params.append(key)
+                    cur.execute(f"DELETE FROM public.category_limits WHERE {' AND '.join(limit_filters)}", tuple(limit_params))
+            if _table_columns(cur, "category_budget_group_members") and _is_expense_category_type(op_type):
                 cur.execute(
                     """
                     DELETE FROM public.category_budget_group_members m
@@ -1109,12 +1131,14 @@ def delete_category_without_operations(*, user_id: int, workspace_id: int | None
             deleted_budgets = 0
             limit_columns = _table_columns(cur, "category_limits")
             if limit_columns:
-                limit_filters, limit_params = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-                limit_filters.append("lower(category)=%s")
-                limit_params.append(key)
-                cur.execute(f"DELETE FROM public.category_limits WHERE {' AND '.join(limit_filters)}", tuple(limit_params))
-                deleted_budgets = int(cur.rowcount or 0)
-            if _table_columns(cur, "category_budget_group_members"):
+                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                if scope:
+                    limit_filters, limit_params = scope
+                    limit_filters.append("lower(category)=%s")
+                    limit_params.append(key)
+                    cur.execute(f"DELETE FROM public.category_limits WHERE {' AND '.join(limit_filters)}", tuple(limit_params))
+                    deleted_budgets = int(cur.rowcount or 0)
+            if _table_columns(cur, "category_budget_group_members") and _is_expense_category_type(op_type):
                 cur.execute(
                     """
                     DELETE FROM public.category_budget_group_members m
