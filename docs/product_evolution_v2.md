@@ -98,6 +98,7 @@ Multi-currency behavior:
 - Overview, structure, contribution, detail, search, and time dynamics are grouped by currency.
 - Analytics 2.0 has one selected analytics currency. The frontend does not maintain separate category, dynamics, and Radar currencies.
 - A selected currency limits all chart/detail/search analytics to that currency.
+- Stored selected currency is reconciled with each new Analytics response. If a workspace, period, type, or category scope no longer contains that currency, the UI falls back once to the first current currency or clears the selection when the scope has no current data.
 - Financial result is computed per currency as `income - expense`.
 - If a currency exists only in the comparable period, explicit currency selection can still render comparison data without inventing a current total.
 
@@ -115,6 +116,7 @@ Drill-down hierarchy:
 - Contribution computes over every canonical category in the selected workspace, period, type, and currency before selecting visible contributors. Reconciliation means the full category delta matches the authoritative total delta; if hidden categories exist, a synthetic "Остальные" row carries the remainder.
 - Category drill-down separates full summary metrics from the limited operation preview. Total, operation count, previous total, delta, percentage/state, and merchant shares use the full selected category; the operation preview remains bounded.
 - Category merchant breakdown calculates shares against the full selected category total. Top merchants may be followed by a synthetic "Остальные" row.
+- Synthetic rollups and presentation fallbacks carry explicit metadata. Synthetic "Остальные" rows and fallback "Без описания" merchant rows are rendered as non-clickable summaries unless a real underlying entity scope is present.
 - Merchant drill-down separates full summary metrics from the limited operation preview. Total, operation count, average check, previous total/count, previous average check, and delta use the full selected merchant.
 - The "all operations" action opens the existing Operations screen with preserved workspace, custom period, operation type, currency, merchant, and/or normalized category scope. Category drill-down uses the normalized `category_key` as the authoritative scope rather than an exact display label.
 

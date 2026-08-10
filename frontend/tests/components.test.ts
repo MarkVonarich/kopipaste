@@ -196,6 +196,47 @@ describe('acceptance components', () => {
     expect(html).toContain('Large');
   });
 
+  it('renders synthetic and fallback analytics rows without drill actions', () => {
+    const categoryHtml = AnalyticsScreen({
+      period: overview.period,
+      overview,
+      aggregation_available: true,
+      available_currencies: ['RUB'],
+      radar_available_currencies: ['RUB'],
+      selected_currency: 'RUB',
+      currency_groups: {},
+      summary: {
+        aggregation_available: true,
+        available_currencies: ['RUB'],
+        currency_groups: { RUB: { income: '0.00', expense: '1500.00', result: '-1500.00', count: 7 } },
+        totals_by_currency: { RUB: { income: '0.00', expense: '1500.00', count: 7 } },
+        result_by_currency: { RUB: '-1500.00' },
+      },
+      category_structure: { type: 'expense', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '1500.00', items: [
+        { key: 'food', category: 'Food', currency: 'RUB', total: '1000.00', previous_total: '800.00', delta: '200.00', count: 5, share: 67, drillable: true },
+        { key: '__synthetic_other_category__', category: 'Остальные', currency: 'RUB', total: '500.00', previous_total: '0.00', delta: '500.00', count: 2, share: 33, synthetic: true, drillable: false },
+      ] } }, items: [] },
+      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '1500.00', items: [
+        { key: '__empty_merchant__', merchant: 'Без описания', currency: 'RUB', total: '500.00', previous_total: '0.00', delta: '500.00', count: 2, share: 33, fallback: true, drillable: false },
+        { key: '__synthetic_other_merchant__', merchant: 'Остальные', currency: 'RUB', total: '300.00', previous_total: '0.00', delta: '300.00', count: 1, share: 20, synthetic: true, drillable: false },
+      ] } }, items: [] },
+      change_contribution: { type: 'expense', currency_groups: { RUB: { currency: 'RUB', type: 'expense', current_total: '1500.00', previous_total: '800.00', total_delta: '700.00', reconciles: true, items: [
+        { key: 'food', category: 'Food', currency: 'RUB', total: '1000.00', previous_total: '800.00', delta: '200.00', count: 5, share: 67, drillable: true },
+        { key: '__synthetic_other_contribution__', category: 'Остальные', currency: 'RUB', total: '500.00', previous_total: '0.00', delta: '500.00', count: 2, share: 33, synthetic: true, drillable: false },
+      ] } }, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+      radar: { type: 'expense', currency: 'RUB', current_period: overview.period, previous_period: overview.period, metric: 'absolute_amount', max_axes: 6, scale: { max: '0.00', step: '0.00', ticks: [] }, insufficient_data: true, explanation: '', axes: [] },
+      activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 0, days: [] },
+      search: { query: '', items: [] },
+      selected_detail: null,
+      top_expense_categories: [],
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', analyticsCurrency: 'RUB' }, { period: 'current_month', operation_type: 'all', category: 'all' });
+
+    expect(categoryHtml).toContain('data-action="analytics-drill" data-kind="category" data-value="Food"');
+    expect(categoryHtml).not.toContain('data-value="Остальные"');
+    expect(categoryHtml).not.toContain('data-kind="merchant" data-value="Без описания"');
+  });
+
   it('renders multiple currencies without false aggregation', () => {
     const html = HomeScreen({
       ...overview,

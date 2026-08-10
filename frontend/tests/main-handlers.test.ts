@@ -41,6 +41,49 @@ const plansData = {
   reminders: [],
 };
 
+function analyticsData(currencies: string[], selectedCurrency: string | null = null): any {
+  const totals = Object.fromEntries(currencies.map((currency) => [currency, { income: '1000.00', expense: currency === 'EUR' ? '20.00' : '500.00', count: 2 }]));
+  const result = Object.fromEntries(currencies.map((currency) => [currency, currency === 'EUR' ? '980.00' : '500.00']));
+  const categoryGroups = Object.fromEntries(currencies.map((currency) => [currency, {
+    currency,
+    total: totals[currency].expense,
+    items: [],
+  }]));
+  return {
+    period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' },
+    previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-07' },
+    overview: { period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' }, workspace_scope: 10, aggregation_available: currencies.length <= 1, totals_by_currency: totals, recent_operations: [] },
+    aggregation_available: currencies.length <= 1,
+    available_currencies: currencies,
+    radar_available_currencies: currencies,
+    selected_currency: selectedCurrency,
+    currency_groups: {},
+    summary: {
+      aggregation_available: currencies.length <= 1,
+      available_currencies: currencies,
+      currency_groups: Object.fromEntries(currencies.map((currency) => [currency, { ...totals[currency], result: result[currency] }])),
+      totals_by_currency: totals,
+      result_by_currency: result,
+    },
+    overview_metrics: Object.fromEntries(currencies.map((currency) => [currency, {
+      income: { current: totals[currency].income, previous: '0.00', delta: totals[currency].income, pct: null, state: 'zero_baseline' },
+      expense: { current: totals[currency].expense, previous: '0.00', delta: totals[currency].expense, pct: null, state: 'zero_baseline' },
+      result: { current: result[currency], previous: '0.00', delta: result[currency], pct: null, state: 'zero_baseline' },
+      count: 2,
+      previous_count: 0,
+    }])),
+    category_structure: { type: 'expense', top_n: 5, currency_groups: categoryGroups, items: [] },
+    merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: {}, items: [] },
+    change_contribution: { type: 'expense', currency_groups: {}, items: [] },
+    time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+    radar: { type: 'expense', currency: selectedCurrency, current_period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' }, previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-07' }, metric: 'absolute_amount', max_axes: 6, scale: { max: '0.00', step: '0.00', ticks: [] }, insufficient_data: true, explanation: '', axes: [] },
+    activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-07', max_count: 0, days: [] },
+    search: { query: '', items: [] },
+    selected_detail: null,
+    top_expense_categories: [],
+  };
+}
+
 function installAppMocks() {
   const api = {
     bootstrap: vi.fn(async () => ({
@@ -99,6 +142,10 @@ async function openPlansLimits() {
   await Promise.resolve();
   document.querySelector<HTMLButtonElement>('[data-action="plans-mode"][data-mode="limits"]')?.click();
   await Promise.resolve();
+}
+
+async function flush(times = 4) {
+  for (let index = 0; index < times; index += 1) await Promise.resolve();
 }
 
 describe('main plan handlers', () => {
@@ -497,5 +544,66 @@ describe('main plan handlers', () => {
 
     expect(document.body.textContent).toContain('поддерживаемых мобильных версиях Telegram');
     expect(api.track).not.toHaveBeenCalledWith('mini_app_add_to_home_requested', { source: 'mini_app' });
+  });
+
+  it('falls back from stale Analytics EUR to RUB after scope changes without a reload loop', async () => {
+    const api = installAppMocks();
+    let scope: 'mixed' | 'rub' = 'mixed';
+    api.analytics.mockImplementation(async (_workspaceId, filters): Promise<any> => {
+      if (scope === 'mixed') return analyticsData(['RUB', 'EUR'], String(filters.currency || '') || null);
+      if (filters.currency === 'EUR') return analyticsData(['RUB'], null);
+      return analyticsData(['RUB'], 'RUB');
+    });
+
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="analytics"]')?.click();
+    await flush(8);
+
+    const currencySelect = document.querySelector<HTMLSelectElement>('[data-action="chart-currency"][data-chart="analytics"]');
+    expect(currencySelect).not.toBeNull();
+    currencySelect!.value = 'EUR';
+    currencySelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush(8);
+    expect(api.analytics.mock.calls.at(-1)?.[1].currency).toBe('EUR');
+
+    scope = 'rub';
+    const beforeSwitch = api.analytics.mock.calls.length;
+    const period = document.querySelector<HTMLSelectElement>('[data-action="period"]');
+    period!.value = 'previous_month';
+    period!.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush(10);
+
+    const switchCurrencies = api.analytics.mock.calls.slice(beforeSwitch).map((call) => call[1].currency);
+    expect(switchCurrencies).toEqual(['EUR', 'RUB']);
+    expect(document.querySelector<HTMLSelectElement>('[data-action="chart-currency"][data-chart="analytics"]')).toBeNull();
+    expect(document.body.textContent).toContain('Расходы · RUB');
+    expect(document.body.textContent).not.toContain('Не получилось выполнить действие');
+  });
+
+  it('clears stale Analytics currency for an empty scope without retrying forever', async () => {
+    const api = installAppMocks();
+    let emptyScope = false;
+    api.analytics.mockImplementation(async (_workspaceId, filters): Promise<any> => {
+      if (emptyScope) return analyticsData([], null);
+      return analyticsData(['RUB'], String(filters.currency || 'RUB'));
+    });
+
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="analytics"]')?.click();
+    await flush(8);
+    expect(api.analytics.mock.calls.at(-1)?.[1].currency).toBeUndefined();
+
+    emptyScope = true;
+    const beforeSwitch = api.analytics.mock.calls.length;
+    const period = document.querySelector<HTMLSelectElement>('[data-action="period"]');
+    period!.value = 'previous_month';
+    period!.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush(10);
+
+    expect(api.analytics.mock.calls.slice(beforeSwitch)).toHaveLength(1);
+    expect(document.body.textContent).toContain('Нет структуры');
+    expect(document.body.textContent).not.toContain('Не получилось выполнить действие');
   });
 });

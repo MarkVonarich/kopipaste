@@ -41,24 +41,32 @@ function metricRows(analytics: AnalyticsResponse | null, selectedCurrency?: stri
 
 function categoryBars(items: ChartCategoryItem[]): string {
   if (!items.length) return EmptyPanel('Нет структуры', 'За этот период не хватает операций для категорий.');
-  return items.map((item) => `
-    <button class="bar-row action-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency)}">
+  return items.map((item) => {
+    const content = `
       <div class="bar-label"><span>${esc(item.category)}</span><strong>${formatMoneyString(item.total, item.currency)}</strong></div>
       <div class="bar-track"><span style="width:${Math.max(4, Math.min(100, item.share))}%"></span></div>
       <small>${item.share}% · ${item.count}${item.delta !== undefined ? ` · ${esc(deltaText({ delta: item.delta, pct: null, state: Number(item.previous_total || 0) === 0 ? 'zero_baseline' : 'ok' }, item.currency))}` : ''}</small>
-    </button>
-  `).join('');
+    `;
+    if (item.drillable === false || item.synthetic || item.fallback) {
+      return `<div class="bar-row">${content}</div>`;
+    }
+    return `<button class="bar-row action-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency)}">${content}</button>`;
+  }).join('');
 }
 
 function merchantBars(items: MerchantStructureItem[]): string {
   if (!items.length) return EmptyPanel('Нет мерчантов', 'В выбранном периоде нет описаний операций для группировки.');
-  return items.map((item) => `
-    <button class="bar-row action-row" data-action="analytics-drill" data-kind="merchant" data-value="${esc(item.merchant)}" data-currency="${esc(item.currency)}">
+  return items.map((item) => {
+    const content = `
       <div class="bar-label"><span>${esc(item.merchant)}</span><strong>${formatMoneyString(item.total, item.currency)}</strong></div>
       <div class="bar-track"><span style="width:${Math.max(4, Math.min(100, item.share))}%"></span></div>
       <small>${item.share}% · ${item.count}${item.delta !== undefined ? ` · ${esc(deltaText({ delta: item.delta, pct: null, state: Number(item.previous_total || 0) === 0 ? 'zero_baseline' : 'ok' }, item.currency))}` : ''}</small>
-    </button>
-  `).join('');
+    `;
+    if (item.drillable === false || item.synthetic || item.fallback) {
+      return `<div class="bar-row">${content}</div>`;
+    }
+    return `<button class="bar-row action-row" data-action="analytics-drill" data-kind="merchant" data-value="${esc(item.merchant)}" data-currency="${esc(item.currency)}">${content}</button>`;
+  }).join('');
 }
 
 export function contributionRows(items: ChartCategoryItem[], currency: string): string {
@@ -67,13 +75,15 @@ export function contributionRows(items: ChartCategoryItem[], currency: string): 
   return items.map((item) => {
     const delta = Number(item.delta || 0);
     const width = maxAbsDelta > 0 && delta !== 0 ? Math.max(8, Math.min(100, Math.abs(delta) / maxAbsDelta * 100)) : 0;
-    return `
-      <button class="contribution-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency || currency)}">
+    const content = `
         <span>${esc(item.category)}</span>
         <strong>${delta > 0 ? '+' : ''}${formatMoneyString(item.delta || '0.00', item.currency || currency)}</strong>
         <i class="${delta >= 0 ? 'positive' : 'negative'}" style="width:${width}%"></i>
-      </button>
     `;
+    if (item.drillable === false || item.synthetic || item.fallback) {
+      return `<div class="contribution-row">${content}</div>`;
+    }
+    return `<button class="contribution-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency || currency)}">${content}</button>`;
   }).join('');
 }
 

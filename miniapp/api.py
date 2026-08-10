@@ -1490,16 +1490,17 @@ class MiniAppAPI:
         prev_tx = self._tx_for_period(req, tx, prev_start, prev_end, _prev_key)
         radar_type = self._chart_op_type(params, "radar_type", tx.operation_type)
         radar_available_currencies = self._radar_currencies(req, tx, prev_start, prev_end, radar_type)
-        if requested_currency and requested_currency not in set(available_currencies) | set(radar_available_currencies):
-            raise MiniAppError(400, "bad_currency", "Currency is not available for this scope.")
-        if requested_currency:
+        if requested_currency and requested_currency not in ALLOWED_CURRENCIES:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.")
+        selected_currency = requested_currency if requested_currency in available_currencies else None
+        if selected_currency:
             chart_currencies = [requested_currency]
         else:
             chart_currencies = available_currencies
         aggregation_available = len(chart_currencies) <= 1
         category_type = self._chart_op_type(params, "category_type", tx.operation_type)
         grouping = self._validated_grouping(str(params.get("grouping") or "auto"), tx.start, tx.end)
-        structure = self._category_structure(req, tx, category_type, currencies=chart_currencies)
+        structure = self._dimension_structure(req, tx, prev_tx, category_type, dimension="category", currencies=chart_currencies)
         merchant_structure = self._dimension_structure(req, tx, prev_tx, category_type, dimension="merchant", currencies=chart_currencies)
         contribution = self._change_contribution(req, tx, prev_tx, category_type, currencies=chart_currencies)
         dynamics = self._time_dynamics(req, tx, grouping=grouping, currencies=chart_currencies)
@@ -1510,7 +1511,7 @@ class MiniAppAPI:
             prev_end,
             _prev_key,
             radar_type,
-            currency=requested_currency or (radar_available_currencies[0] if len(radar_available_currencies) == 1 else None),
+            currency=selected_currency or (requested_currency if requested_currency in radar_available_currencies else None) or (radar_available_currencies[0] if len(radar_available_currencies) == 1 else None),
             available_currencies=radar_available_currencies,
         )
         activity = self._activity_calendar(req, tx)
@@ -1519,7 +1520,7 @@ class MiniAppAPI:
         detail_type = self._chart_op_type(params, "detail_operation_type", tx.operation_type) if params.get("detail_kind") else category_type
         selected_detail = self._analytics_detail(req, tx, prev_tx, params, detail_type)
         search = self._analytics_search(req, tx, params, category_type, currencies=chart_currencies)
-        response_currencies = chart_currencies if requested_currency else available_currencies
+        response_currencies = chart_currencies if selected_currency else available_currencies
         summary_totals = {
             currency: overview["totals_by_currency"].get(currency, {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
             for currency in response_currencies
@@ -1544,7 +1545,7 @@ class MiniAppAPI:
             "aggregation_available": aggregation_available,
             "available_currencies": available_currencies,
             "radar_available_currencies": radar_available_currencies,
-            "selected_currency": requested_currency or None,
+            "selected_currency": selected_currency,
             "currency_groups": currency_groups,
             "summary": {
                 "aggregation_available": aggregation_available,
@@ -1801,21 +1802,37 @@ class MiniAppAPI:
             currency_code = str(currency)
             if allowed and currency_code not in allowed:
                 continue
-            result.append((str(raw_name or "Без описания"), currency_code, to_decimal_money(total), int(count or 0)))
+            result.append((str(raw_name or ""), currency_code, to_decimal_money(total), int(count or 0)))
         return result
 
     def _fold_dimension(self, rows: list[tuple[str, str, Decimal, int]], *, dimension: str) -> dict[str, dict[str, dict[str, Any]]]:
         grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         for name, currency, total, count in rows:
-            display_name = name.strip() or ("Без описания" if dimension == "merchant" else "Прочее")
+            raw_name = name.strip()
+            display_name = raw_name or ("Без описания" if dimension == "merchant" else "Прочее")
             if dimension == "category":
                 try:
                     key = normalized_category_key(display_name)
                 except ValueError:
                     key = normalized_category_key("Прочее")
+                drillable = True
+                fallback = False
             else:
-                key = display_name
-            bucket = grouped[currency].setdefault(key, {"key": key, "name": display_name, "total": Decimal("0.00"), "count": 0})
+                key = raw_name or "__empty_merchant__"
+                drillable = bool(raw_name)
+                fallback = not raw_name
+            bucket = grouped[currency].setdefault(
+                key,
+                {
+                    "key": key,
+                    "name": display_name,
+                    "total": Decimal("0.00"),
+                    "count": 0,
+                    "synthetic": False,
+                    "drillable": drillable,
+                    "fallback": fallback,
+                },
+            )
             bucket["total"] += total
             bucket["count"] += count
         return grouped
@@ -1850,6 +1867,9 @@ class MiniAppAPI:
                     "delta": cur["total"] - prev["total"],
                     "count": cur["count"],
                     "previous_count": prev["count"],
+                    "synthetic": bool(cur.get("synthetic") or prev.get("synthetic")),
+                    "drillable": bool(cur.get("drillable", True) and prev.get("drillable", True)),
+                    "fallback": bool(cur.get("fallback") or prev.get("fallback")),
                 })
             values.sort(key=lambda item: (-to_decimal_money(item["total"]), str(item.get("category") or item.get("merchant"))))
             currency_total = sum((to_decimal_money(item["total"]) for item in values), Decimal("0.00"))
@@ -1860,6 +1880,29 @@ class MiniAppAPI:
                 rendered = {**item, "share": share}
                 group_items.append(rendered)
                 flat_items.append(rendered)
+            if top_n is not None:
+                remainder = values[top_n:]
+                if remainder:
+                    other_current = sum((to_decimal_money(item["total"]) for item in remainder), Decimal("0.00"))
+                    other_previous = sum((to_decimal_money(item["previous_total"]) for item in remainder), Decimal("0.00"))
+                    other_count = sum((int(item.get("count") or 0) for item in remainder), 0)
+                    other_previous_count = sum((int(item.get("previous_count") or 0) for item in remainder), 0)
+                    rendered = {
+                        "key": f"__synthetic_other_{dimension}__",
+                        "category" if dimension == "category" else "merchant": "Остальные",
+                        "currency": currency,
+                        "total": other_current,
+                        "previous_total": other_previous,
+                        "delta": other_current - other_previous,
+                        "count": other_count,
+                        "previous_count": other_previous_count,
+                        "share": int((other_current / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0,
+                        "synthetic": True,
+                        "drillable": False,
+                        "fallback": False,
+                    }
+                    group_items.append(rendered)
+                    flat_items.append(rendered)
             groups[currency] = {"currency": currency, "total": currency_total, "items": group_items}
         return {
             "type": "income" if op_type == "Доходы" else "expense",
@@ -1895,7 +1938,7 @@ class MiniAppAPI:
                 other_previous_count = sum((int(item.get("previous_count") or 0) for item in remainder), 0)
                 if other_current != 0 or other_previous != 0 or other_delta != 0 or other_count or other_previous_count:
                     items.append({
-                        "key": "other",
+                        "key": "__synthetic_other_contribution__",
                         "category": "Остальные",
                         "currency": currency,
                         "total": other_current,
@@ -1904,6 +1947,9 @@ class MiniAppAPI:
                         "count": other_count,
                         "previous_count": other_previous_count,
                         "share": int((other_current / total_current * Decimal("100")).to_integral_value()) if total_current > 0 else 0,
+                        "synthetic": True,
+                        "drillable": False,
+                        "fallback": False,
                     })
             groups[currency] = {
                 "currency": currency,
@@ -1954,25 +2000,34 @@ class MiniAppAPI:
         items = []
         top_rows = rows[:CHART_TOP_N]
         for merchant, amount, count in top_rows:
+            raw_merchant = str(merchant or "").strip()
             item_total = to_decimal_money(amount)
             share = int((item_total / total * Decimal("100")).to_integral_value()) if total > 0 else 0
             items.append({
-                "merchant": str(merchant or "Без описания"),
+                "key": raw_merchant or "__empty_merchant__",
+                "merchant": raw_merchant or "Без описания",
                 "currency": currency,
                 "total": item_total,
                 "count": int(count or 0),
                 "share": share,
+                "synthetic": False,
+                "drillable": bool(raw_merchant),
+                "fallback": not raw_merchant,
             })
         other_rows = rows[CHART_TOP_N:]
         if other_rows:
             other_total = sum((to_decimal_money(row[1]) for row in other_rows), Decimal("0.00"))
             other_count = sum((int(row[2] or 0) for row in other_rows), 0)
             items.append({
+                "key": "__synthetic_other_merchant__",
                 "merchant": "Остальные",
                 "currency": currency,
                 "total": other_total,
                 "count": other_count,
                 "share": int((other_total / total * Decimal("100")).to_integral_value()) if total > 0 else 0,
+                "synthetic": True,
+                "drillable": False,
+                "fallback": False,
             })
         return {"currency": currency, "total": total, "count": total_count, "items": items}
 

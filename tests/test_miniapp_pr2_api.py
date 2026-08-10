@@ -381,6 +381,49 @@ def test_category_structure_keeps_real_other_separate_from_synthetic_remainder(m
     assert "EUR" not in structure["currency_groups"]
 
 
+def test_dimension_category_structure_exposes_comparison_and_synthetic_identity(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 7), "current_week", "all", None, "workspace_id=ANY(%s)", ([10],))
+    prev_tx = TransactionFilters([10], False, date(2026, 7, 25), date(2026, 7, 31), "previous_equal_period", "all", None, "workspace_id=ANY(%s)", ([10],))
+
+    def _rows(_req, current_tx, _op_type, *, dimension, currencies=None):
+        assert dimension == "category"
+        if current_tx.start == date(2026, 8, 1):
+            return [
+                ("Остальные", "RUB", Decimal("1000.00"), 1),
+                ("Food", "RUB", Decimal("900.00"), 3),
+                ("Taxi", "RUB", Decimal("800.00"), 2),
+                ("Cafe", "RUB", Decimal("700.00"), 1),
+                ("Books", "RUB", Decimal("600.00"), 1),
+                ("Health", "RUB", Decimal("500.00"), 1),
+                ("Pets", "RUB", Decimal("400.00"), 1),
+            ]
+        return [
+            ("Food", "RUB", Decimal("500.00"), 2),
+            ("Health", "RUB", Decimal("700.00"), 3),
+            ("Pets", "RUB", Decimal("100.00"), 1),
+        ]
+
+    monkeypatch.setattr(api, "_dimension_rows", _rows)
+
+    structure = api._dimension_structure(api.request(42), tx, prev_tx, "Расходы", dimension="category", currencies=["RUB"])
+
+    items = structure["currency_groups"]["RUB"]["items"]
+    real_other = next(item for item in items if item["category"] == "Остальные" and item["key"] != "__synthetic_other_category__")
+    synthetic_other = next(item for item in items if item["key"] == "__synthetic_other_category__")
+    food = next(item for item in items if item["category"] == "Food")
+    assert food["previous_total"] == Decimal("500.00")
+    assert food["delta"] == Decimal("400.00")
+    assert food["previous_count"] == 2
+    assert real_other["synthetic"] is False
+    assert real_other["drillable"] is True
+    assert synthetic_other["category"] == "Остальные"
+    assert synthetic_other["synthetic"] is True
+    assert synthetic_other["drillable"] is False
+    assert synthetic_other["total"] == Decimal("900.00")
+    assert synthetic_other["delta"] == Decimal("100.00")
+
+
 def test_radar_currency_discovery_uses_previous_period_when_current_empty(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "overview", lambda _req, _params: {"data": {
@@ -417,8 +460,12 @@ def test_radar_currency_discovery_uses_previous_period_when_current_empty(monkey
     assert filtered["radar"]["reason"] is None
     assert filtered["radar"]["axes"][0]["previous_amount"] == "100.00"
 
+    stale = api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "USD"})["data"]
+    assert stale["selected_currency"] is None
+    assert stale["available_currencies"] == []
+
     with pytest.raises(MiniAppError) as exc:
-        api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "USD"})
+        api.analytics(api.request(42), {"workspace_id": 10, "period": "current_month", "currency": "JPY"})
     assert exc.value.code == "bad_currency"
 
 
@@ -583,9 +630,9 @@ def test_category_merchant_breakdown_full_total_and_other_share(monkeypatch):
         assert "LIMIT" not in sql
         assert "REPLACE(LOWER" in sql
         assert params[-1] == "vse dlya doma"
-        return [
+        return [(None, Decimal("100.00"), 1)] + [
             (f"Merchant {idx}", Decimal("100.00"), 1)
-            for idx in range(7)
+            for idx in range(6)
         ]
 
     monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
@@ -598,6 +645,11 @@ def test_category_merchant_breakdown_full_total_and_other_share(monkeypatch):
     assert breakdown["items"][-1]["merchant"] == "Остальные"
     assert breakdown["items"][-1]["total"] == Decimal("200.00")
     assert breakdown["items"][0]["share"] == 14
+    assert breakdown["items"][0]["merchant"] == "Без описания"
+    assert breakdown["items"][0]["key"] == "__empty_merchant__"
+    assert breakdown["items"][0]["drillable"] is False
+    assert breakdown["items"][-1]["synthetic"] is True
+    assert breakdown["items"][-1]["drillable"] is False
 
 
 def test_analytics_search_and_detail_scope_use_current_filters(monkeypatch):

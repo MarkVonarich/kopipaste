@@ -473,44 +473,45 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'home') overview = await api.overview(state.workspaceId, filters);
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
+      const analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+      let requestedCurrency = analyticsFilters.analyticsCurrency;
       let response = await api.analytics(state.workspaceId, {
         ...filters,
-        category_type: state.analyticsFilters?.categoryType,
-        radar_type: state.analyticsFilters?.radarType,
-        currency: state.analyticsFilters?.analyticsCurrency,
-        grouping: state.analyticsFilters?.grouping || 'auto',
-        analytics_search: state.analyticsFilters?.search,
-        detail_kind: state.analyticsFilters?.detailKind,
-        detail_value: state.analyticsFilters?.detailValue,
-        detail_currency: state.analyticsFilters?.detailCurrency,
-        detail_operation_type: state.analyticsFilters?.detailOperationType
+        category_type: analyticsFilters.categoryType,
+        radar_type: analyticsFilters.radarType,
+        currency: requestedCurrency,
+        grouping: analyticsFilters.grouping || 'auto',
+        analytics_search: analyticsFilters.search,
+        detail_kind: analyticsFilters.detailKind,
+        detail_value: analyticsFilters.detailValue,
+        detail_currency: analyticsFilters.detailCurrency,
+        detail_operation_type: analyticsFilters.detailOperationType
       });
-      if (response.available_currencies.length > 1 && !state.analyticsFilters?.analyticsCurrency) {
-        const firstCurrency = response.available_currencies[0];
+      const fallbackCurrency = response.available_currencies.includes(requestedCurrency || '') ? requestedCurrency : response.available_currencies[0];
+      const shouldRetryCurrency = Boolean(fallbackCurrency) && (requestedCurrency !== fallbackCurrency) && (Boolean(requestedCurrency) || response.available_currencies.length > 1);
+      if (requestedCurrency !== fallbackCurrency || !state.analyticsFilters) {
         state.analyticsFilters = {
-          categoryType: state.analyticsFilters?.categoryType || 'expense',
-          dynamicsType: state.analyticsFilters?.dynamicsType || 'both',
-          radarType: state.analyticsFilters?.radarType || 'expense',
-          grouping: state.analyticsFilters?.grouping,
-          analyticsCurrency: firstCurrency,
-          structureMode: state.analyticsFilters?.structureMode || 'category',
-          search: state.analyticsFilters?.search,
-          detailKind: state.analyticsFilters?.detailKind,
-          detailValue: state.analyticsFilters?.detailValue,
-          detailCurrency: state.analyticsFilters?.detailCurrency,
-          detailOperationType: state.analyticsFilters?.detailOperationType
+          ...analyticsFilters,
+          analyticsCurrency: fallbackCurrency,
+          detailKind: requestedCurrency === fallbackCurrency ? analyticsFilters.detailKind : undefined,
+          detailValue: requestedCurrency === fallbackCurrency ? analyticsFilters.detailValue : undefined,
+          detailCurrency: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCurrency : undefined,
+          detailOperationType: requestedCurrency === fallbackCurrency ? analyticsFilters.detailOperationType : undefined,
         };
+      }
+      if (shouldRetryCurrency) {
+        requestedCurrency = fallbackCurrency;
         response = await api.analytics(state.workspaceId, {
           ...filters,
-          category_type: state.analyticsFilters.categoryType,
-          radar_type: state.analyticsFilters.radarType,
-          currency: state.analyticsFilters.analyticsCurrency,
-          grouping: state.analyticsFilters.grouping || 'auto',
-          analytics_search: state.analyticsFilters.search,
-          detail_kind: state.analyticsFilters.detailKind,
-          detail_value: state.analyticsFilters.detailValue,
-          detail_currency: state.analyticsFilters.detailCurrency,
-          detail_operation_type: state.analyticsFilters.detailOperationType
+          category_type: analyticsFilters.categoryType,
+          radar_type: analyticsFilters.radarType,
+          currency: requestedCurrency,
+          grouping: analyticsFilters.grouping || 'auto',
+          analytics_search: analyticsFilters.search,
+          detail_kind: undefined,
+          detail_value: undefined,
+          detail_currency: undefined,
+          detail_operation_type: undefined
         });
       }
       overview = response.overview;

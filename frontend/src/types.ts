@@ -52,6 +52,9 @@ export type ChartCategoryItem = {
   previous_count?: number;
   count: number;
   share: number;
+  synthetic?: boolean;
+  drillable?: boolean;
+  fallback?: boolean;
 };
 
 export type MerchantStructureItem = {
@@ -64,6 +67,9 @@ export type MerchantStructureItem = {
   previous_count?: number;
   count: number;
   share: number;
+  synthetic?: boolean;
+  drillable?: boolean;
+  fallback?: boolean;
 };
 
 export type CategoryCurrencyGroup = {
