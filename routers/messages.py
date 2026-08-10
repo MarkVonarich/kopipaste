@@ -419,6 +419,114 @@ def _is_group_chat(update) -> bool:
     return chat_type in {'group', 'supergroup'}
 
 
+def _bot_identity(context: ContextTypes.DEFAULT_TYPE) -> tuple[int | None, str | None]:
+    bot = getattr(context, "bot", None)
+    bot_id = getattr(bot, "id", None)
+    username = getattr(bot, "username", None)
+    if username is None:
+        app = getattr(context, "application", None)
+        app_bot = getattr(app, "bot", None)
+        username = getattr(app_bot, "username", None)
+        bot_id = bot_id if bot_id is not None else getattr(app_bot, "id", None)
+    username = str(username or "").lstrip("@").casefold() or None
+    try:
+        bot_id = int(bot_id) if bot_id is not None else None
+    except (TypeError, ValueError):
+        bot_id = None
+    return bot_id, username
+
+
+def _entity_text(message, entity) -> str:
+    text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    parser = getattr(message, "parse_entity", None)
+    if callable(parser):
+        try:
+            return parser(entity)
+        except Exception:
+            pass
+    offset = int(getattr(entity, "offset", 0) or 0)
+    length = int(getattr(entity, "length", 0) or 0)
+    return text[offset:offset + length]
+
+
+def _message_mentions_bot(message, *, bot_id: int | None, bot_username: str | None) -> bool:
+    for entity in getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []:
+        entity_type = str(getattr(entity, "type", "") or "").lower()
+        if entity_type == "mention":
+            if not bot_username:
+                continue
+            if _entity_text(message, entity).lstrip("@").casefold() == bot_username:
+                return True
+        elif entity_type == "text_mention":
+            user = getattr(entity, "user", None)
+            if bot_id is not None and getattr(user, "id", None) == bot_id:
+                return True
+    return False
+
+
+def _message_replies_to_bot(message, *, bot_id: int | None, bot_username: str | None) -> bool:
+    replied = getattr(message, "reply_to_message", None)
+    from_user = getattr(replied, "from_user", None) if replied else None
+    if not from_user:
+        return False
+    if bot_id is not None and getattr(from_user, "id", None) == bot_id:
+        return True
+    return bool(bot_username and str(getattr(from_user, "username", "") or "").lstrip("@").casefold() == bot_username)
+
+
+def _group_custom_category_state_matches(update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    st = context.user_data.get("await_group_custom_category")
+    if not isinstance(st, dict):
+        return False
+    try:
+        return (
+            int(st.get("chat_id") or 0) == int(getattr(update.effective_chat, "id", 0) or 0)
+            and int(st.get("actor_user_id") or 0) == int(getattr(update.effective_user, "id", 0) or 0)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def group_message_has_explicit_bot_intent(update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not _is_group_chat(update):
+        return True
+    if _group_custom_category_state_matches(update, context):
+        return True
+    message = update.effective_message or update.message
+    if not message:
+        return False
+    bot_id, bot_username = _bot_identity(context)
+    return (
+        _message_mentions_bot(message, bot_id=bot_id, bot_username=bot_username)
+        or _message_replies_to_bot(message, bot_id=bot_id, bot_username=bot_username)
+    )
+
+
+def strip_explicit_bot_mention(update, context: ContextTypes.DEFAULT_TYPE, text: str) -> str:
+    if not _is_group_chat(update):
+        return text
+    message = update.effective_message or update.message
+    if not message:
+        return text
+    _bot_id, bot_username = _bot_identity(context)
+    if not bot_username:
+        return text
+    ranges: list[tuple[int, int]] = []
+    for entity in getattr(message, "entities", None) or []:
+        if str(getattr(entity, "type", "") or "").lower() != "mention":
+            continue
+        if _entity_text(message, entity).lstrip("@").casefold() != bot_username:
+            continue
+        offset = int(getattr(entity, "offset", 0) or 0)
+        length = int(getattr(entity, "length", 0) or 0)
+        if text[offset:offset + length].lstrip("@").casefold() != bot_username:
+            continue
+        ranges.append((offset, offset + length))
+    for start, end in sorted(ranges, reverse=True):
+        text = text[:start] + text[end:]
+    return " ".join(text.split())
+
+
 def _guess_operation_type_from_text(text: str, merchant: str = "") -> str:
     t = f"{text or ''} {merchant or ''}".lower()
     if re.search(r"\b(salary|income|paycheck|wage|bonus|refund|cashback)\b", t) or re.search(r"зарплат|доход|пополн|кэшбэк|кешбэк", t):
@@ -504,6 +612,11 @@ async def _process_free_text(update, context: ContextTypes.DEFAULT_TYPE, input_t
     emsg = update.effective_message  # универсальный объект сообщения (и для callback'ов тоже)
 
     if _is_group_chat(update):
+        if not group_message_has_explicit_bot_intent(update, context):
+            return None
+        text = strip_explicit_bot_mention(update, context, text)
+        if not text:
+            return None
         return await _process_group_text(update, context, text)
 
     for key in ("edit_mode", "edit_operation_id", "edit_ctx"):
@@ -638,6 +751,8 @@ async def continue_batch_if_needed(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
+    if _is_group_chat(update) and not group_message_has_explicit_bot_intent(update, context):
+        return None
     cid = update.effective_chat.id
     emsg = update.effective_message
     try:
@@ -697,6 +812,8 @@ async def handle_photo(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_voice(update, context: ContextTypes.DEFAULT_TYPE):
+    if _is_group_chat(update) and not group_message_has_explicit_bot_intent(update, context):
+        return None
     emsg = update.effective_message
     msg = update.message
     media = getattr(msg, "voice", None) or getattr(msg, "audio", None)
@@ -764,6 +881,17 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     cid  = update.effective_chat.id
     emsg = update.effective_message
+
+    if _is_group_chat(update) and context.user_data.get('await_group_custom_category') and not _group_custom_category_state_matches(update, context):
+        context.user_data.pop('await_group_custom_category', None)
+        return await emsg.reply_text('Этот черновик операции больше не подходит к текущему чату или пользователю. Отправьте операцию заново.')
+
+    if _is_group_chat(update):
+        if not group_message_has_explicit_bot_intent(update, context):
+            return None
+        text = strip_explicit_bot_mention(update, context, text)
+        if not text:
+            return None
 
     delete_state = context.user_data.get('delete_my_data')
     if isinstance(delete_state, dict) and delete_state.get('step') == 'phrase':
@@ -1697,6 +1825,8 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_location(update, context: ContextTypes.DEFAULT_TYPE):
+    if _is_group_chat(update) and not group_message_has_explicit_bot_intent(update, context):
+        return None
     cid = update.effective_chat.id
     emsg = update.effective_message
     loc = update.message.location
