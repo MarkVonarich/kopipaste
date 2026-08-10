@@ -471,32 +471,47 @@ async function loadScreen(): Promise<void> {
   try {
     const filters = activeFilters();
     if (state.tab === 'home') overview = await api.overview(state.workspaceId, filters);
-    if (state.tab === 'operations') operations = await api.operations(state.workspaceId, filters, 0, state.search);
+    if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
+      const analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+      let requestedCurrency = analyticsFilters.analyticsCurrency;
       let response = await api.analytics(state.workspaceId, {
         ...filters,
-        category_type: state.analyticsFilters?.categoryType,
-        radar_type: state.analyticsFilters?.radarType,
-        currency: state.analyticsFilters?.radarCurrency,
-        grouping: state.analyticsFilters?.grouping || 'auto'
+        category_type: analyticsFilters.categoryType,
+        radar_type: analyticsFilters.radarType,
+        currency: requestedCurrency,
+        grouping: analyticsFilters.grouping || 'auto',
+        analytics_search: analyticsFilters.search,
+        detail_kind: analyticsFilters.detailKind,
+        detail_value: analyticsFilters.detailValue,
+        detail_currency: analyticsFilters.detailCurrency,
+        detail_operation_type: analyticsFilters.detailOperationType
       });
-      if ((response.radar_available_currencies.length > 1 || response.available_currencies.length > 1) && !state.analyticsFilters?.radarCurrency) {
-        const firstCurrency = response.radar_available_currencies[0] || response.available_currencies[0];
+      const fallbackCurrency = response.available_currencies.includes(requestedCurrency || '') ? requestedCurrency : response.available_currencies[0];
+      const shouldRetryCurrency = Boolean(fallbackCurrency) && (requestedCurrency !== fallbackCurrency) && (Boolean(requestedCurrency) || response.available_currencies.length > 1);
+      if (requestedCurrency !== fallbackCurrency || !state.analyticsFilters) {
         state.analyticsFilters = {
-          categoryType: state.analyticsFilters?.categoryType || 'expense',
-          dynamicsType: state.analyticsFilters?.dynamicsType || 'both',
-          radarType: state.analyticsFilters?.radarType || 'expense',
-          grouping: state.analyticsFilters?.grouping,
-          categoryCurrency: state.analyticsFilters?.categoryCurrency || response.available_currencies[0],
-          dynamicsCurrency: state.analyticsFilters?.dynamicsCurrency || response.available_currencies[0],
-          radarCurrency: firstCurrency
+          ...analyticsFilters,
+          analyticsCurrency: fallbackCurrency,
+          detailKind: requestedCurrency === fallbackCurrency ? analyticsFilters.detailKind : undefined,
+          detailValue: requestedCurrency === fallbackCurrency ? analyticsFilters.detailValue : undefined,
+          detailCurrency: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCurrency : undefined,
+          detailOperationType: requestedCurrency === fallbackCurrency ? analyticsFilters.detailOperationType : undefined,
         };
+      }
+      if (shouldRetryCurrency) {
+        requestedCurrency = fallbackCurrency;
         response = await api.analytics(state.workspaceId, {
           ...filters,
-          category_type: state.analyticsFilters.categoryType,
-          radar_type: state.analyticsFilters.radarType,
-          currency: firstCurrency,
-          grouping: state.analyticsFilters.grouping || 'auto'
+          category_type: analyticsFilters.categoryType,
+          radar_type: analyticsFilters.radarType,
+          currency: requestedCurrency,
+          grouping: analyticsFilters.grouping || 'auto',
+          analytics_search: analyticsFilters.search,
+          detail_kind: undefined,
+          detail_value: undefined,
+          detail_currency: undefined,
+          detail_operation_type: undefined
         });
       }
       overview = response.overview;
@@ -598,30 +613,32 @@ function renderCharts(): void {
   const accent = styles.getPropertyValue('--tg-theme-button-color').trim() || styles.getPropertyValue('--accent').trim() || '#0a7a75';
   const destructive = styles.getPropertyValue('--expense').trim() || '#87554f';
   const positive = styles.getPropertyValue('--income').trim() || '#147a43';
-  const categoryCurrency = state.analyticsFilters?.categoryCurrency || analytics.available_currencies[0];
-  const dynamicsCurrency = state.analyticsFilters?.dynamicsCurrency || analytics.available_currencies[0];
+  const analyticsCurrency = state.analyticsFilters?.analyticsCurrency || state.analyticsFilters?.categoryCurrency || state.analyticsFilters?.dynamicsCurrency || state.analyticsFilters?.radarCurrency || analytics.selected_currency || analytics.available_currencies[0];
   const categoryCanvas = document.querySelector<HTMLCanvasElement>('#categoryChart');
-  const categoryItems = categoryCurrency ? analytics.category_structure.currency_groups[categoryCurrency]?.items || [] : analytics.category_structure.items;
-  if (categoryCanvas && categoryItems.length) {
+  const structureMode = state.analyticsFilters?.structureMode || 'category';
+  const categoryItems = analyticsCurrency ? analytics.category_structure.currency_groups[analyticsCurrency]?.items || [] : analytics.category_structure.items;
+  const merchantItems = analyticsCurrency ? analytics.merchant_structure?.currency_groups?.[analyticsCurrency]?.items || [] : analytics.merchant_structure?.items || [];
+  const structureItems = structureMode === 'merchant' ? merchantItems : categoryItems;
+  if (categoryCanvas && structureItems.length) {
     chartInstances.push(new Chart(categoryCanvas, {
       type: 'bar',
       data: {
-        labels: categoryItems.map((item) => `${item.category} · ${item.currency}`),
-        datasets: [{ label: `Доля · ${categoryCurrency}`, data: categoryItems.map((item) => item.share), backgroundColor: accent }]
+        labels: structureItems.map((item) => `${'merchant' in item ? item.merchant : item.category} · ${item.currency}`),
+        datasets: [{ label: `Доля · ${analyticsCurrency}`, data: structureItems.map((item) => item.share), backgroundColor: accent }]
       },
       options: {
         indexAxis: 'y',
         responsive: true,
         plugins: {
           legend: { display: false },
-          tooltip: { callbacks: { label: (ctx) => `${categoryItems[ctx.dataIndex]?.share ?? 0}% · ${formatMoneyString(categoryItems[ctx.dataIndex]?.total || '0.00', categoryItems[ctx.dataIndex]?.currency || categoryCurrency)}` } }
+          tooltip: { callbacks: { label: (ctx) => `${structureItems[ctx.dataIndex]?.share ?? 0}% · ${formatMoneyString(structureItems[ctx.dataIndex]?.total || '0.00', structureItems[ctx.dataIndex]?.currency || analyticsCurrency)}` } }
         },
         scales: { x: { beginAtZero: true, max: 100 } }
       }
     }));
   }
   const dynamicsCanvas = document.querySelector<HTMLCanvasElement>('#dynamicsChart');
-  const dynamicsItems = dynamicsCurrency ? analytics.time_dynamics.items.filter((item) => item.currency === dynamicsCurrency) : analytics.time_dynamics.items;
+  const dynamicsItems = analyticsCurrency ? analytics.time_dynamics.items.filter((item) => item.currency === analyticsCurrency) : analytics.time_dynamics.items;
   if (dynamicsCanvas && dynamicsItems.length) {
     const labels = dynamicsItems.map((item) => item.date);
     const mode = state.globalFilters.operation_type === 'expense' || state.globalFilters.operation_type === 'income'
@@ -630,8 +647,13 @@ function renderCharts(): void {
     const datasets = [];
     const expensePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.expense));
     const incomePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.income));
-    if (mode !== 'income') datasets.push({ label: `Расходы · ${dynamicsCurrency}`, data: expensePoints.map((point) => point.value), borderColor: destructive, backgroundColor: 'rgba(184,50,66,.18)' });
-    if (mode !== 'expense') datasets.push({ label: `Доходы · ${dynamicsCurrency}`, data: incomePoints.map((point) => point.value), borderColor: positive, backgroundColor: 'rgba(20,122,67,.18)' });
+    const resultPoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.result));
+    if (mode === 'result') {
+      datasets.push({ label: `Финрезультат · ${analyticsCurrency}`, data: resultPoints.map((point) => point.value), borderColor: accent, backgroundColor: 'rgba(10,122,117,.18)' });
+    } else {
+      if (mode !== 'income') datasets.push({ label: `Расходы · ${analyticsCurrency}`, data: expensePoints.map((point) => point.value), borderColor: destructive, backgroundColor: 'rgba(184,50,66,.18)' });
+      if (mode !== 'expense') datasets.push({ label: `Доходы · ${analyticsCurrency}`, data: incomePoints.map((point) => point.value), borderColor: positive, backgroundColor: 'rgba(20,122,67,.18)' });
+    }
     chartInstances.push(new Chart(dynamicsCanvas, {
       type: 'line',
       data: { labels, datasets },
@@ -642,8 +664,8 @@ function renderCharts(): void {
           tooltip: {
             callbacks: {
               label: (ctx) => {
-                const source = ctx.datasetIndex === 0 && mode !== 'income' ? expensePoints : incomePoints;
-                return `${ctx.dataset.label}: ${formatMoneyString(source[ctx.dataIndex]?.original || '0.00', dynamicsCurrency)}`;
+                const source = mode === 'result' ? resultPoints : ctx.datasetIndex === 0 && mode !== 'income' ? expensePoints : incomePoints;
+                return `${ctx.dataset.label}: ${formatMoneyString(source[ctx.dataIndex]?.original || '0.00', analyticsCurrency)}`;
               }
             }
           }
@@ -778,6 +800,7 @@ function wireEvents(): void {
     const value = (event.currentTarget as HTMLSelectElement).value;
     hapticSelection();
     state.workspaceId = value === 'all' ? 'all' : value === 'null' || value === '' ? null : Number(value);
+    state.operationScope = undefined;
     await loadFilterCategories();
     await api.track('mini_app_workspace_changed', { scope: String(state.workspaceId) });
     await loadScreen();
@@ -791,6 +814,7 @@ function wireEvents(): void {
     } else {
       setGlobalFilters({ operation_type: state.globalFilters.operation_type, category: state.globalFilters.category, period });
     }
+    state.operationScope = undefined;
     await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type: state.globalFilters.operation_type, has_category_filter: String(state.globalFilters.category !== 'all'), source: 'mini_app' });
     await loadScreen();
   });
@@ -798,6 +822,7 @@ function wireEvents(): void {
     const operation_type = (event.currentTarget as HTMLSelectElement).value as GlobalFinancialFilters['operation_type'];
     hapticSelection();
     setGlobalFilters({ ...state.globalFilters, operation_type, category: 'all' });
+    state.operationScope = undefined;
     await loadFilterCategories();
     await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type, has_category_filter: 'false', source: 'mini_app' });
     await loadScreen();
@@ -806,25 +831,29 @@ function wireEvents(): void {
     const category = (event.currentTarget as HTMLSelectElement).value || 'all';
     hapticSelection();
     setGlobalFilters({ ...state.globalFilters, category });
+    state.operationScope = undefined;
     await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type: state.globalFilters.operation_type, has_category_filter: String(category !== 'all'), source: 'mini_app' });
     await loadScreen();
   });
   app.querySelector<HTMLInputElement>('[data-action="search"]')?.addEventListener('change', async (event) => {
     state.search = (event.currentTarget as HTMLInputElement).value.trim();
+    state.operationScope = undefined;
     await loadScreen();
   });
   app.querySelector<HTMLButtonElement>('[data-action="load-more"]')?.addEventListener('click', async () => {
     if (!operations) return;
-    const next = await api.operations(state.workspaceId, activeFilters(), operations.offset + operations.limit, state.search);
+    const next = await api.operations(state.workspaceId, { ...activeFilters(), ...(state.operationScope || {}) }, operations.offset + operations.limit, state.search);
     operations = { ...next, items: [...operations.items, ...next.items] };
     render();
   });
   app.querySelector<HTMLInputElement>('[data-action="start-date"]')?.addEventListener('change', async (event) => {
     setGlobalFilters({ ...state.globalFilters, start_date: (event.currentTarget as HTMLInputElement).value });
+    state.operationScope = undefined;
     if (state.globalFilters.end_date) await loadScreen();
   });
   app.querySelector<HTMLInputElement>('[data-action="end-date"]')?.addEventListener('change', async (event) => {
     setGlobalFilters({ ...state.globalFilters, end_date: (event.currentTarget as HTMLInputElement).value });
+    state.operationScope = undefined;
     if (state.globalFilters.start_date) await loadScreen();
   });
   app.querySelectorAll<HTMLSelectElement>('[data-action="chart-filter"]').forEach((select) => {
@@ -832,7 +861,7 @@ function wireEvents(): void {
       const chart = select.dataset.chart || '';
       state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
       if (chart === 'category') state.analyticsFilters.categoryType = select.value as 'expense' | 'income';
-      if (chart === 'dynamics') state.analyticsFilters.dynamicsType = select.value as 'expense' | 'income' | 'both';
+      if (chart === 'dynamics') state.analyticsFilters.dynamicsType = select.value as 'expense' | 'income' | 'result' | 'both';
       if (chart === 'radar') state.analyticsFilters.radarType = select.value as 'expense' | 'income';
       hapticSelection();
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: select.value, source: 'mini_app' });
@@ -850,13 +879,75 @@ function wireEvents(): void {
     select.addEventListener('change', async () => {
       const chart = select.dataset.chart || '';
       state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
-      if (chart === 'category') state.analyticsFilters.categoryCurrency = select.value;
-      if (chart === 'dynamics') state.analyticsFilters.dynamicsCurrency = select.value;
-      if (chart === 'radar') state.analyticsFilters.radarCurrency = select.value;
+      state.analyticsFilters.analyticsCurrency = select.value;
+      state.analyticsFilters.detailKind = undefined;
+      state.analyticsFilters.detailValue = undefined;
+      state.analyticsFilters.detailCurrency = undefined;
       hapticSelection();
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: 'currency', source: 'mini_app' });
       await loadScreen();
     });
+  });
+  app.querySelector<HTMLInputElement>('[data-action="analytics-search"]')?.addEventListener('change', async (event) => {
+    state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+    state.analyticsFilters.search = (event.currentTarget as HTMLInputElement).value.trim();
+    state.analyticsFilters.detailKind = undefined;
+    state.analyticsFilters.detailValue = undefined;
+    hapticSelection();
+    await api.track('mini_app_analytics_search_used', { has_query: String(Boolean(state.analyticsFilters.search)), source: 'mini_app' });
+    await loadScreen();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="analytics-structure"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+      state.analyticsFilters.structureMode = button.dataset.mode === 'merchant' ? 'merchant' : 'category';
+      hapticSelection();
+      await api.track('mini_app_analytics_structure_changed', { mode: state.analyticsFilters.structureMode, source: 'mini_app' });
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="analytics-drill"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+      state.analyticsFilters.detailKind = button.dataset.kind === 'merchant' ? 'merchant' : 'category';
+      state.analyticsFilters.detailValue = button.dataset.value || '';
+      state.analyticsFilters.detailCurrency = button.dataset.currency || state.analyticsFilters.analyticsCurrency;
+      state.analyticsFilters.detailOperationType = state.globalFilters.operation_type === 'income' ? 'income' : state.globalFilters.operation_type === 'expense' ? 'expense' : state.analyticsFilters.categoryType;
+      hapticSelection();
+      await api.track('mini_app_analytics_drilldown_opened', { kind: state.analyticsFilters.detailKind, source: 'mini_app' });
+      await loadScreen();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="analytics-back"]')?.addEventListener('click', async () => {
+    if (!state.analyticsFilters) return;
+    state.analyticsFilters.detailKind = undefined;
+    state.analyticsFilters.detailValue = undefined;
+    state.analyticsFilters.detailCurrency = undefined;
+    state.analyticsFilters.detailOperationType = undefined;
+    hapticSelection();
+    await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="analytics-open-operations"]')?.addEventListener('click', async () => {
+    const detail = analytics?.selected_detail;
+    if (!detail) return;
+    const scope = detail.operation_scope || {};
+    setGlobalFilters({
+      period: 'custom',
+      start_date: String(scope.start_date || analytics?.period.start_date || ''),
+      end_date: String(scope.end_date || analytics?.period.end_date || ''),
+      operation_type: detail.operation_type,
+      category: 'all',
+    });
+    state.search = '';
+    state.operationScope = {
+      currency: String(scope.currency || detail.currency || ''),
+      merchant: detail.kind === 'merchant' ? detail.title : undefined,
+      category_key: detail.kind === 'category' ? String(detail.category_key || '') : undefined,
+    };
+    state.tab = 'operations';
+    state.sheet = null;
+    await api.track('mini_app_analytics_operations_opened', { kind: detail.kind, source: 'mini_app' });
+    await loadScreen();
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="plans-mode"]').forEach((button) => {
     button.addEventListener('click', async () => {

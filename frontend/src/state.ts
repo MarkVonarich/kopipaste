@@ -76,7 +76,7 @@ export function initialState(): AppState {
     homeChallengeIndex: 0,
     homeFocusIndex: 0,
     homeReminderIndex: 0,
-    analyticsFilters: { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }
+    analyticsFilters: { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }
   };
 }
 

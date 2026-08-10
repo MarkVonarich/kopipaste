@@ -5,7 +5,7 @@ import { TransactionForm } from '../src/components/TransactionForm';
 import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
 import { CategoryBudgetForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from '../src/components/PlansScreen';
-import { AnalyticsScreen } from '../src/components/AnalyticsScreen';
+import { AnalyticsScreen, contributionRows, deltaText } from '../src/components/AnalyticsScreen';
 import { ActivityCalendarView } from '../src/components/ActivityCalendar';
 import { AdditionalMenu, ExportForm, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
 
@@ -175,6 +175,66 @@ describe('acceptance components', () => {
 
     expect(html).toContain('На 564% больше прошлого периода');
     expect(html).not.toContain('в прошлом сопоставимом периоде');
+  });
+
+  it('formats signed analytics deltas without adding a false percentage sign', () => {
+    expect(deltaText({ delta: '150.00', pct: '30.00', state: 'ok' }, 'RUB')).toBe('+150 ₽ · +30,00%');
+    expect(deltaText({ delta: '-250.00', pct: '-25.00', state: 'ok' }, 'RUB')).toBe('-250 ₽ · -25,00%');
+    expect(deltaText({ delta: '850.00', pct: null, state: 'sign_change' }, 'RUB')).toBe('смена знака · +850 ₽');
+    expect(deltaText({ delta: '100.00', pct: null, state: 'zero_baseline' }, 'RUB')).toBe('было 0 · +100 ₽');
+  });
+
+  it('scales contribution bars by visible max absolute delta', () => {
+    const html = contributionRows([
+      { category: 'Small', currency: 'RUB', total: '100.00', previous_total: '0.00', delta: '100.00', count: 1, share: 10 },
+      { category: 'Large', currency: 'RUB', total: '10000.00', previous_total: '0.00', delta: '10000.00', count: 1, share: 90 },
+    ], 'RUB');
+
+    expect(html).toContain('width:8%');
+    expect(html).toContain('width:100%');
+    expect(html).toContain('Small');
+    expect(html).toContain('Large');
+  });
+
+  it('renders synthetic and fallback analytics rows without drill actions', () => {
+    const categoryHtml = AnalyticsScreen({
+      period: overview.period,
+      overview,
+      aggregation_available: true,
+      available_currencies: ['RUB'],
+      radar_available_currencies: ['RUB'],
+      selected_currency: 'RUB',
+      currency_groups: {},
+      summary: {
+        aggregation_available: true,
+        available_currencies: ['RUB'],
+        currency_groups: { RUB: { income: '0.00', expense: '1500.00', result: '-1500.00', count: 7 } },
+        totals_by_currency: { RUB: { income: '0.00', expense: '1500.00', count: 7 } },
+        result_by_currency: { RUB: '-1500.00' },
+      },
+      category_structure: { type: 'expense', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '1500.00', items: [
+        { key: 'food', category: 'Food', currency: 'RUB', total: '1000.00', previous_total: '800.00', delta: '200.00', count: 5, share: 67, drillable: true },
+        { key: '__synthetic_other_category__', category: 'Остальные', currency: 'RUB', total: '500.00', previous_total: '0.00', delta: '500.00', count: 2, share: 33, synthetic: true, drillable: false },
+      ] } }, items: [] },
+      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '1500.00', items: [
+        { key: '__empty_merchant__', merchant: 'Без описания', currency: 'RUB', total: '500.00', previous_total: '0.00', delta: '500.00', count: 2, share: 33, fallback: true, drillable: false },
+        { key: '__synthetic_other_merchant__', merchant: 'Остальные', currency: 'RUB', total: '300.00', previous_total: '0.00', delta: '300.00', count: 1, share: 20, synthetic: true, drillable: false },
+      ] } }, items: [] },
+      change_contribution: { type: 'expense', currency_groups: { RUB: { currency: 'RUB', type: 'expense', current_total: '1500.00', previous_total: '800.00', total_delta: '700.00', reconciles: true, items: [
+        { key: 'food', category: 'Food', currency: 'RUB', total: '1000.00', previous_total: '800.00', delta: '200.00', count: 5, share: 67, drillable: true },
+        { key: '__synthetic_other_contribution__', category: 'Остальные', currency: 'RUB', total: '500.00', previous_total: '0.00', delta: '500.00', count: 2, share: 33, synthetic: true, drillable: false },
+      ] } }, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+      radar: { type: 'expense', currency: 'RUB', current_period: overview.period, previous_period: overview.period, metric: 'absolute_amount', max_axes: 6, scale: { max: '0.00', step: '0.00', ticks: [] }, insufficient_data: true, explanation: '', axes: [] },
+      activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 0, days: [] },
+      search: { query: '', items: [] },
+      selected_detail: null,
+      top_expense_categories: [],
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', analyticsCurrency: 'RUB' }, { period: 'current_month', operation_type: 'all', category: 'all' });
+
+    expect(categoryHtml).toContain('data-action="analytics-drill" data-kind="category" data-value="Food"');
+    expect(categoryHtml).not.toContain('data-value="Остальные"');
+    expect(categoryHtml).not.toContain('data-kind="merchant" data-value="Без описания"');
   });
 
   it('renders multiple currencies without false aggregation', () => {
@@ -370,7 +430,7 @@ describe('acceptance components', () => {
     expect(html).toContain('value="2026-08-20"');
   });
 
-  it('renders analytics charts with local filter controls and radar empty state', () => {
+  it('renders analytics charts with one currency context and no primary radar section', () => {
     const html = AnalyticsScreen({
       period: overview.period,
       overview,
@@ -385,15 +445,20 @@ describe('acceptance components', () => {
       available_currencies: ['RUB'],
       radar_available_currencies: ['RUB'],
       selected_currency: null,
+      previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-04' },
       currency_groups: {
         RUB: {
           summary: { income: '1000.00', expense: '350.25', result: '649.75', count: 2 },
           category_structure: { currency: 'RUB', total: '350.25', items: [{ category: 'Food', currency: 'RUB', total: '350.25', count: 2, share: 70 }] },
-          time_dynamics: { currency: 'RUB', datasets: [{ kind: 'expense', items: [{ date: '2026-08-04', amount: '350.25', count: 2 }] }, { kind: 'income', items: [{ date: '2026-08-04', amount: '1000.00', count: 2 }] }] }
+          merchant_structure: { currency: 'RUB', total: '350.25', items: [{ merchant: 'Lavka', currency: 'RUB', total: '350.25', count: 2, share: 70 }] },
+          time_dynamics: { currency: 'RUB', datasets: [{ kind: 'expense', items: [{ date: '2026-08-04', amount: '350.25', count: 2 }] }, { kind: 'income', items: [{ date: '2026-08-04', amount: '1000.00', count: 2 }] }, { kind: 'result', items: [{ date: '2026-08-04', amount: '649.75', count: 2 }] }] }
         }
       },
+      overview_metrics: { RUB: { income: { current: '1000.00', previous: '800.00', delta: '200.00', pct: '25.00', state: 'ok' }, expense: { current: '350.25', previous: '300.00', delta: '50.25', pct: '16.75', state: 'ok' }, result: { current: '649.75', previous: '500.00', delta: '149.75', pct: '29.95', state: 'ok' }, count: 2, previous_count: 1 } },
       category_structure: { type: 'expense', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '350.25', items: [{ category: 'Food', currency: 'RUB', total: '350.25', count: 2, share: 70 }] } }, items: [{ category: 'Food', currency: 'RUB', total: '350.25', count: 2, share: 70 }] },
-      time_dynamics: { grouping: 'day', currency_groups: { RUB: { currency: 'RUB', datasets: [{ kind: 'expense', items: [{ date: '2026-08-04', amount: '350.25', count: 2 }] }, { kind: 'income', items: [{ date: '2026-08-04', amount: '1000.00', count: 2 }] }] } }, items: [{ date: '2026-08-04', currency: 'RUB', income: '1000.00', expense: '350.25', count: 2 }] },
+      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '350.25', items: [{ merchant: 'Lavka', currency: 'RUB', total: '350.25', count: 2, share: 70 }] } }, items: [{ merchant: 'Lavka', currency: 'RUB', total: '350.25', count: 2, share: 70 }] },
+      change_contribution: { type: 'expense', currency_groups: { RUB: { currency: 'RUB', type: 'expense', current_total: '350.25', previous_total: '300.00', total_delta: '50.25', reconciles: true, items: [{ category: 'Food', currency: 'RUB', total: '350.25', previous_total: '300.00', delta: '50.25', count: 2, share: 100 }] } }, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: { RUB: { currency: 'RUB', datasets: [{ kind: 'expense', items: [{ date: '2026-08-04', amount: '350.25', count: 2 }] }, { kind: 'income', items: [{ date: '2026-08-04', amount: '1000.00', count: 2 }] }, { kind: 'result', items: [{ date: '2026-08-04', amount: '649.75', count: 2 }] }] } }, items: [{ date: '2026-08-04', currency: 'RUB', income: '1000.00', expense: '350.25', result: '649.75', count: 2 }] },
       radar: {
         type: 'expense',
         currency: 'RUB',
@@ -408,18 +473,23 @@ describe('acceptance components', () => {
         axes: [],
       },
       activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 2, days: [{ date: '2026-08-01', count: 0 }, { date: '2026-08-02', count: 1 }, { date: '2026-08-03', count: 2 }, { date: '2026-08-04', count: 1 }] },
+      search: { query: '', items: [] },
+      selected_detail: null,
       top_expense_categories: [],
     }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_month', operation_type: 'all', category: 'all' });
 
     expect(html).toContain('categoryChart');
     expect(html).toContain('dynamicsChart');
+    expect(html).toContain('Финрезультат');
     expect(html).toContain('data-chart="category"');
-    expect(html).toContain('Недостаточно данных');
+    expect(html).not.toContain('Radar');
     expect(html).toContain('data-action="export-open"');
     expect(html).toContain('Открыть экспорт');
+    expect(html).toContain('Что изменилось');
+    expect(html).toContain('data-action="analytics-drill"');
   });
 
-  it('renders money radar long labels and keeps activity out of Analytics', () => {
+  it('keeps legacy radar data out of primary Analytics and keeps activity out', () => {
     const longCategory = 'Фиксированные расходы на коммунальные услуги';
     const html = AnalyticsScreen({
       period: overview.period,
@@ -429,6 +499,7 @@ describe('acceptance components', () => {
       radar_available_currencies: ['RUB'],
       selected_currency: 'RUB',
       currency_groups: {},
+      previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-04' },
       summary: {
         aggregation_available: true,
         available_currencies: ['RUB'],
@@ -437,6 +508,8 @@ describe('acceptance components', () => {
         result_by_currency: { RUB: '-22000.00' },
       },
       category_structure: { type: 'expense', top_n: 5, currency_groups: {}, items: [] },
+      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: {}, items: [] },
+      change_contribution: { type: 'expense', currency_groups: {}, items: [] },
       time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
       radar: {
         type: 'expense',
@@ -456,19 +529,15 @@ describe('acceptance components', () => {
         ],
       },
       activity_calendar: { start_date: '2026-07-31', end_date: '2026-08-03', max_count: 4, days: [{ date: '2026-07-31', count: 0 }, { date: '2026-08-01', count: 2 }, { date: '2026-08-02', count: 4 }, { date: '2026-08-03', count: 1 }] },
+      search: { query: '', items: [] },
+      selected_detail: null,
       top_expense_categories: [],
     }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, { period: 'current_month', operation_type: 'expense', category: 'all' });
 
     expect(html).toContain('<details class="chart-details">');
-    expect(html).toContain('<tspan');
-    expect(html).toContain('Фиксированные');
-    expect(html).toContain('расходы');
-    expect(html).toContain('коммунальные');
-    expect(html).toContain('услуги');
-    expect(html).toContain(`<title>${longCategory}: текущий период 15000.00 RUB`);
-    expect(html).not.toContain('...');
-    expect(html).toContain('5к');
-    expect(html).toContain('Текущий период');
+    expect(html).not.toContain('<svg class="radar"');
+    expect(html).not.toContain(`<title>${longCategory}: текущий период 15000.00 RUB`);
+    expect(html).not.toContain('Текущий период');
     expect(html).not.toContain('Количество операций по дням');
     expect(html).not.toContain('activity-calendar');
   });
@@ -495,6 +564,7 @@ describe('acceptance components', () => {
       available_currencies: ['RUB', 'EUR'],
       radar_available_currencies: ['RUB', 'EUR'],
       selected_currency: 'RUB',
+      previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-04' },
       currency_groups: {},
       summary: {
         aggregation_available: false,
@@ -515,6 +585,14 @@ describe('acceptance components', () => {
         },
         items: [rubItem, eurItem],
       },
+      merchant_structure: {
+        type: 'expense',
+        dimension: 'merchant',
+        top_n: 5,
+        currency_groups: { EUR: { currency: 'EUR', total: '40.00', items: [{ merchant: 'Cafe', currency: 'EUR', total: '40.00', count: 1, share: 100 }] } },
+        items: [{ merchant: 'Cafe', currency: 'EUR', total: '40.00', count: 1, share: 100 }],
+      },
+      change_contribution: { type: 'expense', currency_groups: { EUR: { currency: 'EUR', type: 'expense', current_total: '40.00', previous_total: '0.00', total_delta: '40.00', reconciles: true, items: [eurItem] } }, items: [] },
       time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
       radar: {
         type: 'expense',
@@ -531,14 +609,72 @@ describe('acceptance components', () => {
         axes: [],
       },
       activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 0, days: [] },
+      search: { query: '', items: [] },
+      selected_detail: null,
       top_expense_categories: [],
-    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', categoryCurrency: 'EUR', dynamicsCurrency: 'RUB', radarCurrency: 'RUB' }, { period: 'current_month', operation_type: 'all', category: 'all' });
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', analyticsCurrency: 'EUR' }, { period: 'current_month', operation_type: 'all', category: 'all' });
 
     expect(html).toContain('Валюты показаны отдельно. Автоматическая конвертация не выполняется.');
     expect(html).toContain('data-action="chart-currency"');
+    expect(html).toContain('data-chart="analytics"');
     expect(html).toContain('40 €');
     expect(html).toContain('Cafe');
     expect(html).not.toContain('Food</span><strong>350,25 ₽');
+  });
+
+  it('renders analytics search, merchant drilldown and operation navigation', () => {
+    const html = AnalyticsScreen({
+      period: overview.period,
+      previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-04' },
+      overview,
+      aggregation_available: true,
+      available_currencies: ['RUB'],
+      radar_available_currencies: ['RUB'],
+      selected_currency: 'RUB',
+      currency_groups: {},
+      summary: {
+        aggregation_available: true,
+        available_currencies: ['RUB'],
+        currency_groups: { RUB: { income: '0.00', expense: '500.00', result: '-500.00', count: 2 } },
+        totals_by_currency: { RUB: { income: '0.00', expense: '500.00', count: 2 } },
+        result_by_currency: { RUB: '-500.00' },
+      },
+      overview_metrics: { RUB: { income: { current: '0.00', previous: '0.00', delta: '0.00', pct: null, state: 'empty_previous' }, expense: { current: '500.00', previous: '300.00', delta: '200.00', pct: '66.67', state: 'ok' }, result: { current: '-500.00', previous: '-300.00', delta: '-200.00', pct: '66.67', state: 'ok' }, count: 2, previous_count: 1 } },
+      category_structure: { type: 'expense', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '500.00', items: [{ category: 'Food', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100 }] } }, items: [] },
+      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '500.00', items: [{ merchant: 'Lavka', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100 }] } }, items: [] },
+      change_contribution: { type: 'expense', currency_groups: { RUB: { currency: 'RUB', type: 'expense', current_total: '500.00', previous_total: '300.00', total_delta: '200.00', reconciles: true, items: [{ category: 'Food', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100 }] } }, items: [] },
+      time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
+      radar: { type: 'expense', currency: 'RUB', aggregation_available: true, current_period: overview.period, previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-04' }, metric: 'absolute_amount', max_axes: 6, scale: { max: '0.00', step: '0.00', ticks: ['0.00'] }, insufficient_data: true, explanation: 'Недостаточно данных', axes: [] },
+      activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 0, days: [] },
+      search: { query: 'Lav', items: [{ kind: 'merchant', title: 'Lavka', subtitle: '2 операций', currency: 'RUB', amount: '500.00' }, { kind: 'operation', title: 'Lavka', subtitle: 'Food', currency: 'RUB', amount: '250.00', operation_id: 7 }] },
+      selected_detail: {
+        kind: 'merchant',
+        title: 'Lavka',
+        currency: 'RUB',
+        operation_type: 'expense',
+        total: '500.00',
+        operation_count: 2,
+        previous_operation_count: 1,
+        previous_total: '300.00',
+        delta: '200.00',
+        pct: '66.67',
+        state: 'ok',
+        average_check: '250.00',
+        previous_average_check: '300.00',
+        operations: [{ id: 7, op_date: '2026-08-02', type: 'Расходы', category: 'Food', amount: '250.00', amount_text: '250 ₽', currency: 'RUB', description: 'Lavka', workspace_id: 10 }],
+        operation_scope: { workspace_id: 10, period: 'custom', start_date: '2026-08-01', end_date: '2026-08-04', operation_type: 'expense', category: 'all', currency: 'RUB', merchant: 'Lavka' },
+      },
+      top_expense_categories: [],
+    }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', analyticsCurrency: 'RUB', structureMode: 'merchant', search: 'Lav', detailKind: 'merchant', detailValue: 'Lavka', detailCurrency: 'RUB', detailOperationType: 'expense' }, { period: 'current_month', operation_type: 'all', category: 'all' });
+
+    expect(html).toContain('Категория, магазин или операция');
+    expect(html).toContain('data-action="analytics-structure" data-mode="merchant"');
+    expect(html).toContain('data-action="analytics-drill" data-kind="merchant"');
+    expect(html).toContain('Средний чек');
+    expect(html).toContain('+200 ₽ · +66,67%');
+    expect(html).toContain('data-action="operation-detail" data-id="7"');
+    expect(html).toContain('data-action="analytics-back"');
+    expect(html).toContain('data-action="analytics-open-operations"');
   });
 
   it('renders goal preview before confirm save and visible schedule controls', () => {

@@ -37,8 +37,12 @@ def _mention(text="@uchet_finbot", offset=0):
     return SimpleNamespace(type="mention", offset=offset, length=len(text))
 
 
-def _text_mention(user_id=777):
-    return SimpleNamespace(type="text_mention", offset=0, length=5, user=SimpleNamespace(id=user_id))
+def _text_mention(user_id=777, offset=0, length=3):
+    return SimpleNamespace(type="text_mention", offset=offset, length=length, user=SimpleNamespace(id=user_id))
+
+
+def _utf16_offset(text: str, needle: str) -> int:
+    return len(text[:text.index(needle)].encode("utf-16-le")) // 2
 
 
 def test_random_group_text_is_ignored(monkeypatch):
@@ -118,7 +122,44 @@ def test_text_mention_entity_for_bot_is_processed(monkeypatch):
 
     asyncio.run(messages.handle_text(update, _context()))
 
-    assert calls == ["бот такси 890"]
+    assert calls == ["такси 890"]
+
+
+def test_utf16_mention_offset_is_stripped_after_emoji(monkeypatch):
+    from routers import messages
+
+    calls = []
+
+    async def _fake_group_text(_update, _context, input_text):
+        calls.append(input_text)
+
+    monkeypatch.setattr(messages, "_process_group_text", _fake_group_text)
+    text = "🔥 @uchet_finbot такси 890"
+    update = _update(text=text, entities=[_mention(offset=_utf16_offset(text, "@uchet_finbot"))])
+
+    asyncio.run(messages.handle_text(update, _context()))
+
+    assert calls == ["такси 890"]
+
+
+def test_stale_group_custom_category_state_is_silent_without_new_intent(monkeypatch):
+    from routers import messages
+
+    monkeypatch.setattr(messages, "_process_group_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("group parser must stay silent")))
+    context = _context()
+    context.user_data["await_group_custom_category"] = {
+        "draft_id": "d1",
+        "chat_id": -200,
+        "workspace_id": 10,
+        "actor_user_id": 22,
+    }
+    update = _update(text="обычный разговор 500")
+
+    result = asyncio.run(messages.handle_text(update, context))
+
+    assert result is None
+    assert update.effective_message.replies == []
+    assert "await_group_custom_category" not in context.user_data
 
 
 def test_group_mention_preserves_workspace_actor_and_source(monkeypatch):

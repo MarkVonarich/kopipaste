@@ -5,6 +5,8 @@ import type {
   CategoryOption,
   ChartCategoryItem,
   CategoryCurrencyGroup,
+  MerchantCurrencyGroup,
+  MerchantStructureItem,
   Goal,
   GoalMovement,
   GoalPlanPreview,
@@ -55,6 +57,7 @@ export type Overview = {
 
 export type AnalyticsResponse = {
   period: { key: string; start_date: string; end_date: string };
+  previous_period?: { key: string; start_date: string; end_date: string };
   filters?: { operation_type: string; category: string };
   overview: Overview;
   aggregation_available: boolean;
@@ -64,6 +67,7 @@ export type AnalyticsResponse = {
   currency_groups: Record<string, {
     summary: { income: string; expense: string; result: string; count: number };
     category_structure: CategoryCurrencyGroup;
+    merchant_structure?: MerchantCurrencyGroup;
     time_dynamics: TimeDynamicsCurrencyGroup;
   }>;
   summary: {
@@ -73,7 +77,10 @@ export type AnalyticsResponse = {
     totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
     result_by_currency: Record<string, string>;
   };
+  overview_metrics?: Record<string, Record<'income' | 'expense' | 'result', { current: string; previous: string; delta: string; pct?: string | null; state: string }> & { count: number; previous_count: number }>;
   category_structure: { type: 'expense' | 'income'; top_n: number; currency_groups: Record<string, CategoryCurrencyGroup>; items: ChartCategoryItem[] };
+  merchant_structure?: { type: 'expense' | 'income'; dimension: 'merchant'; top_n: number; currency_groups: Record<string, MerchantCurrencyGroup>; items: MerchantStructureItem[] };
+  change_contribution?: { type: 'expense' | 'income'; currency_groups: Record<string, { currency: string; type: 'expense' | 'income'; current_total: string; previous_total: string; total_delta: string; reconciles: boolean; items: ChartCategoryItem[] }>; items: ChartCategoryItem[] };
   time_dynamics: { grouping: string; currency_groups: Record<string, TimeDynamicsCurrencyGroup>; items: TimeDynamicsItem[] };
   radar: {
     type: 'expense' | 'income';
@@ -90,6 +97,27 @@ export type AnalyticsResponse = {
     axes: RadarMoneyAxis[];
   };
   activity_calendar: ActivityCalendar;
+  search?: { query: string; items: Array<{ kind: 'category' | 'merchant' | 'operation'; title: string; subtitle: string; currency: string; amount: string; operation_id?: number; params?: Record<string, string> }> };
+  selected_detail?: null | {
+    kind: 'category' | 'merchant';
+    title: string;
+    currency: string;
+    operation_type: 'expense' | 'income';
+    category_key?: string;
+    total?: string;
+    visible_total?: string;
+    previous_total?: string;
+    delta?: string;
+    pct?: string | null;
+    state?: string;
+    operation_count: number;
+    previous_operation_count?: number;
+    average_check?: string;
+    previous_average_check?: string;
+    merchant_breakdown?: MerchantCurrencyGroup;
+    operations: Operation[];
+    operation_scope: Record<string, string | number | null>;
+  };
   top_expense_categories: ChartCategoryItem[];
 };
 
@@ -207,7 +235,7 @@ export const api = {
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
   overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
-  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters, offset = 0, search = '') =>
+  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; category_key?: string }, offset = 0, search = '') =>
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
   categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),
@@ -228,7 +256,7 @@ export const api = {
   updateOperation: (id: number, payload: Partial<OperationPayload>) =>
     apiFetch<{ operation: Operation }>(`/miniapp/api/operations/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteOperation: (id: number) => apiFetch<{ deleted: boolean; operation_id: number }>(`/miniapp/api/operations/${id}`, { method: 'DELETE', body: '{}' }),
-  analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string }) =>
+  analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string; analytics_search?: string; detail_kind?: string; detail_value?: string; detail_currency?: string; detail_operation_type?: string }) =>
     apiFetch<AnalyticsResponse>(
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
     ),

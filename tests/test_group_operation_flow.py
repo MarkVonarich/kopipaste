@@ -355,4 +355,7 @@ def test_group_custom_category_handler_clears_state_for_private_or_wrong_group(m
         asyncio.run(messages.handle_text(update, context))
 
         assert "await_group_custom_category" not in user_data
-        assert update.effective_message.replies
+        if chat_type == "private":
+            assert update.effective_message.replies
+        else:
+            assert update.effective_message.replies == []

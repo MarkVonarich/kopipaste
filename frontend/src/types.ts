@@ -43,11 +43,33 @@ export type Operation = {
 export type MoneyTotal = { income: string; expense: string; count: number };
 
 export type ChartCategoryItem = {
+  key?: string;
   category: string;
   currency: string;
   total: string;
+  previous_total?: string;
+  delta?: string;
+  previous_count?: number;
   count: number;
   share: number;
+  synthetic?: boolean;
+  drillable?: boolean;
+  fallback?: boolean;
+};
+
+export type MerchantStructureItem = {
+  key?: string;
+  merchant: string;
+  currency: string;
+  total: string;
+  previous_total?: string;
+  delta?: string;
+  previous_count?: number;
+  count: number;
+  share: number;
+  synthetic?: boolean;
+  drillable?: boolean;
+  fallback?: boolean;
 };
 
 export type CategoryCurrencyGroup = {
@@ -56,16 +78,23 @@ export type CategoryCurrencyGroup = {
   items: ChartCategoryItem[];
 };
 
+export type MerchantCurrencyGroup = {
+  currency: string;
+  total: string;
+  items: MerchantStructureItem[];
+};
+
 export type TimeDynamicsItem = {
   date: string;
   currency: string;
   income: string;
   expense: string;
+  result: string;
   count: number;
 };
 
 export type TimeDynamicsDataset = {
-  kind: 'expense' | 'income';
+  kind: 'expense' | 'income' | 'result';
   items: Array<{ date: string; amount: string; count: number }>;
 };
 
@@ -329,6 +358,7 @@ export type AppState = {
   error?: string;
   detailOperationId?: number;
   search: string;
+  operationScope?: { currency?: string; merchant?: string; category_key?: string };
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;
@@ -349,12 +379,19 @@ export type AppState = {
   categoryType?: 'expense' | 'income';
   analyticsFilters?: {
     categoryType: 'expense' | 'income';
-    dynamicsType: 'expense' | 'income' | 'both';
+    dynamicsType: 'expense' | 'income' | 'result' | 'both';
     radarType: 'expense' | 'income';
     grouping?: 'day' | 'week' | 'month';
+    analyticsCurrency?: string;
     categoryCurrency?: string;
     dynamicsCurrency?: string;
     radarCurrency?: string;
+    structureMode?: 'category' | 'merchant';
+    search?: string;
+    detailKind?: 'category' | 'merchant';
+    detailValue?: string;
+    detailCurrency?: string;
+    detailOperationType?: 'expense' | 'income';
   };
   selectedGoalId?: number;
   selectedLimitId?: string;

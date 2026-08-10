@@ -87,6 +87,7 @@ from services.reminders import (
     toggle_reminder,
     update_reminder,
 )
+from utils.text import norm_text
 from services.limit_alerts import alert_status_for_band, threshold_band
 from services.miniapp_limits import (
     MiniAppLimitError,
@@ -614,7 +615,12 @@ class MiniAppAPI:
     def _previous_period(self, start: date, end: date, period_key: str) -> tuple[date, date, str]:
         if period_key == "current_month":
             prev_end = start - timedelta(days=1)
-            return prev_end.replace(day=1), prev_end, "previous_month"
+            prev_start = prev_end.replace(day=1)
+            current_length = (end - start).days + 1
+            current_month_full = (end + timedelta(days=1)).day == 1
+            if current_month_full:
+                return prev_start, prev_end, "previous_month"
+            return prev_start, min(prev_start + timedelta(days=current_length - 1), prev_end), "previous_month_to_date"
         if period_key == "previous_month":
             prev_end = start - timedelta(days=1)
             return prev_end.replace(day=1), prev_end, "month_before_previous"
@@ -1214,11 +1220,33 @@ class MiniAppAPI:
 
     def operations(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
-        tx = self._transaction_filters(req, params, alias="o")
+        category_key = str(params.get("category_key") or "").strip()
+        tx_params = {**params, "category": "all"} if category_key else params
+        tx = self._transaction_filters(req, tx_params, alias="o")
         limit = min(max(int(params.get("limit") or DEFAULT_PAGE_SIZE), 1), READ_PAGE_LIMIT)
         offset = max(int(params.get("offset") or 0), 0)
         filters = [tx.where_sql]
         values: list[Any] = [*tx.params]
+        currency = str(params.get("currency") or "").strip().upper()
+        if currency:
+            if currency not in ALLOWED_CURRENCIES:
+                raise MiniAppError(400, "bad_currency", "Invalid currency.")
+            filters.append("COALESCE(o.currency, %s)=%s")
+            values.extend([get_user_currency(req.user_id), currency])
+        if category_key:
+            if len(category_key) > 80:
+                raise MiniAppError(400, "bad_category", "Invalid category.")
+            filters.append(f"{self._category_key_sql('o.category')}=%s")
+            try:
+                values.append(normalized_category_key(category_key))
+            except ValueError as exc:
+                raise MiniAppError(400, "bad_category", "Invalid category.") from exc
+        merchant = str(params.get("merchant") or "").strip()
+        if merchant:
+            if len(merchant) > 120:
+                raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
+            filters.append("TRIM(COALESCE(o.comment,''))=%s")
+            values.append(merchant)
         if params.get("member_user_id"):
             filters.append("o.actor_user_id=%s")
             values.append(int(params["member_user_id"]))
@@ -1459,20 +1487,22 @@ class MiniAppAPI:
         available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
         requested_currency = str(params.get("currency") or "").strip().upper()
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
+        prev_tx = self._tx_for_period(req, tx, prev_start, prev_end, _prev_key)
         radar_type = self._chart_op_type(params, "radar_type", tx.operation_type)
         radar_available_currencies = self._radar_currencies(req, tx, prev_start, prev_end, radar_type)
-        if requested_currency and requested_currency not in set(available_currencies) | set(radar_available_currencies):
-            raise MiniAppError(400, "bad_currency", "Currency is not available for this scope.")
-        if requested_currency and requested_currency in available_currencies:
-            if requested_currency not in available_currencies:
-                raise MiniAppError(400, "bad_currency", "Currency is not available for this scope.")
+        if requested_currency and requested_currency not in ALLOWED_CURRENCIES:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.")
+        selected_currency = requested_currency if requested_currency in available_currencies else None
+        if selected_currency:
             chart_currencies = [requested_currency]
         else:
             chart_currencies = available_currencies
-        aggregation_available = len(available_currencies) <= 1
+        aggregation_available = len(chart_currencies) <= 1
         category_type = self._chart_op_type(params, "category_type", tx.operation_type)
         grouping = self._validated_grouping(str(params.get("grouping") or "auto"), tx.start, tx.end)
-        structure = self._category_structure(req, tx, category_type, currencies=chart_currencies)
+        structure = self._dimension_structure(req, tx, prev_tx, category_type, dimension="category", currencies=chart_currencies)
+        merchant_structure = self._dimension_structure(req, tx, prev_tx, category_type, dimension="merchant", currencies=chart_currencies)
+        contribution = self._change_contribution(req, tx, prev_tx, category_type, currencies=chart_currencies)
         dynamics = self._time_dynamics(req, tx, grouping=grouping, currencies=chart_currencies)
         radar = self._radar(
             req,
@@ -1481,29 +1511,41 @@ class MiniAppAPI:
             prev_end,
             _prev_key,
             radar_type,
-            currency=requested_currency or (radar_available_currencies[0] if len(radar_available_currencies) == 1 else None),
+            currency=selected_currency or (requested_currency if requested_currency in radar_available_currencies else None) or (radar_available_currencies[0] if len(radar_available_currencies) == 1 else None),
             available_currencies=radar_available_currencies,
         )
         activity = self._activity_calendar(req, tx)
+        previous_totals = self._totals_for_tx(req, prev_tx, currencies=chart_currencies)
+        overview_metrics = self._overview_metrics(overview["totals_by_currency"], previous_totals, currencies=chart_currencies or None)
+        detail_type = self._chart_op_type(params, "detail_operation_type", tx.operation_type) if params.get("detail_kind") else category_type
+        selected_detail = self._analytics_detail(req, tx, prev_tx, params, detail_type)
+        search = self._analytics_search(req, tx, params, category_type, currencies=chart_currencies)
+        response_currencies = chart_currencies if selected_currency else available_currencies
+        summary_totals = {
+            currency: overview["totals_by_currency"].get(currency, {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
+            for currency in response_currencies
+        }
         currency_groups = {
             currency: {
                 "summary": {
-                    **overview["totals_by_currency"][currency],
-                    "result": to_decimal_money(overview["totals_by_currency"][currency]["income"]) - to_decimal_money(overview["totals_by_currency"][currency]["expense"]),
+                    **overview["totals_by_currency"].get(currency, {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0}),
+                    "result": to_decimal_money(overview["totals_by_currency"].get(currency, {}).get("income") or 0) - to_decimal_money(overview["totals_by_currency"].get(currency, {}).get("expense") or 0),
                 },
                 "category_structure": structure["currency_groups"].get(currency, {"currency": currency, "total": Decimal("0.00"), "items": []}),
+                "merchant_structure": merchant_structure["currency_groups"].get(currency, {"currency": currency, "total": Decimal("0.00"), "items": []}),
                 "time_dynamics": dynamics["currency_groups"].get(currency, {"currency": currency, "datasets": []}),
             }
-            for currency in available_currencies
+            for currency in response_currencies
         }
         return success({
             "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
+            "previous_period": {"key": _prev_key, "start_date": prev_start, "end_date": prev_end},
             "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
             "overview": overview,
             "aggregation_available": aggregation_available,
             "available_currencies": available_currencies,
             "radar_available_currencies": radar_available_currencies,
-            "selected_currency": requested_currency or None,
+            "selected_currency": selected_currency,
             "currency_groups": currency_groups,
             "summary": {
                 "aggregation_available": aggregation_available,
@@ -1513,18 +1555,23 @@ class MiniAppAPI:
                         **values,
                         "result": to_decimal_money(values["income"]) - to_decimal_money(values["expense"]),
                     }
-                    for currency, values in overview["totals_by_currency"].items()
+                    for currency, values in summary_totals.items()
                 },
-                "totals_by_currency": overview["totals_by_currency"],
+                "totals_by_currency": summary_totals,
                 "result_by_currency": {
                     currency: to_decimal_money(values["income"]) - to_decimal_money(values["expense"])
-                    for currency, values in overview["totals_by_currency"].items()
+                    for currency, values in summary_totals.items()
                 },
             },
+            "overview_metrics": overview_metrics,
             "category_structure": structure,
+            "merchant_structure": merchant_structure,
+            "change_contribution": contribution,
             "time_dynamics": dynamics,
             "radar": radar,
             "activity_calendar": activity,
+            "search": search,
+            "selected_detail": selected_detail,
             "top_expense_categories": structure["items"],
         }, request_id=req.request_id)
 
@@ -1559,6 +1606,9 @@ class MiniAppAPI:
             (get_user_currency(req.user_id), *values, op_type),
         )
         return sorted(str(row[0]) for row in rows if row and row[0])
+
+    def _category_key_sql(self, column: str) -> str:
+        return f"REPLACE(LOWER(TRIM(REGEXP_REPLACE(COALESCE({column},''), '\\s+', ' ', 'g'))), 'ё', 'е')"
 
     def _category_structure(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, *, currencies: list[str] | None = None) -> dict:
         rows = pg_fetchall(
@@ -1628,11 +1678,12 @@ class MiniAppAPI:
             if currencies and str(currency) not in currencies:
                 continue
             bucket = self._bucket_date(op_date, grouping)
-            item = buckets.setdefault((bucket, str(currency)), {"date": bucket, "currency": str(currency), "income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
+            item = buckets.setdefault((bucket, str(currency)), {"date": bucket, "currency": str(currency), "income": Decimal("0.00"), "expense": Decimal("0.00"), "result": Decimal("0.00"), "count": 0})
             if typ == "Доходы":
                 item["income"] += to_decimal_money(total)
             elif typ == "Расходы":
                 item["expense"] += to_decimal_money(total)
+            item["result"] = item["income"] - item["expense"]
             item["count"] += int(count or 0)
         items = [buckets[key] for key in sorted(buckets)]
         groups: dict[str, dict[str, Any]] = {}
@@ -1643,9 +1694,529 @@ class MiniAppAPI:
                 "datasets": [
                     {"kind": "expense", "items": [{"date": item["date"], "amount": item["expense"], "count": item["count"]} for item in currency_items]},
                     {"kind": "income", "items": [{"date": item["date"], "amount": item["income"], "count": item["count"]} for item in currency_items]},
+                    {"kind": "result", "items": [{"date": item["date"], "amount": item["result"], "count": item["count"]} for item in currency_items]},
                 ],
             }
         return {"grouping": grouping, "currency_groups": groups, "items": items}
+
+    def _tx_for_period(self, req: MiniAppRequest, tx: TransactionFilters, start: date, end: date, period_key: str) -> TransactionFilters:
+        return self._transaction_filters(req, {
+            "workspace_id": "all" if tx.all_scope else tx.workspace_ids[0],
+            "period": "custom",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "operation_type": tx.operation_type,
+            "category": tx.category or "all",
+        })
+
+    def _totals_for_tx(self, req: MiniAppRequest, tx: TransactionFilters, *, currencies: list[str] | None = None) -> dict[str, dict[str, Decimal | int]]:
+        rows = pg_fetchall(
+            f"""
+            SELECT COALESCE(currency, %s), type, COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+             GROUP BY COALESCE(currency, %s), type
+            """,
+            (get_user_currency(req.user_id), *tx.params, get_user_currency(req.user_id)),
+        )
+        allowed = set(currencies or [])
+        totals: dict[str, dict[str, Decimal | int]] = {}
+        for currency, typ, total, count in rows:
+            currency_code = str(currency)
+            if allowed and currency_code not in allowed:
+                continue
+            bucket = totals.setdefault(currency_code, {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
+            if typ == "Доходы":
+                bucket["income"] = to_decimal_money(total)
+            elif typ == "Расходы":
+                bucket["expense"] = to_decimal_money(total)
+            bucket["count"] = int(bucket["count"]) + int(count or 0)
+        return totals
+
+    def _metric_comparison(self, current: Decimal, previous: Decimal, *, sign_change_on_cross_zero: bool = False) -> dict[str, Any]:
+        delta = current - previous
+        pct = None
+        state = "ok"
+        if previous == 0:
+            state = "zero_baseline" if current != 0 else "empty_previous"
+        elif sign_change_on_cross_zero and ((previous < 0 < current) or (previous > 0 > current)):
+            state = "sign_change"
+        else:
+            pct = (delta / abs(previous) * Decimal("100")).quantize(Decimal("0.01"))
+        return {"current": current, "previous": previous, "delta": delta, "pct": pct, "state": state}
+
+    def _overview_metrics(
+        self,
+        current: dict[str, dict[str, Decimal | int]],
+        previous: dict[str, dict[str, Decimal | int]],
+        *,
+        currencies: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        selected = set(currencies or [])
+        currency_codes = sorted((set(current) | set(previous)) if not selected else selected)
+        result: dict[str, dict[str, Any]] = {}
+        for currency in currency_codes:
+            cur = current.get(currency, {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
+            prev = previous.get(currency, {"income": Decimal("0.00"), "expense": Decimal("0.00"), "count": 0})
+            cur_income = to_decimal_money(cur.get("income") or 0)
+            cur_expense = to_decimal_money(cur.get("expense") or 0)
+            prev_income = to_decimal_money(prev.get("income") or 0)
+            prev_expense = to_decimal_money(prev.get("expense") or 0)
+            result[currency] = {
+                "income": self._metric_comparison(cur_income, prev_income),
+                "expense": self._metric_comparison(cur_expense, prev_expense),
+                "result": self._metric_comparison(cur_income - cur_expense, prev_income - prev_expense, sign_change_on_cross_zero=True),
+                "count": int(cur.get("count") or 0),
+                "previous_count": int(prev.get("count") or 0),
+            }
+        return result
+
+    def _dimension_rows(
+        self,
+        req: MiniAppRequest,
+        tx: TransactionFilters,
+        op_type: str,
+        *,
+        dimension: str,
+        currencies: list[str] | None = None,
+    ) -> list[tuple[str, str, Decimal, int]]:
+        if dimension == "merchant":
+            select_expr = "NULLIF(TRIM(COALESCE(comment,'')), '')"
+            group_expr = "NULLIF(TRIM(COALESCE(comment,'')), '')"
+        else:
+            select_expr = "category"
+            group_expr = "category"
+        rows = pg_fetchall(
+            f"""
+            SELECT {select_expr}, COALESCE(currency, %s), COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql} AND type=%s
+             GROUP BY {group_expr}, COALESCE(currency, %s)
+             ORDER BY COALESCE(SUM(amount),0) DESC, {group_expr}
+            """,
+            (get_user_currency(req.user_id), *tx.params, op_type, get_user_currency(req.user_id)),
+        )
+        allowed = set(currencies or [])
+        result = []
+        for raw_name, currency, total, count in rows:
+            currency_code = str(currency)
+            if allowed and currency_code not in allowed:
+                continue
+            result.append((str(raw_name or ""), currency_code, to_decimal_money(total), int(count or 0)))
+        return result
+
+    def _fold_dimension(self, rows: list[tuple[str, str, Decimal, int]], *, dimension: str) -> dict[str, dict[str, dict[str, Any]]]:
+        grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        for name, currency, total, count in rows:
+            raw_name = name.strip()
+            display_name = raw_name or ("Без описания" if dimension == "merchant" else "Прочее")
+            if dimension == "category":
+                try:
+                    key = normalized_category_key(display_name)
+                except ValueError:
+                    key = normalized_category_key("Прочее")
+                drillable = True
+                fallback = False
+            else:
+                key = raw_name or "__empty_merchant__"
+                drillable = bool(raw_name)
+                fallback = not raw_name
+            bucket = grouped[currency].setdefault(
+                key,
+                {
+                    "key": key,
+                    "name": display_name,
+                    "total": Decimal("0.00"),
+                    "count": 0,
+                    "synthetic": False,
+                    "drillable": drillable,
+                    "fallback": fallback,
+                },
+            )
+            bucket["total"] += total
+            bucket["count"] += count
+        return grouped
+
+    def _dimension_structure(
+        self,
+        req: MiniAppRequest,
+        tx: TransactionFilters,
+        prev_tx: TransactionFilters,
+        op_type: str,
+        *,
+        dimension: str,
+        currencies: list[str] | None = None,
+        top_n: int | None = CHART_TOP_N,
+    ) -> dict:
+        current = self._fold_dimension(self._dimension_rows(req, tx, op_type, dimension=dimension, currencies=currencies), dimension=dimension)
+        previous = self._fold_dimension(self._dimension_rows(req, prev_tx, op_type, dimension=dimension, currencies=currencies), dimension=dimension)
+        groups: dict[str, dict[str, Any]] = {}
+        flat_items = []
+        for currency in sorted(set(current) | set(previous)):
+            keys = set(current.get(currency, {})) | set(previous.get(currency, {}))
+            values = []
+            for key in keys:
+                prev = previous.get(currency, {}).get(key, {"name": key, "total": Decimal("0.00"), "count": 0})
+                cur = current.get(currency, {}).get(key, {"name": prev["name"], "total": Decimal("0.00"), "count": 0})
+                values.append({
+                    "key": key,
+                    "category" if dimension == "category" else "merchant": cur["name"],
+                    "currency": currency,
+                    "total": cur["total"],
+                    "previous_total": prev["total"],
+                    "delta": cur["total"] - prev["total"],
+                    "count": cur["count"],
+                    "previous_count": prev["count"],
+                    "synthetic": bool(cur.get("synthetic") or prev.get("synthetic")),
+                    "drillable": bool(cur.get("drillable", True) and prev.get("drillable", True)),
+                    "fallback": bool(cur.get("fallback") or prev.get("fallback")),
+                })
+            values.sort(key=lambda item: (-to_decimal_money(item["total"]), str(item.get("category") or item.get("merchant"))))
+            currency_total = sum((to_decimal_money(item["total"]) for item in values), Decimal("0.00"))
+            group_items = []
+            selected_values = values if top_n is None else values[:top_n]
+            for item in selected_values:
+                share = int((to_decimal_money(item["total"]) / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0
+                rendered = {**item, "share": share}
+                group_items.append(rendered)
+                flat_items.append(rendered)
+            if top_n is not None:
+                remainder = values[top_n:]
+                if remainder:
+                    other_current = sum((to_decimal_money(item["total"]) for item in remainder), Decimal("0.00"))
+                    other_previous = sum((to_decimal_money(item["previous_total"]) for item in remainder), Decimal("0.00"))
+                    other_count = sum((int(item.get("count") or 0) for item in remainder), 0)
+                    other_previous_count = sum((int(item.get("previous_count") or 0) for item in remainder), 0)
+                    rendered = {
+                        "key": f"__synthetic_other_{dimension}__",
+                        "category" if dimension == "category" else "merchant": "Остальные",
+                        "currency": currency,
+                        "total": other_current,
+                        "previous_total": other_previous,
+                        "delta": other_current - other_previous,
+                        "count": other_count,
+                        "previous_count": other_previous_count,
+                        "share": int((other_current / currency_total * Decimal("100")).to_integral_value()) if currency_total > 0 else 0,
+                        "synthetic": True,
+                        "drillable": False,
+                        "fallback": False,
+                    }
+                    group_items.append(rendered)
+                    flat_items.append(rendered)
+            groups[currency] = {"currency": currency, "total": currency_total, "items": group_items}
+        return {
+            "type": "income" if op_type == "Доходы" else "expense",
+            "dimension": dimension,
+            "top_n": top_n or len(flat_items),
+            "currency_groups": groups,
+            "items": flat_items,
+        }
+
+    def _change_contribution(
+        self,
+        req: MiniAppRequest,
+        tx: TransactionFilters,
+        prev_tx: TransactionFilters,
+        op_type: str,
+        *,
+        currencies: list[str] | None = None,
+    ) -> dict:
+        structure = self._dimension_structure(req, tx, prev_tx, op_type, dimension="category", currencies=currencies, top_n=None)
+        groups = {}
+        for currency, group in structure["currency_groups"].items():
+            all_items = sorted(group["items"], key=lambda item: (-abs(to_decimal_money(item["delta"])), str(item["category"])))
+            items = all_items[:CHART_TOP_N]
+            remainder = all_items[CHART_TOP_N:]
+            total_current = sum((to_decimal_money(item["total"]) for item in all_items), Decimal("0.00"))
+            total_previous = sum((to_decimal_money(item["previous_total"]) for item in all_items), Decimal("0.00"))
+            total_delta = total_current - total_previous
+            if remainder:
+                other_current = sum((to_decimal_money(item["total"]) for item in remainder), Decimal("0.00"))
+                other_previous = sum((to_decimal_money(item["previous_total"]) for item in remainder), Decimal("0.00"))
+                other_delta = other_current - other_previous
+                other_count = sum((int(item.get("count") or 0) for item in remainder), 0)
+                other_previous_count = sum((int(item.get("previous_count") or 0) for item in remainder), 0)
+                if other_current != 0 or other_previous != 0 or other_delta != 0 or other_count or other_previous_count:
+                    items.append({
+                        "key": "__synthetic_other_contribution__",
+                        "category": "Остальные",
+                        "currency": currency,
+                        "total": other_current,
+                        "previous_total": other_previous,
+                        "delta": other_delta,
+                        "count": other_count,
+                        "previous_count": other_previous_count,
+                        "share": int((other_current / total_current * Decimal("100")).to_integral_value()) if total_current > 0 else 0,
+                        "synthetic": True,
+                        "drillable": False,
+                        "fallback": False,
+                    })
+            groups[currency] = {
+                "currency": currency,
+                "type": "income" if op_type == "Доходы" else "expense",
+                "current_total": total_current,
+                "previous_total": total_previous,
+                "total_delta": total_delta,
+                "items": items,
+                "reconciles": sum((to_decimal_money(item["delta"]) for item in items), Decimal("0.00")) == total_delta,
+            }
+        return {"type": "income" if op_type == "Доходы" else "expense", "currency_groups": groups, "items": [item for group in groups.values() for item in group["items"]]}
+
+    def _analytics_operations_scope(self, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None) -> dict:
+        return {
+            "workspace_id": "all" if tx.all_scope else tx.workspace_ids[0],
+            "period": tx.period_key,
+            "start_date": tx.start.isoformat(),
+            "end_date": tx.end.isoformat(),
+            "operation_type": "income" if op_type == "Доходы" else "expense",
+            "category": "all" if category_key else tx.category or "all",
+            "currency": currency,
+            "category_key": category_key,
+            "merchant": merchant,
+        }
+
+    def _detail_operation_rows(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None, limit: int = 8) -> list[dict]:
+        params = self._analytics_operations_scope(tx, op_type, currency, category_key=category_key, merchant=merchant)
+        response = self.operations(req, {**params, "limit": limit, "offset": 0})
+        return response["data"]["items"]
+
+    def _category_merchant_breakdown(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, category_key: str) -> dict:
+        category_expr = self._category_key_sql("category")
+        rows = pg_fetchall(
+            f"""
+            SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type=%s
+               AND COALESCE(currency, %s)=%s
+               AND {category_expr}=%s
+             GROUP BY NULLIF(TRIM(COALESCE(comment,'')), '')
+             ORDER BY COALESCE(SUM(amount),0) DESC, NULLIF(TRIM(COALESCE(comment,'')), '')
+            """,
+            (*tx.params, op_type, get_user_currency(req.user_id), currency, category_key),
+        )
+        total = sum((to_decimal_money(row[1]) for row in rows), Decimal("0.00"))
+        total_count = sum((int(row[2] or 0) for row in rows), 0)
+        items = []
+        top_rows = rows[:CHART_TOP_N]
+        for merchant, amount, count in top_rows:
+            raw_merchant = str(merchant or "").strip()
+            item_total = to_decimal_money(amount)
+            share = int((item_total / total * Decimal("100")).to_integral_value()) if total > 0 else 0
+            items.append({
+                "key": raw_merchant or "__empty_merchant__",
+                "merchant": raw_merchant or "Без описания",
+                "currency": currency,
+                "total": item_total,
+                "count": int(count or 0),
+                "share": share,
+                "synthetic": False,
+                "drillable": bool(raw_merchant),
+                "fallback": not raw_merchant,
+            })
+        other_rows = rows[CHART_TOP_N:]
+        if other_rows:
+            other_total = sum((to_decimal_money(row[1]) for row in other_rows), Decimal("0.00"))
+            other_count = sum((int(row[2] or 0) for row in other_rows), 0)
+            items.append({
+                "key": "__synthetic_other_merchant__",
+                "merchant": "Остальные",
+                "currency": currency,
+                "total": other_total,
+                "count": other_count,
+                "share": int((other_total / total * Decimal("100")).to_integral_value()) if total > 0 else 0,
+                "synthetic": True,
+                "drillable": False,
+                "fallback": False,
+            })
+        return {"currency": currency, "total": total, "count": total_count, "items": items}
+
+    def _detail_summary(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None) -> dict[str, Any]:
+        filters = [tx.where_sql, "type=%s", "COALESCE(currency, %s)=%s"]
+        values: list[Any] = [*tx.params, op_type, get_user_currency(req.user_id), currency]
+        if category_key:
+            filters.append(f"{self._category_key_sql('category')}=%s")
+            values.append(category_key)
+        if merchant:
+            filters.append("TRIM(COALESCE(comment,''))=%s")
+            values.append(merchant)
+        rows = pg_fetchall(
+            f"""
+            SELECT COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {' AND '.join(filters)}
+            """,
+            tuple(values),
+        )
+        total = to_decimal_money(rows[0][0] if rows else 0)
+        count = int(rows[0][1] if rows else 0)
+        return {
+            "total": total,
+            "operation_count": count,
+            "average_check": (total / Decimal(count)).quantize(Decimal("0.01")) if count else Decimal("0.00"),
+        }
+
+    def _analytics_detail(self, req: MiniAppRequest, tx: TransactionFilters, prev_tx: TransactionFilters, params: dict[str, Any], op_type: str) -> dict | None:
+        kind = str(params.get("detail_kind") or "").strip()
+        if kind not in {"category", "merchant"}:
+            return None
+        value = str(params.get("detail_value") or "").strip()
+        currency = str(params.get("detail_currency") or params.get("currency") or "").strip().upper()
+        if not value or not currency:
+            return None
+        if currency not in ALLOWED_CURRENCIES:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.")
+        if kind == "category":
+            try:
+                category_key = normalized_category_key(value)
+            except ValueError as exc:
+                raise MiniAppError(400, "bad_category", "Invalid category.") from exc
+            operation_items = self._detail_operation_rows(req, tx, op_type, currency, category_key=category_key)
+            merchant_breakdown = self._category_merchant_breakdown(req, tx, op_type, currency, category_key)
+            current_summary = self._detail_summary(req, tx, op_type, currency, category_key=category_key)
+            previous_summary = self._detail_summary(req, prev_tx, op_type, currency, category_key=category_key)
+            comparison = self._metric_comparison(current_summary["total"], previous_summary["total"])
+            return {
+                "kind": "category",
+                "title": value,
+                "currency": currency,
+                "operation_type": "income" if op_type == "Доходы" else "expense",
+                "category_key": category_key,
+                "merchant_breakdown": merchant_breakdown,
+                "operations": operation_items,
+                "operation_count": current_summary["operation_count"],
+                "previous_operation_count": previous_summary["operation_count"],
+                "total": current_summary["total"],
+                "previous_total": previous_summary["total"],
+                "delta": comparison["delta"],
+                "pct": comparison["pct"],
+                "state": comparison["state"],
+                "visible_total": current_summary["total"],
+                "operation_scope": self._analytics_operations_scope(tx, op_type, currency, category_key=category_key),
+            }
+        operation_items = self._detail_operation_rows(req, tx, op_type, currency, merchant=value)
+        current_summary = self._detail_summary(req, tx, op_type, currency, merchant=value)
+        previous_summary = self._detail_summary(req, prev_tx, op_type, currency, merchant=value)
+        comparison = self._metric_comparison(current_summary["total"], previous_summary["total"])
+        return {
+            "kind": "merchant",
+            "title": value,
+            "currency": currency,
+            "operation_type": "income" if op_type == "Доходы" else "expense",
+            "total": current_summary["total"],
+            "previous_total": previous_summary["total"],
+            "delta": comparison["delta"],
+            "pct": comparison["pct"],
+            "state": comparison["state"],
+            "operation_count": current_summary["operation_count"],
+            "previous_operation_count": previous_summary["operation_count"],
+            "average_check": current_summary["average_check"],
+            "previous_average_check": previous_summary["average_check"],
+            "operations": operation_items,
+            "operation_scope": self._analytics_operations_scope(tx, op_type, currency, merchant=value),
+        }
+
+    def _analytics_search(self, req: MiniAppRequest, tx: TransactionFilters, params: dict[str, Any], op_type: str, *, currencies: list[str] | None = None) -> dict:
+        query = str(params.get("analytics_search") or params.get("q") or "").strip()
+        if len(query) < 2:
+            return {"query": query, "items": []}
+        q = f"%{query[:80]}%"
+        normalized_q = f"%{norm_text(query[:80])}%"
+        currency_filter = ""
+        currency_values: list[Any] = []
+        selected_currency = str(params.get("currency") or "").strip().upper()
+        if selected_currency:
+            currency_filter = "AND COALESCE(currency, %s)=%s"
+            currency_values.extend([get_user_currency(req.user_id), selected_currency])
+        category_expr = self._category_key_sql("category")
+        allowed = set(currencies or [])
+        category_rows = pg_fetchall(
+            f"""
+            SELECT {category_expr} AS category_key, MIN(TRIM(COALESCE(category, 'Прочее'))),
+                   COALESCE(currency, %s), COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type=%s
+               {currency_filter}
+               AND {category_expr} LIKE %s
+             GROUP BY {category_expr}, COALESCE(currency, %s)
+             ORDER BY COUNT(*) DESC, COALESCE(SUM(amount),0) DESC
+             LIMIT 4
+            """,
+            (get_user_currency(req.user_id), *tx.params, op_type, *currency_values, normalized_q, get_user_currency(req.user_id)),
+        )
+        merchant_rows = pg_fetchall(
+            f"""
+            SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s),
+                   COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type=%s
+               {currency_filter}
+               AND comment ILIKE %s
+             GROUP BY NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s)
+             ORDER BY COUNT(*) DESC, COALESCE(SUM(amount),0) DESC
+             LIMIT 4
+            """,
+            (get_user_currency(req.user_id), *tx.params, op_type, *currency_values, q, get_user_currency(req.user_id)),
+        )
+        operation_rows = pg_fetchall(
+            f"""
+            SELECT id, op_date, category, amount, COALESCE(currency, %s), COALESCE(comment,'')
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type=%s
+               {currency_filter}
+               AND (category ILIKE %s OR comment ILIKE %s)
+             ORDER BY op_date DESC, id DESC
+             LIMIT 8
+            """,
+            (get_user_currency(req.user_id), *tx.params, op_type, *currency_values, q, q),
+        )
+        items = []
+        for category_key, category, currency, total, count in category_rows:
+            currency_code = str(currency)
+            if allowed and currency_code not in allowed:
+                continue
+            category_name = str(category or "Прочее")
+            items.append({
+                "kind": "category",
+                "title": category_name,
+                "subtitle": f"{int(count or 0)} операций",
+                "currency": currency_code,
+                "amount": to_decimal_money(total),
+                "params": {"detail_kind": "category", "detail_value": str(category_key or category_name), "detail_currency": currency_code},
+            })
+        for merchant, currency, total, count in merchant_rows:
+            currency_code = str(currency)
+            if allowed and currency_code not in allowed:
+                continue
+            merchant_name = str(merchant or "").strip()
+            if not merchant_name:
+                continue
+            items.append({
+                "kind": "merchant",
+                "title": merchant_name,
+                "subtitle": f"{int(count or 0)} операций",
+                "currency": currency_code,
+                "amount": to_decimal_money(total),
+                "params": {"detail_kind": "merchant", "detail_value": merchant_name, "detail_currency": currency_code},
+            })
+        for operation_id, _op_date, category, amount, currency, merchant in operation_rows:
+            currency_code = str(currency)
+            if allowed and currency_code not in allowed:
+                continue
+            category_name = str(category or "Прочее")
+            merchant_name = str(merchant or "").strip()
+            items.append({
+                "kind": "operation",
+                "title": merchant_name or category_name,
+                "subtitle": category_name,
+                "currency": currency_code,
+                "amount": to_decimal_money(amount),
+                "operation_id": int(operation_id),
+            })
+        return {"query": query, "items": items[:8]}
 
     def _nice_scale(self, maximum: Decimal) -> dict[str, Any]:
         if maximum <= 0:
