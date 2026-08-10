@@ -449,6 +449,90 @@ def test_radar_single_previous_currency_auto_filters_when_current_empty(monkeypa
     assert data["radar"]["currency"] == "RUB"
 
 
+def test_analytics_comparable_period_contracts(monkeypatch):
+    api = _api(monkeypatch)
+
+    assert api._previous_period(date(2026, 8, 1), date(2026, 8, 5), "current_month") == (
+        date(2026, 7, 1), date(2026, 7, 5), "previous_month_to_date"
+    )
+    assert api._previous_period(date(2026, 8, 1), date(2026, 8, 31), "current_month") == (
+        date(2026, 7, 1), date(2026, 7, 31), "previous_month"
+    )
+    assert api._previous_period(date(2026, 8, 10), date(2026, 8, 19), "custom") == (
+        date(2026, 7, 31), date(2026, 8, 9), "previous_equal_period"
+    )
+
+
+def test_overview_metrics_financial_result_and_zero_baseline(monkeypatch):
+    api = _api(monkeypatch)
+
+    metrics = api._overview_metrics(
+        {"RUB": {"income": Decimal("1000.00"), "expense": Decimal("650.00"), "count": 3}},
+        {"RUB": {"income": Decimal("0.00"), "expense": Decimal("500.00"), "count": 2}},
+    )
+
+    assert metrics["RUB"]["income"]["state"] == "zero_baseline"
+    assert metrics["RUB"]["expense"]["delta"] == Decimal("150.00")
+    assert metrics["RUB"]["result"]["current"] == Decimal("350.00")
+    assert metrics["RUB"]["result"]["previous"] == Decimal("-500.00")
+    assert metrics["RUB"]["result"]["delta"] == Decimal("850.00")
+
+
+def test_contribution_delta_reconciles_by_currency(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "all", None, "workspace_id=ANY(%s)", ([10],))
+    prev_tx = TransactionFilters([10], False, date(2026, 7, 1), date(2026, 7, 5), "previous_month_to_date", "all", None, "workspace_id=ANY(%s)", ([10],))
+
+    def _rows(_req, current_tx, _op_type, *, dimension, currencies=None):
+        assert dimension == "category"
+        if current_tx.start == date(2026, 8, 1):
+            return [("Food", "RUB", Decimal("300.00"), 3), ("Taxi", "RUB", Decimal("100.00"), 1)]
+        return [("food ", "RUB", Decimal("200.00"), 2), ("Taxi", "RUB", Decimal("150.00"), 1), ("Fun", "RUB", Decimal("50.00"), 1)]
+
+    monkeypatch.setattr(api, "_dimension_rows", _rows)
+
+    contribution = api._change_contribution(api.request(42), tx, prev_tx, "Расходы", currencies=["RUB"])
+
+    group = contribution["currency_groups"]["RUB"]
+    assert group["current_total"] == Decimal("400.00")
+    assert group["previous_total"] == Decimal("400.00")
+    assert group["total_delta"] == Decimal("0.00")
+    assert group["reconciles"] is True
+    deltas = {item["category"]: item["delta"] for item in group["items"]}
+    assert deltas["Food"] == Decimal("100.00")
+    assert deltas["Fun"] == Decimal("-50.00")
+
+
+def test_analytics_search_and_detail_scope_use_current_filters(monkeypatch):
+    api = _api(monkeypatch)
+    seen_sql = []
+
+    def _fetch(sql, params=()):
+        seen_sql.append(" ".join(sql.split()))
+        if "GROUP BY category, NULLIF" in sql:
+            assert "workspace_id=ANY" in sql
+            assert "type=%s" in sql
+            return [("Food", "Lavka", "RUB", Decimal("500.00"), 2, 9)]
+        if "GROUP BY NULLIF(TRIM" in sql:
+            return [("Lavka", Decimal("500.00"), 2)]
+        if "SELECT o.id, o.op_date" in sql:
+            assert "COALESCE(o.currency" in sql
+            assert "REGEXP_REPLACE" in sql
+            return [(9, date(2026, 8, 2), "Расходы", "Food", Decimal("500.00"), "RUB", "Lavka", 10, 42, datetime(2026, 8, 2, 12), "Family")]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "expense", None, "workspace_id=ANY(%s) AND op_date BETWEEN %s AND %s", ([10], date(2026, 8, 1), date(2026, 8, 5)))
+
+    search = api._analytics_search(api.request(42), tx, {"analytics_search": "Lav"}, "Расходы", currencies=["RUB"])
+    detail = api._analytics_detail(api.request(42), tx, tx, {"detail_kind": "category", "detail_value": " food ", "detail_currency": "RUB"}, "Расходы")
+
+    assert search["items"][0]["kind"] == "merchant"
+    assert detail["operation_scope"]["category_key"] == "food"
+    assert detail["operations"][0]["id"] == 9
+    assert any("workspace_id=ANY" in sql for sql in seen_sql)
+
+
 def test_goal_preview_requires_visible_schedule_and_does_not_default(monkeypatch):
     api = _api(monkeypatch)
     with pytest.raises(MiniAppError) as exc:

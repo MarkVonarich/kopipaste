@@ -54,16 +54,85 @@ Goal: provide richer analytics while reusing existing backend calculations, work
 
 Scope:
 
-- Add analytics endpoints and UI only where the backend can compute deterministic, currency-correct values.
-- Keep drill-down scoped by workspace, period, category, and currency.
-- Avoid duplicated financial calculations between frontend and backend.
-- Preserve current filters and existing operation services.
+- Extend the existing Mini App `/miniapp/api/analytics` endpoint instead of creating a parallel analytics API.
+- Keep `/miniapp/api/operations` as the authoritative operation drill-down/detail path, with extra scoped read filters for currency, merchant, and normalized category keys.
+- Keep the existing global Mini App context: workspace, period, operation type, and category.
+- Add an Analytics-local context only for chart display mode, selected currency, search text, and selected drill-down detail.
+- Avoid duplicated authoritative financial calculations in frontend code. The frontend renders backend totals, deltas, shares, and operation scopes.
 
 Acceptance criteria:
 
 - Analytics responses include currency context.
 - Mixed-currency totals are grouped or separated unless explicit conversion exists.
 - Frontend renders backend-provided values without inventing financial totals.
+
+Implemented architecture:
+
+- `MiniAppAPI.analytics()` returns one compact investigation payload:
+  - overview metrics by currency;
+  - previous comparable period;
+  - category structure;
+  - merchant structure using current raw operation descriptions;
+  - time dynamics;
+  - category contribution/change decomposition;
+  - optional search results;
+  - optional selected category or merchant drill-down;
+  - operation scopes for opening the existing Operations screen with the same filters.
+- `MiniAppAPI.operations()` accepts read-only scoped filters:
+  - `currency`;
+  - `merchant`;
+  - `category_key`.
+- No new schema or migration is required for PR 2 because existing Mini App operation indexes cover workspace/date/type/category/search-oriented query shapes.
+
+Comparable-period rule:
+
+- `current_month` month-to-date compares with previous month-to-date using the same elapsed day count.
+- A full selected month compares with the previous full month.
+- `previous_month` compares with the month before it.
+- Custom and current-week ranges compare with the immediately preceding equal-length range.
+- The frontend displays the previous period supplied by the backend and does not calculate comparison windows itself.
+
+Multi-currency behavior:
+
+- Analytics never sums different currencies into one amount.
+- Overview, structure, contribution, detail, and time dynamics are grouped by currency.
+- A selected currency limits chart/detail/search analytics to that currency.
+- Financial result is computed per currency as `income - expense`.
+- If a currency exists only in the comparable period, explicit currency selection can still render comparison data without inventing a current total.
+
+Drill-down hierarchy:
+
+- Analytics overview answers the period-level question.
+- Structure can switch between categories and current raw merchants.
+- Contribution shows which categories explain the current-vs-previous delta for the same workspace, period, type, currency, and inclusion rules.
+- Category drill-down shows merchant breakdown and underlying operations.
+- Merchant drill-down shows total, operation count, average check, and underlying operations.
+- The "all operations" action opens the existing Operations screen with preserved workspace, custom period, operation type, currency, merchant, and/or normalized category scope.
+
+Search behavior:
+
+- Analytics search is backend-side and scoped to the authenticated user's accessible workspaces, selected workspace, period, operation type, category, and currency.
+- Search covers category, merchant/description, and matching operations without downloading a large frontend dataset.
+- Search results open existing drill-down or operation-detail paths.
+
+Category normalization rule:
+
+- Category analytics folds semantically equivalent category names through the existing `normalized_category_key()` semantics.
+- Operation drill-down uses normalized category keys for trim/case/space-safe scoped reads.
+- Income and expense category calculations remain isolated by operation type.
+
+Performance decisions:
+
+- Analytics uses grouped SQL queries and folds small result sets in Python.
+- No per-category query loop is used for overview, structure, merchant structure, time dynamics, or contribution.
+- No cache, Redis, queue, or external analytics API is introduced.
+- Existing indexes cover the current read paths; index migrations are deferred until real query plans justify them.
+
+Deferred from PR 2:
+
+- Canonical merchant identity and aliases are deferred to PR 3.
+- Weekday/time-of-day behavior analytics is deferred until timezone-safe bucket semantics are designed.
+- FX conversion remains intentionally absent.
 
 ### PR 3: Merchant Intelligence Foundation
 

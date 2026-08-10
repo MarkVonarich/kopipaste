@@ -43,9 +43,25 @@ export type Operation = {
 export type MoneyTotal = { income: string; expense: string; count: number };
 
 export type ChartCategoryItem = {
+  key?: string;
   category: string;
   currency: string;
   total: string;
+  previous_total?: string;
+  delta?: string;
+  previous_count?: number;
+  count: number;
+  share: number;
+};
+
+export type MerchantStructureItem = {
+  key?: string;
+  merchant: string;
+  currency: string;
+  total: string;
+  previous_total?: string;
+  delta?: string;
+  previous_count?: number;
   count: number;
   share: number;
 };
@@ -54,6 +70,12 @@ export type CategoryCurrencyGroup = {
   currency: string;
   total: string;
   items: ChartCategoryItem[];
+};
+
+export type MerchantCurrencyGroup = {
+  currency: string;
+  total: string;
+  items: MerchantStructureItem[];
 };
 
 export type TimeDynamicsItem = {
@@ -329,6 +351,7 @@ export type AppState = {
   error?: string;
   detailOperationId?: number;
   search: string;
+  operationScope?: { currency?: string; merchant?: string; category_key?: string };
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;
@@ -355,6 +378,12 @@ export type AppState = {
     categoryCurrency?: string;
     dynamicsCurrency?: string;
     radarCurrency?: string;
+    structureMode?: 'category' | 'merchant';
+    search?: string;
+    detailKind?: 'category' | 'merchant';
+    detailValue?: string;
+    detailCurrency?: string;
+    detailOperationType?: 'expense' | 'income';
   };
   selectedGoalId?: number;
   selectedLimitId?: string;

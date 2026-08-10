@@ -1,8 +1,19 @@
 import { formatMoneyString } from '../money';
-import type { ChartCategoryItem, GlobalFinancialFilters, RadarMoneyAxis, RadarScale, TimeDynamicsItem } from '../types';
+import type { ChartCategoryItem, GlobalFinancialFilters, MerchantStructureItem, Operation, RadarMoneyAxis, RadarScale, TimeDynamicsItem } from '../types';
 import type { AnalyticsResponse } from '../api';
+import { TransactionList } from './TransactionList';
 import { ActivityCalendarView } from './ActivityCalendar';
-import { EmptyPanel, SectionHeader, esc } from './ui';
+import { EmptyPanel, SectionHeader, esc, icon } from './ui';
+
+function deltaText(metric: { delta: string; pct?: string | null; state: string } | undefined, currency: string): string {
+  if (!metric) return 'Нет сравнения';
+  const delta = Number(metric.delta || 0);
+  if (metric.state === 'zero_baseline') return `было 0 · ${delta > 0 ? '+' : ''}${formatMoneyString(metric.delta, currency)}`;
+  if (metric.state === 'empty_previous') return 'прошлый период пуст';
+  const sign = delta > 0 ? '+' : '';
+  const pct = metric.pct ? ` · ${sign}${String(metric.pct).replace('.', ',')}%` : '';
+  return `${sign}${formatMoneyString(metric.delta, currency)}${pct}`;
+}
 
 function metricRows(analytics: AnalyticsResponse | null): string {
   const totals = analytics?.summary.totals_by_currency || {};
@@ -17,10 +28,11 @@ function metricRows(analytics: AnalyticsResponse | null): string {
   return currencies.map((currency) => {
     const item = totals[currency];
     const result = analytics?.summary.result_by_currency[currency] || '0.00';
+    const metrics = analytics?.overview_metrics?.[currency];
     return `
-      <div class="metric-line income"><span>Доходы · ${esc(currency)}</span><strong>${formatMoneyString(item.income, currency)}</strong></div>
-      <div class="metric-line expense"><span>Расходы · ${esc(currency)}</span><strong>${formatMoneyString(item.expense, currency)}</strong></div>
-      <div class="metric-line"><span>Результат · ${esc(currency)}</span><strong>${formatMoneyString(result, currency)}</strong></div>
+      <div class="metric-line income"><span>Доходы · ${esc(currency)}<small>${esc(deltaText(metrics?.income, currency))}</small></span><strong>${formatMoneyString(item.income, currency)}</strong></div>
+      <div class="metric-line expense"><span>Расходы · ${esc(currency)}<small>${esc(deltaText(metrics?.expense, currency))}</small></span><strong>${formatMoneyString(item.expense, currency)}</strong></div>
+      <div class="metric-line"><span>Финрезультат · ${esc(currency)}<small>${esc(deltaText(metrics?.result, currency))}</small></span><strong>${formatMoneyString(result, currency)}</strong></div>
     `;
   }).join('');
 }
@@ -28,12 +40,71 @@ function metricRows(analytics: AnalyticsResponse | null): string {
 function categoryBars(items: ChartCategoryItem[]): string {
   if (!items.length) return EmptyPanel('Нет структуры', 'За этот период не хватает операций для категорий.');
   return items.map((item) => `
-    <div class="bar-row">
+    <button class="bar-row action-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency)}">
       <div class="bar-label"><span>${esc(item.category)}</span><strong>${formatMoneyString(item.total, item.currency)}</strong></div>
       <div class="bar-track"><span style="width:${Math.max(4, Math.min(100, item.share))}%"></span></div>
-      <small>${item.share}% · ${item.count}</small>
-    </div>
+      <small>${item.share}% · ${item.count}${item.delta !== undefined ? ` · ${esc(deltaText({ delta: item.delta, pct: null, state: Number(item.previous_total || 0) === 0 ? 'zero_baseline' : 'ok' }, item.currency))}` : ''}</small>
+    </button>
   `).join('');
+}
+
+function merchantBars(items: MerchantStructureItem[]): string {
+  if (!items.length) return EmptyPanel('Нет мерчантов', 'В выбранном периоде нет описаний операций для группировки.');
+  return items.map((item) => `
+    <button class="bar-row action-row" data-action="analytics-drill" data-kind="merchant" data-value="${esc(item.merchant)}" data-currency="${esc(item.currency)}">
+      <div class="bar-label"><span>${esc(item.merchant)}</span><strong>${formatMoneyString(item.total, item.currency)}</strong></div>
+      <div class="bar-track"><span style="width:${Math.max(4, Math.min(100, item.share))}%"></span></div>
+      <small>${item.share}% · ${item.count}${item.delta !== undefined ? ` · ${esc(deltaText({ delta: item.delta, pct: null, state: Number(item.previous_total || 0) === 0 ? 'zero_baseline' : 'ok' }, item.currency))}` : ''}</small>
+    </button>
+  `).join('');
+}
+
+function contributionRows(items: ChartCategoryItem[], currency: string): string {
+  if (!items.length) return EmptyPanel('Нет изменений', 'Для вклада нужен текущий или предыдущий сопоставимый период.');
+  return items.map((item) => {
+    const delta = Number(item.delta || 0);
+    const width = Math.max(8, Math.min(100, Math.abs(delta)));
+    return `
+      <button class="contribution-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency || currency)}">
+        <span>${esc(item.category)}</span>
+        <strong>${delta > 0 ? '+' : ''}${formatMoneyString(item.delta || '0.00', item.currency || currency)}</strong>
+        <i class="${delta >= 0 ? 'positive' : 'negative'}" style="width:${width}%"></i>
+      </button>
+    `;
+  }).join('');
+}
+
+function searchResults(analytics: AnalyticsResponse | null): string {
+  const search = analytics?.search;
+  if (!search?.query) return '';
+  if (!search.items.length) return EmptyPanel('Ничего не найдено', 'Поиск учитывает текущие фильтры, период, пространство и валюту.');
+  return `
+    <div class="search-results">
+      ${search.items.map((item) => item.kind === 'operation'
+        ? `<button class="detail-row light" data-action="operation-detail" data-id="${item.operation_id}"><span>${esc(item.title)}<br><small>${esc(item.subtitle)}</small></span><strong>${formatMoneyString(item.amount, item.currency)}</strong></button>`
+        : `<button class="detail-row light" data-action="analytics-drill" data-kind="${item.kind}" data-value="${esc(item.title)}" data-currency="${esc(item.currency)}"><span>${esc(item.title)}<br><small>${esc(item.subtitle)}</small></span><strong>${formatMoneyString(item.amount, item.currency)}</strong></button>`
+      ).join('')}
+    </div>
+  `;
+}
+
+function detailPanel(analytics: AnalyticsResponse | null): string {
+  const detail = analytics?.selected_detail;
+  if (!detail) return '';
+  const amount = detail.kind === 'merchant' ? detail.total : detail.visible_total;
+  const merchants = detail.kind === 'category' ? merchantBars(detail.merchant_breakdown?.items || []) : '';
+  return `
+    <section class="chart-section analytics-detail">
+      ${SectionHeader(detail.title, `${detail.operation_count} операций · ${esc(detail.currency)}`, '<button class="button text" data-action="analytics-back" type="button">Назад</button>')}
+      <div class="metrics-grid compact">
+        <div class="metric-line"><span>Итого</span><strong>${formatMoneyString(amount || '0.00', detail.currency)}</strong></div>
+        ${detail.average_check ? `<div class="metric-line"><span>Средний чек</span><strong>${formatMoneyString(detail.average_check, detail.currency)}</strong></div>` : ''}
+      </div>
+      ${detail.kind === 'category' ? `<div class="detail-stack">${merchants}</div>` : ''}
+      ${TransactionList((detail.operations || []) as Operation[], 'Операций в этом срезе нет.')}
+      <button class="button secondary" data-action="analytics-open-operations" type="button">Все операции с этим фильтром</button>
+    </section>
+  `;
 }
 
 function dynamicsRows(items: TimeDynamicsItem[], mode: string): string {
@@ -118,16 +189,33 @@ function radarSvg(axes: RadarMoneyAxis[], scale: RadarScale | undefined, currenc
 
 export function AnalyticsScreen(
   analytics: AnalyticsResponse | null,
-  filters: { categoryType: 'expense' | 'income'; dynamicsType: 'expense' | 'income' | 'both'; radarType: 'expense' | 'income'; grouping?: 'day' | 'week' | 'month'; categoryCurrency?: string; dynamicsCurrency?: string; radarCurrency?: string },
+  filters: {
+    categoryType: 'expense' | 'income';
+    dynamicsType: 'expense' | 'income' | 'both';
+    radarType: 'expense' | 'income';
+    grouping?: 'day' | 'week' | 'month';
+    categoryCurrency?: string;
+    dynamicsCurrency?: string;
+    radarCurrency?: string;
+    structureMode?: 'category' | 'merchant';
+    search?: string;
+    detailKind?: 'category' | 'merchant';
+    detailValue?: string;
+    detailCurrency?: string;
+    detailOperationType?: 'expense' | 'income';
+  },
   globalFilters: GlobalFinancialFilters
 ): string {
   const currencies = analytics?.available_currencies || Object.keys(analytics?.summary.totals_by_currency || {});
   const mixedCurrency = currencies.length > 1;
   const categoryCurrency = filters.categoryCurrency || currencies[0] || '';
   const dynamicsCurrency = filters.dynamicsCurrency || currencies[0] || '';
+  const structureMode = filters.structureMode || 'category';
   const radarCurrencies = analytics?.radar_available_currencies || currencies;
   const radarCurrency = filters.radarCurrency || radarCurrencies[0] || '';
   const categoryItems = categoryCurrency ? analytics?.category_structure.currency_groups?.[categoryCurrency]?.items || [] : analytics?.category_structure.items || [];
+  const merchantItems = categoryCurrency ? analytics?.merchant_structure?.currency_groups?.[categoryCurrency]?.items || [] : analytics?.merchant_structure?.items || [];
+  const contributionGroup = categoryCurrency ? analytics?.change_contribution?.currency_groups?.[categoryCurrency] : undefined;
   const dynamicsItems = dynamicsCurrency ? (analytics?.time_dynamics.items || []).filter((item) => item.currency === dynamicsCurrency) : analytics?.time_dynamics.items || [];
   const globalType = globalFilters.operation_type;
   const dynamicsMode = globalType === 'expense' || globalType === 'income' ? globalType : filters.dynamicsType;
@@ -150,9 +238,17 @@ export function AnalyticsScreen(
       </div>
       <div class="metrics-grid">${metricRows(analytics)}</div>
       ${note}
+      <div class="search-field analytics-search">
+        ${icon('search')}
+        <input class="input" type="search" data-action="analytics-search" placeholder="Категория, магазин или операция" value="${esc(filters.search || '')}" aria-label="Поиск в аналитике" />
+      </div>
+      ${searchResults(analytics)}
+      ${detailPanel(analytics)}
       <section class="chart-section">
-        ${SectionHeader('Структура категорий', 'Доля категорий внутри выбранной валюты')}
+        ${SectionHeader('Структура', structureMode === 'merchant' ? 'Мерчанты внутри выбранной валюты' : 'Категории внутри выбранной валюты')}
         <div class="chart-controls">
+          <button class="segmented-button ${structureMode === 'category' ? 'active' : ''}" data-action="analytics-structure" data-mode="category" type="button">Категории</button>
+          <button class="segmented-button ${structureMode === 'merchant' ? 'active' : ''}" data-action="analytics-structure" data-mode="merchant" type="button">Мерчанты</button>
           ${globalType === 'all' ? `<select class="select compact" data-action="chart-filter" data-chart="category" aria-label="Тип категорий">
             <option value="expense" ${filters.categoryType === 'expense' ? 'selected' : ''}>Расходы</option>
             <option value="income" ${filters.categoryType === 'income' ? 'selected' : ''}>Доходы</option>
@@ -160,7 +256,15 @@ export function AnalyticsScreen(
           ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="category" aria-label="Валюта структуры">${currencyOptions(categoryCurrency)}</select>` : ''}
         </div>
         <canvas id="categoryChart" height="180"></canvas>
-        <details class="chart-details"><summary aria-expanded="false">Показать категории</summary>${categoryBars(categoryItems)}</details>
+        <details class="chart-details" open><summary aria-expanded="true">${structureMode === 'merchant' ? 'Показать мерчантов' : 'Показать категории'}</summary>${structureMode === 'merchant' ? merchantBars(merchantItems) : categoryBars(categoryItems)}</details>
+      </section>
+      <section class="chart-section">
+        ${SectionHeader('Что изменилось', analytics?.previous_period ? `${esc(analytics.previous_period.start_date)} - ${esc(analytics.previous_period.end_date)}` : 'Вклад категорий в изменение')}
+        <div class="detail-row light">
+          <span>Общее изменение</span>
+          <strong>${contributionGroup ? `${Number(contributionGroup.total_delta) > 0 ? '+' : ''}${formatMoneyString(contributionGroup.total_delta, contributionGroup.currency)}` : 'нет данных'}</strong>
+        </div>
+        ${contributionRows(contributionGroup?.items || [], categoryCurrency)}
       </section>
       <section class="chart-section">
         ${SectionHeader('Динамика', 'Как менялись доходы и расходы во времени')}

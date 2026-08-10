@@ -444,9 +444,22 @@ def _entity_text(message, entity) -> str:
             return parser(entity)
         except Exception:
             pass
+    try:
+        start, end = _utf16_entity_bounds(text, entity)
+        return text[start:end]
+    except UnicodeDecodeError:
+        offset = int(getattr(entity, "offset", 0) or 0)
+        length = int(getattr(entity, "length", 0) or 0)
+        return text[offset:offset + length]
+
+
+def _utf16_entity_bounds(text: str, entity) -> tuple[int, int]:
     offset = int(getattr(entity, "offset", 0) or 0)
     length = int(getattr(entity, "length", 0) or 0)
-    return text[offset:offset + length]
+    encoded = text.encode("utf-16-le")
+    before = encoded[:offset * 2].decode("utf-16-le")
+    segment = encoded[offset * 2:(offset + length) * 2].decode("utf-16-le")
+    return len(before), len(before) + len(segment)
 
 
 def _message_mentions_bot(message, *, bot_id: int | None, bot_username: str | None) -> bool:
@@ -513,18 +526,29 @@ def strip_explicit_bot_mention(update, context: ContextTypes.DEFAULT_TYPE, text:
         return text
     ranges: list[tuple[int, int]] = []
     for entity in getattr(message, "entities", None) or []:
-        if str(getattr(entity, "type", "") or "").lower() != "mention":
+        entity_type = str(getattr(entity, "type", "") or "").lower()
+        entity_matches = False
+        if entity_type == "mention":
+            entity_matches = _entity_text(message, entity).lstrip("@").casefold() == bot_username
+        elif entity_type == "text_mention":
+            user = getattr(entity, "user", None)
+            bot_id, _username = _bot_identity(context)
+            entity_matches = bot_id is not None and getattr(user, "id", None) == bot_id
+        if not entity_matches:
             continue
-        if _entity_text(message, entity).lstrip("@").casefold() != bot_username:
+        try:
+            start, end = _utf16_entity_bounds(text, entity)
+        except UnicodeDecodeError:
             continue
-        offset = int(getattr(entity, "offset", 0) or 0)
-        length = int(getattr(entity, "length", 0) or 0)
-        if text[offset:offset + length].lstrip("@").casefold() != bot_username:
+        entity_text = text[start:end]
+        original_text = _entity_text(message, entity)
+        if entity_text != original_text:
             continue
-        ranges.append((offset, offset + length))
+        ranges.append((start, end))
     for start, end in sorted(ranges, reverse=True):
         text = text[:start] + text[end:]
-    return " ".join(text.split())
+    cleaned = " ".join(text.split())
+    return re.sub(r"^[^\wА-Яа-яЁё0-9]+", "", cleaned).strip()
 
 
 def _guess_operation_type_from_text(text: str, merchant: str = "") -> str:
@@ -882,12 +906,14 @@ async def handle_text(update, context: ContextTypes.DEFAULT_TYPE):
     cid  = update.effective_chat.id
     emsg = update.effective_message
 
-    if _is_group_chat(update) and context.user_data.get('await_group_custom_category') and not _group_custom_category_state_matches(update, context):
-        context.user_data.pop('await_group_custom_category', None)
-        return await emsg.reply_text('Этот черновик операции больше не подходит к текущему чату или пользователю. Отправьте операцию заново.')
-
     if _is_group_chat(update):
-        if not group_message_has_explicit_bot_intent(update, context):
+        explicit_intent = group_message_has_explicit_bot_intent(update, context)
+        if context.user_data.get('await_group_custom_category') and not _group_custom_category_state_matches(update, context):
+            context.user_data.pop('await_group_custom_category', None)
+            if not explicit_intent:
+                return None
+            return await emsg.reply_text('Этот черновик операции больше не подходит к текущему чату или пользователю. Отправьте операцию заново.')
+        if not explicit_intent:
             return None
         text = strip_explicit_bot_mention(update, context, text)
         if not text:
