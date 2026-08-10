@@ -83,11 +83,12 @@ export type TimeDynamicsItem = {
   currency: string;
   income: string;
   expense: string;
+  result: string;
   count: number;
 };
 
 export type TimeDynamicsDataset = {
-  kind: 'expense' | 'income';
+  kind: 'expense' | 'income' | 'result';
   items: Array<{ date: string; amount: string; count: number }>;
 };
 
@@ -372,9 +373,10 @@ export type AppState = {
   categoryType?: 'expense' | 'income';
   analyticsFilters?: {
     categoryType: 'expense' | 'income';
-    dynamicsType: 'expense' | 'income' | 'both';
+    dynamicsType: 'expense' | 'income' | 'result' | 'both';
     radarType: 'expense' | 'income';
     grouping?: 'day' | 'week' | 'month';
+    analyticsCurrency?: string;
     categoryCurrency?: string;
     dynamicsCurrency?: string;
     radarCurrency?: string;

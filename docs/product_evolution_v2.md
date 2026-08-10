@@ -73,7 +73,7 @@ Implemented architecture:
   - previous comparable period;
   - category structure;
   - merchant structure using current raw operation descriptions;
-  - time dynamics;
+  - time dynamics for expenses, income, and financial result;
   - category contribution/change decomposition;
   - optional search results;
   - optional selected category or merchant drill-down;
@@ -95,31 +95,49 @@ Comparable-period rule:
 Multi-currency behavior:
 
 - Analytics never sums different currencies into one amount.
-- Overview, structure, contribution, detail, and time dynamics are grouped by currency.
-- A selected currency limits chart/detail/search analytics to that currency.
+- Overview, structure, contribution, detail, search, and time dynamics are grouped by currency.
+- Analytics 2.0 has one selected analytics currency. The frontend does not maintain separate category, dynamics, and Radar currencies.
+- A selected currency limits all chart/detail/search analytics to that currency.
 - Financial result is computed per currency as `income - expense`.
 - If a currency exists only in the comparable period, explicit currency selection can still render comparison data without inventing a current total.
+
+Comparison semantics:
+
+- Backend comparison fields are authoritative; the frontend only formats the signed values it receives.
+- Percentage change is signed and uses `delta / abs(previous) * 100`.
+- Zero previous totals return explicit zero-baseline or empty-previous states.
+- Financial result comparisons that cross zero return `sign_change` with no percentage because a relative percentage would be misleading.
 
 Drill-down hierarchy:
 
 - Analytics overview answers the period-level question.
 - Structure can switch between categories and current raw merchants.
-- Contribution shows which categories explain the current-vs-previous delta for the same workspace, period, type, currency, and inclusion rules.
-- Category drill-down shows merchant breakdown and underlying operations.
-- Merchant drill-down shows total, operation count, average check, and underlying operations.
-- The "all operations" action opens the existing Operations screen with preserved workspace, custom period, operation type, currency, merchant, and/or normalized category scope.
+- Contribution computes over every canonical category in the selected workspace, period, type, and currency before selecting visible contributors. Reconciliation means the full category delta matches the authoritative total delta; if hidden categories exist, a synthetic "Остальные" row carries the remainder.
+- Category drill-down separates full summary metrics from the limited operation preview. Total, operation count, previous total, delta, percentage/state, and merchant shares use the full selected category; the operation preview remains bounded.
+- Category merchant breakdown calculates shares against the full selected category total. Top merchants may be followed by a synthetic "Остальные" row.
+- Merchant drill-down separates full summary metrics from the limited operation preview. Total, operation count, average check, previous total/count, previous average check, and delta use the full selected merchant.
+- The "all operations" action opens the existing Operations screen with preserved workspace, custom period, operation type, currency, merchant, and/or normalized category scope. Category drill-down uses the normalized `category_key` as the authoritative scope rather than an exact display label.
 
 Search behavior:
 
 - Analytics search is backend-side and scoped to the authenticated user's accessible workspaces, selected workspace, period, operation type, category, and currency.
 - Search covers category, merchant/description, and matching operations without downloading a large frontend dataset.
+- Category search results aggregate by canonical category key before display.
+- Merchant search results aggregate by current exact merchant text in the selected analytics scope.
+- Operation search results are individual operation rows; an operation result never combines `SUM(amount)` with an unrelated `MAX(id)`.
 - Search results open existing drill-down or operation-detail paths.
 
 Category normalization rule:
 
 - Category analytics folds semantically equivalent category names through the existing `normalized_category_key()` semantics.
-- Operation drill-down uses normalized category keys for trim/case/space-safe scoped reads.
+- SQL category-key expressions used by Analytics match the same trim, whitespace-collapse, lowercase, and `ё` to `е` semantics.
+- Operation drill-down uses normalized category keys for trim/case/space/`ё`-safe scoped reads.
 - Income and expense category calculations remain isolated by operation type.
+
+Primary Analytics UI:
+
+- The screen follows the investigation order: context/currency, overview, search, dynamics, structure, contribution, selected detail, export.
+- Legacy Radar may remain in backend payloads for compatibility during the PR, but it is no longer rendered as a primary Analytics section.
 
 Performance decisions:
 

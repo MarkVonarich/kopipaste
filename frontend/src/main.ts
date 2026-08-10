@@ -477,7 +477,7 @@ async function loadScreen(): Promise<void> {
         ...filters,
         category_type: state.analyticsFilters?.categoryType,
         radar_type: state.analyticsFilters?.radarType,
-        currency: state.analyticsFilters?.radarCurrency,
+        currency: state.analyticsFilters?.analyticsCurrency,
         grouping: state.analyticsFilters?.grouping || 'auto',
         analytics_search: state.analyticsFilters?.search,
         detail_kind: state.analyticsFilters?.detailKind,
@@ -485,16 +485,14 @@ async function loadScreen(): Promise<void> {
         detail_currency: state.analyticsFilters?.detailCurrency,
         detail_operation_type: state.analyticsFilters?.detailOperationType
       });
-      if ((response.radar_available_currencies.length > 1 || response.available_currencies.length > 1) && !state.analyticsFilters?.radarCurrency) {
-        const firstCurrency = response.radar_available_currencies[0] || response.available_currencies[0];
+      if (response.available_currencies.length > 1 && !state.analyticsFilters?.analyticsCurrency) {
+        const firstCurrency = response.available_currencies[0];
         state.analyticsFilters = {
           categoryType: state.analyticsFilters?.categoryType || 'expense',
           dynamicsType: state.analyticsFilters?.dynamicsType || 'both',
           radarType: state.analyticsFilters?.radarType || 'expense',
           grouping: state.analyticsFilters?.grouping,
-          categoryCurrency: state.analyticsFilters?.categoryCurrency || response.available_currencies[0],
-          dynamicsCurrency: state.analyticsFilters?.dynamicsCurrency || response.available_currencies[0],
-          radarCurrency: firstCurrency,
+          analyticsCurrency: firstCurrency,
           structureMode: state.analyticsFilters?.structureMode || 'category',
           search: state.analyticsFilters?.search,
           detailKind: state.analyticsFilters?.detailKind,
@@ -506,7 +504,7 @@ async function loadScreen(): Promise<void> {
           ...filters,
           category_type: state.analyticsFilters.categoryType,
           radar_type: state.analyticsFilters.radarType,
-          currency: firstCurrency,
+          currency: state.analyticsFilters.analyticsCurrency,
           grouping: state.analyticsFilters.grouping || 'auto',
           analytics_search: state.analyticsFilters.search,
           detail_kind: state.analyticsFilters.detailKind,
@@ -614,33 +612,32 @@ function renderCharts(): void {
   const accent = styles.getPropertyValue('--tg-theme-button-color').trim() || styles.getPropertyValue('--accent').trim() || '#0a7a75';
   const destructive = styles.getPropertyValue('--expense').trim() || '#87554f';
   const positive = styles.getPropertyValue('--income').trim() || '#147a43';
-  const categoryCurrency = state.analyticsFilters?.categoryCurrency || analytics.available_currencies[0];
-  const dynamicsCurrency = state.analyticsFilters?.dynamicsCurrency || analytics.available_currencies[0];
+  const analyticsCurrency = state.analyticsFilters?.analyticsCurrency || state.analyticsFilters?.categoryCurrency || state.analyticsFilters?.dynamicsCurrency || state.analyticsFilters?.radarCurrency || analytics.selected_currency || analytics.available_currencies[0];
   const categoryCanvas = document.querySelector<HTMLCanvasElement>('#categoryChart');
   const structureMode = state.analyticsFilters?.structureMode || 'category';
-  const categoryItems = categoryCurrency ? analytics.category_structure.currency_groups[categoryCurrency]?.items || [] : analytics.category_structure.items;
-  const merchantItems = categoryCurrency ? analytics.merchant_structure?.currency_groups?.[categoryCurrency]?.items || [] : analytics.merchant_structure?.items || [];
+  const categoryItems = analyticsCurrency ? analytics.category_structure.currency_groups[analyticsCurrency]?.items || [] : analytics.category_structure.items;
+  const merchantItems = analyticsCurrency ? analytics.merchant_structure?.currency_groups?.[analyticsCurrency]?.items || [] : analytics.merchant_structure?.items || [];
   const structureItems = structureMode === 'merchant' ? merchantItems : categoryItems;
   if (categoryCanvas && structureItems.length) {
     chartInstances.push(new Chart(categoryCanvas, {
       type: 'bar',
       data: {
         labels: structureItems.map((item) => `${'merchant' in item ? item.merchant : item.category} · ${item.currency}`),
-        datasets: [{ label: `Доля · ${categoryCurrency}`, data: structureItems.map((item) => item.share), backgroundColor: accent }]
+        datasets: [{ label: `Доля · ${analyticsCurrency}`, data: structureItems.map((item) => item.share), backgroundColor: accent }]
       },
       options: {
         indexAxis: 'y',
         responsive: true,
         plugins: {
           legend: { display: false },
-          tooltip: { callbacks: { label: (ctx) => `${structureItems[ctx.dataIndex]?.share ?? 0}% · ${formatMoneyString(structureItems[ctx.dataIndex]?.total || '0.00', structureItems[ctx.dataIndex]?.currency || categoryCurrency)}` } }
+          tooltip: { callbacks: { label: (ctx) => `${structureItems[ctx.dataIndex]?.share ?? 0}% · ${formatMoneyString(structureItems[ctx.dataIndex]?.total || '0.00', structureItems[ctx.dataIndex]?.currency || analyticsCurrency)}` } }
         },
         scales: { x: { beginAtZero: true, max: 100 } }
       }
     }));
   }
   const dynamicsCanvas = document.querySelector<HTMLCanvasElement>('#dynamicsChart');
-  const dynamicsItems = dynamicsCurrency ? analytics.time_dynamics.items.filter((item) => item.currency === dynamicsCurrency) : analytics.time_dynamics.items;
+  const dynamicsItems = analyticsCurrency ? analytics.time_dynamics.items.filter((item) => item.currency === analyticsCurrency) : analytics.time_dynamics.items;
   if (dynamicsCanvas && dynamicsItems.length) {
     const labels = dynamicsItems.map((item) => item.date);
     const mode = state.globalFilters.operation_type === 'expense' || state.globalFilters.operation_type === 'income'
@@ -649,8 +646,13 @@ function renderCharts(): void {
     const datasets = [];
     const expensePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.expense));
     const incomePoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.income));
-    if (mode !== 'income') datasets.push({ label: `Расходы · ${dynamicsCurrency}`, data: expensePoints.map((point) => point.value), borderColor: destructive, backgroundColor: 'rgba(184,50,66,.18)' });
-    if (mode !== 'expense') datasets.push({ label: `Доходы · ${dynamicsCurrency}`, data: incomePoints.map((point) => point.value), borderColor: positive, backgroundColor: 'rgba(20,122,67,.18)' });
+    const resultPoints = dynamicsItems.map((item) => decimalStringToVisualPoint(item.result));
+    if (mode === 'result') {
+      datasets.push({ label: `Финрезультат · ${analyticsCurrency}`, data: resultPoints.map((point) => point.value), borderColor: accent, backgroundColor: 'rgba(10,122,117,.18)' });
+    } else {
+      if (mode !== 'income') datasets.push({ label: `Расходы · ${analyticsCurrency}`, data: expensePoints.map((point) => point.value), borderColor: destructive, backgroundColor: 'rgba(184,50,66,.18)' });
+      if (mode !== 'expense') datasets.push({ label: `Доходы · ${analyticsCurrency}`, data: incomePoints.map((point) => point.value), borderColor: positive, backgroundColor: 'rgba(20,122,67,.18)' });
+    }
     chartInstances.push(new Chart(dynamicsCanvas, {
       type: 'line',
       data: { labels, datasets },
@@ -661,8 +663,8 @@ function renderCharts(): void {
           tooltip: {
             callbacks: {
               label: (ctx) => {
-                const source = ctx.datasetIndex === 0 && mode !== 'income' ? expensePoints : incomePoints;
-                return `${ctx.dataset.label}: ${formatMoneyString(source[ctx.dataIndex]?.original || '0.00', dynamicsCurrency)}`;
+                const source = mode === 'result' ? resultPoints : ctx.datasetIndex === 0 && mode !== 'income' ? expensePoints : incomePoints;
+                return `${ctx.dataset.label}: ${formatMoneyString(source[ctx.dataIndex]?.original || '0.00', analyticsCurrency)}`;
               }
             }
           }
@@ -858,7 +860,7 @@ function wireEvents(): void {
       const chart = select.dataset.chart || '';
       state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
       if (chart === 'category') state.analyticsFilters.categoryType = select.value as 'expense' | 'income';
-      if (chart === 'dynamics') state.analyticsFilters.dynamicsType = select.value as 'expense' | 'income' | 'both';
+      if (chart === 'dynamics') state.analyticsFilters.dynamicsType = select.value as 'expense' | 'income' | 'result' | 'both';
       if (chart === 'radar') state.analyticsFilters.radarType = select.value as 'expense' | 'income';
       hapticSelection();
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: select.value, source: 'mini_app' });
@@ -876,9 +878,10 @@ function wireEvents(): void {
     select.addEventListener('change', async () => {
       const chart = select.dataset.chart || '';
       state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
-      if (chart === 'category') state.analyticsFilters.categoryCurrency = select.value;
-      if (chart === 'dynamics') state.analyticsFilters.dynamicsCurrency = select.value;
-      if (chart === 'radar') state.analyticsFilters.radarCurrency = select.value;
+      state.analyticsFilters.analyticsCurrency = select.value;
+      state.analyticsFilters.detailKind = undefined;
+      state.analyticsFilters.detailValue = undefined;
+      state.analyticsFilters.detailCurrency = undefined;
       hapticSelection();
       await api.track('mini_app_analytics_chart_filter_changed', { chart_type: chart, filter_kind: 'currency', source: 'mini_app' });
       await loadScreen();
@@ -907,7 +910,7 @@ function wireEvents(): void {
       state.analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
       state.analyticsFilters.detailKind = button.dataset.kind === 'merchant' ? 'merchant' : 'category';
       state.analyticsFilters.detailValue = button.dataset.value || '';
-      state.analyticsFilters.detailCurrency = button.dataset.currency || state.analyticsFilters.categoryCurrency || state.analyticsFilters.radarCurrency;
+      state.analyticsFilters.detailCurrency = button.dataset.currency || state.analyticsFilters.analyticsCurrency;
       state.analyticsFilters.detailOperationType = state.globalFilters.operation_type === 'income' ? 'income' : state.globalFilters.operation_type === 'expense' ? 'expense' : state.analyticsFilters.categoryType;
       hapticSelection();
       await api.track('mini_app_analytics_drilldown_opened', { kind: state.analyticsFilters.detailKind, source: 'mini_app' });
@@ -932,9 +935,9 @@ function wireEvents(): void {
       start_date: String(scope.start_date || analytics?.period.start_date || ''),
       end_date: String(scope.end_date || analytics?.period.end_date || ''),
       operation_type: detail.operation_type,
-      category: detail.kind === 'category' ? String(detail.title || 'all') : 'all',
+      category: 'all',
     });
-    state.search = detail.kind === 'merchant' ? detail.title : '';
+    state.search = '';
     state.operationScope = {
       currency: String(scope.currency || detail.currency || ''),
       merchant: detail.kind === 'merchant' ? detail.title : undefined,

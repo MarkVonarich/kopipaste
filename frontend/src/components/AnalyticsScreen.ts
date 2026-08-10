@@ -1,23 +1,25 @@
 import { formatMoneyString } from '../money';
-import type { ChartCategoryItem, GlobalFinancialFilters, MerchantStructureItem, Operation, RadarMoneyAxis, RadarScale, TimeDynamicsItem } from '../types';
+import type { ChartCategoryItem, GlobalFinancialFilters, MerchantStructureItem, Operation, TimeDynamicsItem } from '../types';
 import type { AnalyticsResponse } from '../api';
 import { TransactionList } from './TransactionList';
 import { ActivityCalendarView } from './ActivityCalendar';
 import { EmptyPanel, SectionHeader, esc, icon } from './ui';
 
-function deltaText(metric: { delta: string; pct?: string | null; state: string } | undefined, currency: string): string {
+export function deltaText(metric: { delta: string; pct?: string | null; state: string } | undefined, currency: string): string {
   if (!metric) return 'Нет сравнения';
   const delta = Number(metric.delta || 0);
   if (metric.state === 'zero_baseline') return `было 0 · ${delta > 0 ? '+' : ''}${formatMoneyString(metric.delta, currency)}`;
   if (metric.state === 'empty_previous') return 'прошлый период пуст';
+  if (metric.state === 'sign_change') return `смена знака · ${delta > 0 ? '+' : ''}${formatMoneyString(metric.delta, currency)}`;
   const sign = delta > 0 ? '+' : '';
-  const pct = metric.pct ? ` · ${sign}${String(metric.pct).replace('.', ',')}%` : '';
+  const pctValue = Number(metric.pct || 0);
+  const pct = metric.pct ? ` · ${pctValue > 0 ? '+' : ''}${String(metric.pct).replace('.', ',')}%` : '';
   return `${sign}${formatMoneyString(metric.delta, currency)}${pct}`;
 }
 
-function metricRows(analytics: AnalyticsResponse | null): string {
+function metricRows(analytics: AnalyticsResponse | null, selectedCurrency?: string): string {
   const totals = analytics?.summary.totals_by_currency || {};
-  const currencies = Object.keys(totals);
+  const currencies = selectedCurrency ? [selectedCurrency] : Object.keys(totals);
   if (!currencies.length) {
     return `
       <div class="metric-line income"><span>Доходы</span><strong>0 ₽</strong></div>
@@ -26,7 +28,7 @@ function metricRows(analytics: AnalyticsResponse | null): string {
     `;
   }
   return currencies.map((currency) => {
-    const item = totals[currency];
+    const item = totals[currency] || { income: '0.00', expense: '0.00', count: 0 };
     const result = analytics?.summary.result_by_currency[currency] || '0.00';
     const metrics = analytics?.overview_metrics?.[currency];
     return `
@@ -59,11 +61,12 @@ function merchantBars(items: MerchantStructureItem[]): string {
   `).join('');
 }
 
-function contributionRows(items: ChartCategoryItem[], currency: string): string {
+export function contributionRows(items: ChartCategoryItem[], currency: string): string {
   if (!items.length) return EmptyPanel('Нет изменений', 'Для вклада нужен текущий или предыдущий сопоставимый период.');
+  const maxAbsDelta = Math.max(...items.map((item) => Math.abs(Number(item.delta || 0))), 0);
   return items.map((item) => {
     const delta = Number(item.delta || 0);
-    const width = Math.max(8, Math.min(100, Math.abs(delta)));
+    const width = maxAbsDelta > 0 && delta !== 0 ? Math.max(8, Math.min(100, Math.abs(delta) / maxAbsDelta * 100)) : 0;
     return `
       <button class="contribution-row" data-action="analytics-drill" data-kind="category" data-value="${esc(item.category)}" data-currency="${esc(item.currency || currency)}">
         <span>${esc(item.category)}</span>
@@ -91,13 +94,17 @@ function searchResults(analytics: AnalyticsResponse | null): string {
 function detailPanel(analytics: AnalyticsResponse | null): string {
   const detail = analytics?.selected_detail;
   if (!detail) return '';
-  const amount = detail.kind === 'merchant' ? detail.total : detail.visible_total;
+  const amount = detail.total || detail.visible_total;
   const merchants = detail.kind === 'category' ? merchantBars(detail.merchant_breakdown?.items || []) : '';
+  const comparison = detail.delta !== undefined
+    ? `<div class="metric-line"><span>К прошлому периоду</span><strong>${esc(deltaText({ delta: detail.delta, pct: detail.pct ?? null, state: detail.state || 'ok' }, detail.currency))}</strong></div>`
+    : '';
   return `
     <section class="chart-section analytics-detail">
       ${SectionHeader(detail.title, `${detail.operation_count} операций · ${esc(detail.currency)}`, '<button class="button text" data-action="analytics-back" type="button">Назад</button>')}
       <div class="metrics-grid compact">
         <div class="metric-line"><span>Итого</span><strong>${formatMoneyString(amount || '0.00', detail.currency)}</strong></div>
+        ${comparison}
         ${detail.average_check ? `<div class="metric-line"><span>Средний чек</span><strong>${formatMoneyString(detail.average_check, detail.currency)}</strong></div>` : ''}
       </div>
       ${detail.kind === 'category' ? `<div class="detail-stack">${merchants}</div>` : ''}
@@ -110,90 +117,19 @@ function detailPanel(analytics: AnalyticsResponse | null): string {
 function dynamicsRows(items: TimeDynamicsItem[], mode: string): string {
   if (!items.length) return EmptyPanel('Нет динамики', 'Данные появятся после операций в выбранном периоде.');
   return items.slice(-8).map((item) => {
-    const amount = mode === 'income' ? item.income : mode === 'expense' ? item.expense : `${formatMoneyString(item.income, item.currency)} / ${formatMoneyString(item.expense, item.currency)}`;
+    const amount = mode === 'income' ? item.income : mode === 'expense' ? item.expense : mode === 'result' ? item.result : `${formatMoneyString(item.income, item.currency)} / ${formatMoneyString(item.expense, item.currency)}`;
     return `<div class="detail-row light"><span>${esc(item.date)}<br><small>${esc(item.currency)}</small></span><strong>${typeof amount === 'string' && amount.includes('/') ? amount : formatMoneyString(String(amount), item.currency)}</strong></div>`;
   }).join('');
-}
-
-function compactAmount(value: string | number): string {
-  const number = Number(value || 0);
-  if (Math.abs(number) >= 1_000_000) return `${String(Math.round(number / 100_000) / 10).replace('.', ',')}м`;
-  if (Math.abs(number) >= 1_000) return `${String(Math.round(number / 100) / 10).replace('.', ',')}к`;
-  return String(Math.round(number));
-}
-
-function wrapLabel(label: string): string[] {
-  const words = label.trim().split(/\s+/);
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (candidate.length <= 14) current = candidate;
-    else {
-      if (current) lines.push(current);
-      current = word;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
-function radarSvg(axes: RadarMoneyAxis[], scale: RadarScale | undefined, currency: string | null | undefined): string {
-  if (axes.length < 2) return '';
-  const cx = 170;
-  const cy = 150;
-  const radius = 88;
-  const scaleMax = Math.max(1, Number(scale?.max || 0));
-  const ticks = (scale?.ticks || []).map((tick) => Number(tick)).filter((tick) => tick > 0);
-  const points = (key: 'current_amount' | 'previous_amount') => axes.map((axis, index) => {
-    const angle = (Math.PI * 2 * index) / axes.length - Math.PI / 2;
-    const value = Math.max(0, Math.min(scaleMax, Number(axis[key] || 0))) / scaleMax;
-    return `${cx + Math.cos(angle) * radius * value},${cy + Math.sin(angle) * radius * value}`;
-  }).join(' ');
-  const rings = ticks.map((tick) => {
-    const r = radius * tick / scaleMax;
-    const polygon = axes.map((_axis, index) => {
-      const angle = (Math.PI * 2 * index) / axes.length - Math.PI / 2;
-      return `${cx + Math.cos(angle) * r},${cy + Math.sin(angle) * r}`;
-    }).join(' ');
-    return `<polygon class="radar-ring" points="${polygon}" /><text class="radar-tick" x="${cx + 4}" y="${cy - r + 4}">${esc(compactAmount(tick))}</text>`;
-  }).join('');
-  const spokes = axes.map((axis, index) => {
-    const angle = (Math.PI * 2 * index) / axes.length - Math.PI / 2;
-    const x = cx + Math.cos(angle) * radius;
-    const y = cy + Math.sin(angle) * radius;
-    const lx = cx + Math.cos(angle) * (radius + 58);
-    const ly = cy + Math.sin(angle) * (radius + 48);
-    const anchor = Math.abs(Math.cos(angle)) < 0.25 ? 'middle' : Math.cos(angle) > 0 ? 'start' : 'end';
-    const lines = wrapLabel(axis.category);
-    const title = `${axis.category}: текущий период ${axis.current_amount} ${currency || ''}, предыдущий ${axis.previous_amount} ${currency || ''}`;
-    return `<g><title>${esc(title)}</title><line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" />` +
-      `<text class="radar-label" x="${lx}" y="${ly}" text-anchor="${anchor}">${lines.map((line, lineIndex) => `<tspan x="${lx}" dy="${lineIndex === 0 ? 0 : 13}">${esc(line)}</tspan>`).join('')}</text></g>`;
-  }).join('');
-  const dots = (key: 'current_amount' | 'previous_amount', klass: string) => axes.map((axis, index) => {
-    const angle = (Math.PI * 2 * index) / axes.length - Math.PI / 2;
-    const value = Math.max(0, Math.min(scaleMax, Number(axis[key] || 0))) / scaleMax;
-    return `<circle class="${klass}" cx="${cx + Math.cos(angle) * radius * value}" cy="${cy + Math.sin(angle) * radius * value}" r="3" />`;
-  }).join('');
-  return `
-    <svg class="radar" viewBox="0 0 340 320" role="img" aria-label="Radar ${esc(currency || '')}">
-      ${rings}
-      ${spokes}
-      <polygon class="radar-prev" points="${points('previous_amount')}" />
-      <polygon class="radar-current" points="${points('current_amount')}" />
-      ${dots('previous_amount', 'radar-dot-prev')}
-      ${dots('current_amount', 'radar-dot-current')}
-    </svg>
-  `;
 }
 
 export function AnalyticsScreen(
   analytics: AnalyticsResponse | null,
   filters: {
     categoryType: 'expense' | 'income';
-    dynamicsType: 'expense' | 'income' | 'both';
+    dynamicsType: 'expense' | 'income' | 'result' | 'both';
     radarType: 'expense' | 'income';
     grouping?: 'day' | 'week' | 'month';
+    analyticsCurrency?: string;
     categoryCurrency?: string;
     dynamicsCurrency?: string;
     radarCurrency?: string;
@@ -208,15 +144,12 @@ export function AnalyticsScreen(
 ): string {
   const currencies = analytics?.available_currencies || Object.keys(analytics?.summary.totals_by_currency || {});
   const mixedCurrency = currencies.length > 1;
-  const categoryCurrency = filters.categoryCurrency || currencies[0] || '';
-  const dynamicsCurrency = filters.dynamicsCurrency || currencies[0] || '';
+  const selectedCurrency = filters.analyticsCurrency || filters.categoryCurrency || filters.dynamicsCurrency || filters.radarCurrency || analytics?.selected_currency || currencies[0] || '';
   const structureMode = filters.structureMode || 'category';
-  const radarCurrencies = analytics?.radar_available_currencies || currencies;
-  const radarCurrency = filters.radarCurrency || radarCurrencies[0] || '';
-  const categoryItems = categoryCurrency ? analytics?.category_structure.currency_groups?.[categoryCurrency]?.items || [] : analytics?.category_structure.items || [];
-  const merchantItems = categoryCurrency ? analytics?.merchant_structure?.currency_groups?.[categoryCurrency]?.items || [] : analytics?.merchant_structure?.items || [];
-  const contributionGroup = categoryCurrency ? analytics?.change_contribution?.currency_groups?.[categoryCurrency] : undefined;
-  const dynamicsItems = dynamicsCurrency ? (analytics?.time_dynamics.items || []).filter((item) => item.currency === dynamicsCurrency) : analytics?.time_dynamics.items || [];
+  const categoryItems = selectedCurrency ? analytics?.category_structure.currency_groups?.[selectedCurrency]?.items || [] : analytics?.category_structure.items || [];
+  const merchantItems = selectedCurrency ? analytics?.merchant_structure?.currency_groups?.[selectedCurrency]?.items || [] : analytics?.merchant_structure?.items || [];
+  const contributionGroup = selectedCurrency ? analytics?.change_contribution?.currency_groups?.[selectedCurrency] : undefined;
+  const dynamicsItems = selectedCurrency ? (analytics?.time_dynamics.items || []).filter((item) => item.currency === selectedCurrency) : analytics?.time_dynamics.items || [];
   const globalType = globalFilters.operation_type;
   const dynamicsMode = globalType === 'expense' || globalType === 'income' ? globalType : filters.dynamicsType;
   const grouping = filters.grouping || (analytics?.time_dynamics.grouping as 'day' | 'week' | 'month' | undefined) || 'day';
@@ -226,24 +159,39 @@ export function AnalyticsScreen(
   const currencyOptions = (selected: string) => currencies
     .map((currency) => `<option value="${esc(currency)}" ${currency === selected ? 'selected' : ''}>${esc(currency)}</option>`)
     .join('');
-  const radarCurrencyOptions = (selected: string) => radarCurrencies
-    .map((currency) => `<option value="${esc(currency)}" ${currency === selected ? 'selected' : ''}>${esc(currency)}</option>`)
-    .join('');
   return `
     <section class="screen analytics-screen">
       <div class="insight-block">
         <span class="eyebrow">Ключевой вывод</span>
         <h2>${mixedCurrency ? 'Смотрите каждую валюту отдельно' : 'Картина периода собрана'}</h2>
         <p>${mixedCurrency ? 'КопиPaste не смешивает валюты и не создаёт ложный общий итог.' : 'Доходы, расходы и результат ниже относятся к выбранному пространству и периоду.'}</p>
+        ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="analytics" aria-label="Валюта аналитики">${currencyOptions(selectedCurrency)}</select>` : ''}
       </div>
-      <div class="metrics-grid">${metricRows(analytics)}</div>
+      <div class="metrics-grid">${metricRows(analytics, selectedCurrency)}</div>
       ${note}
       <div class="search-field analytics-search">
         ${icon('search')}
         <input class="input" type="search" data-action="analytics-search" placeholder="Категория, магазин или операция" value="${esc(filters.search || '')}" aria-label="Поиск в аналитике" />
       </div>
       ${searchResults(analytics)}
-      ${detailPanel(analytics)}
+      <section class="chart-section">
+        ${SectionHeader('Динамика', 'Когда менялись деньги')}
+        <div class="chart-controls">
+          ${globalType === 'all' ? `<select class="select compact" data-action="chart-filter" data-chart="dynamics" aria-label="Тип динамики">
+            <option value="expense" ${filters.dynamicsType === 'expense' ? 'selected' : ''}>Расходы</option>
+            <option value="income" ${filters.dynamicsType === 'income' ? 'selected' : ''}>Доходы</option>
+            <option value="result" ${filters.dynamicsType === 'result' ? 'selected' : ''}>Финрезультат</option>
+            <option value="both" ${filters.dynamicsType === 'both' ? 'selected' : ''}>Доходы и расходы</option>
+          </select>` : `<span class="pill">${esc(globalType === 'expense' ? 'Расходы' : 'Доходы')}</span>`}
+          <select class="select compact" data-action="chart-grouping" aria-label="Группировка">
+            <option value="day" ${grouping === 'day' ? 'selected' : ''}>По дням</option>
+            <option value="week" ${grouping === 'week' ? 'selected' : ''}>По неделям</option>
+            <option value="month" ${grouping === 'month' ? 'selected' : ''}>По месяцам</option>
+          </select>
+        </div>
+        <canvas id="dynamicsChart" height="180"></canvas>
+        <details class="chart-details"><summary aria-expanded="false">Показать детали</summary>${dynamicsRows(dynamicsItems, dynamicsMode)}</details>
+      </section>
       <section class="chart-section">
         ${SectionHeader('Структура', structureMode === 'merchant' ? 'Мерчанты внутри выбранной валюты' : 'Категории внутри выбранной валюты')}
         <div class="chart-controls">
@@ -253,7 +201,6 @@ export function AnalyticsScreen(
             <option value="expense" ${filters.categoryType === 'expense' ? 'selected' : ''}>Расходы</option>
             <option value="income" ${filters.categoryType === 'income' ? 'selected' : ''}>Доходы</option>
           </select>` : `<span class="pill">${esc(globalType === 'expense' ? 'Расходы' : 'Доходы')}</span>`}
-          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="category" aria-label="Валюта структуры">${currencyOptions(categoryCurrency)}</select>` : ''}
         </div>
         <canvas id="categoryChart" height="180"></canvas>
         <details class="chart-details" open><summary aria-expanded="true">${structureMode === 'merchant' ? 'Показать мерчантов' : 'Показать категории'}</summary>${structureMode === 'merchant' ? merchantBars(merchantItems) : categoryBars(categoryItems)}</details>
@@ -264,39 +211,9 @@ export function AnalyticsScreen(
           <span>Общее изменение</span>
           <strong>${contributionGroup ? `${Number(contributionGroup.total_delta) > 0 ? '+' : ''}${formatMoneyString(contributionGroup.total_delta, contributionGroup.currency)}` : 'нет данных'}</strong>
         </div>
-        ${contributionRows(contributionGroup?.items || [], categoryCurrency)}
+        ${contributionRows(contributionGroup?.items || [], selectedCurrency)}
       </section>
-      <section class="chart-section">
-        ${SectionHeader('Динамика', 'Как менялись доходы и расходы во времени')}
-        <div class="chart-controls">
-          ${globalType === 'all' ? `<select class="select compact" data-action="chart-filter" data-chart="dynamics" aria-label="Тип динамики">
-            <option value="both" ${filters.dynamicsType === 'both' ? 'selected' : ''}>Доходы и расходы</option>
-            <option value="expense" ${filters.dynamicsType === 'expense' ? 'selected' : ''}>Расходы</option>
-            <option value="income" ${filters.dynamicsType === 'income' ? 'selected' : ''}>Доходы</option>
-          </select>` : `<span class="pill">${esc(globalType === 'expense' ? 'Расходы' : 'Доходы')}</span>`}
-          <select class="select compact" data-action="chart-grouping" aria-label="Группировка">
-            <option value="day" ${grouping === 'day' ? 'selected' : ''}>По дням</option>
-            <option value="week" ${grouping === 'week' ? 'selected' : ''}>По неделям</option>
-            <option value="month" ${grouping === 'month' ? 'selected' : ''}>По месяцам</option>
-          </select>
-          ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="dynamics" aria-label="Валюта динамики">${currencyOptions(dynamicsCurrency)}</select>` : ''}
-        </div>
-        <canvas id="dynamicsChart" height="180"></canvas>
-        <details class="chart-details"><summary aria-expanded="false">Показать детали</summary>${dynamicsRows(dynamicsItems, dynamicsMode)}</details>
-      </section>
-      <section class="chart-section">
-        ${SectionHeader('Radar', `Абсолютные суммы${analytics?.radar.currency ? ` · ${analytics.radar.currency}` : ''}`)}
-        <div class="chart-controls">
-          ${globalType === 'all' ? `<select class="select compact" data-action="chart-filter" data-chart="radar" aria-label="Тип radar">
-            <option value="expense" ${filters.radarType === 'expense' ? 'selected' : ''}>Расходы</option>
-            <option value="income" ${filters.radarType === 'income' ? 'selected' : ''}>Доходы</option>
-          </select>` : `<span class="pill">${esc(globalType === 'expense' ? 'Расходы' : 'Доходы')}</span>`}
-          ${radarCurrencies.length > 1 ? `<select class="select compact" data-action="chart-currency" data-chart="radar" aria-label="Валюта radar">${radarCurrencyOptions(radarCurrency)}</select>` : ''}
-        </div>
-        ${analytics?.radar.insufficient_data ? EmptyPanel('Недостаточно данных', analytics.radar.explanation) : radarSvg(analytics?.radar.axes || [], analytics?.radar.scale, analytics?.radar.currency)}
-        ${analytics?.radar.insufficient_data ? '' : '<div class="radar-legend"><span class="current">Текущий период</span><span class="previous">Прошлый период</span></div>'}
-        <p class="caption">${esc(analytics?.radar.explanation || 'Значения нормализованы.')} Сравниваются выбранный и предыдущий периоды.</p>
-      </section>
+      ${detailPanel(analytics)}
       <section class="chart-section">
         ${SectionHeader('Экспорт', 'XLSX за выбранный период и пространство', '<button class="button secondary" data-action="export-open" type="button">Открыть экспорт</button>')}
         <p class="caption">Файл формируется через существующий безопасный flow и отправляется в Telegram.</p>

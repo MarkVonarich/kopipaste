@@ -106,8 +106,14 @@ export type AnalyticsResponse = {
     category_key?: string;
     total?: string;
     visible_total?: string;
+    previous_total?: string;
+    delta?: string;
+    pct?: string | null;
+    state?: string;
     operation_count: number;
+    previous_operation_count?: number;
     average_check?: string;
+    previous_average_check?: string;
     merchant_breakdown?: MerchantCurrencyGroup;
     operations: Operation[];
     operation_scope: Record<string, string | number | null>;
