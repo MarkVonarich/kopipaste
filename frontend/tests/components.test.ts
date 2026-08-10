@@ -641,15 +641,16 @@ describe('acceptance components', () => {
       },
       overview_metrics: { RUB: { income: { current: '0.00', previous: '0.00', delta: '0.00', pct: null, state: 'empty_previous' }, expense: { current: '500.00', previous: '300.00', delta: '200.00', pct: '66.67', state: 'ok' }, result: { current: '-500.00', previous: '-300.00', delta: '-200.00', pct: '66.67', state: 'ok' }, count: 2, previous_count: 1 } },
       category_structure: { type: 'expense', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '500.00', items: [{ category: 'Food', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100 }] } }, items: [] },
-      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '500.00', items: [{ merchant: 'Lavka', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100 }] } }, items: [] },
+      merchant_structure: { type: 'expense', dimension: 'merchant', top_n: 5, currency_groups: { RUB: { currency: 'RUB', total: '500.00', items: [{ key: 'lavka', merchant: 'Lavka', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100, raw_aliases: ['Lavka', 'LAVKA'] }] } }, items: [] },
       change_contribution: { type: 'expense', currency_groups: { RUB: { currency: 'RUB', type: 'expense', current_total: '500.00', previous_total: '300.00', total_delta: '200.00', reconciles: true, items: [{ category: 'Food', currency: 'RUB', total: '500.00', previous_total: '300.00', delta: '200.00', count: 2, share: 100 }] } }, items: [] },
       time_dynamics: { grouping: 'day', currency_groups: {}, items: [] },
       radar: { type: 'expense', currency: 'RUB', aggregation_available: true, current_period: overview.period, previous_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-04' }, metric: 'absolute_amount', max_axes: 6, scale: { max: '0.00', step: '0.00', ticks: ['0.00'] }, insufficient_data: true, explanation: 'Недостаточно данных', axes: [] },
       activity_calendar: { start_date: '2026-08-01', end_date: '2026-08-04', max_count: 0, days: [] },
-      search: { query: 'Lav', items: [{ kind: 'merchant', title: 'Lavka', subtitle: '2 операций', currency: 'RUB', amount: '500.00' }, { kind: 'operation', title: 'Lavka', subtitle: 'Food', currency: 'RUB', amount: '250.00', operation_id: 7 }] },
+      search: { query: 'Lav', items: [{ kind: 'merchant', title: 'Lavka', subtitle: '2 операций', currency: 'RUB', amount: '500.00', params: { detail_kind: 'merchant', detail_value: 'lavka', detail_currency: 'RUB' } }, { kind: 'operation', title: 'Lavka', subtitle: 'Food', currency: 'RUB', amount: '250.00', operation_id: 7 }] },
       selected_detail: {
         kind: 'merchant',
         title: 'Lavka',
+        merchant_key: 'lavka',
         currency: 'RUB',
         operation_type: 'expense',
         total: '500.00',
@@ -661,16 +662,27 @@ describe('acceptance components', () => {
         state: 'ok',
         average_check: '250.00',
         previous_average_check: '300.00',
+        frequency_delta: 1,
+        frequency_pct: '100.00',
+        average_check_delta: '-50.00',
+        average_check_pct: '-16.67',
+        merchant_share_of_category: '80.00',
+        merchant_share_of_total: '25.00',
+        primary_category: { category_key: 'food', category: 'Food', category_total: '625.00', merchant_total: '500.00', merchant_count: 2, merchant_share_of_category: '80.00' },
+        baseline: { method: 'trailing_median', periods_used: 3, amount: '450.00', count: '2.00', average_check: '225.00', sufficient_data: true },
+        raw_aliases: ['Lavka', 'LAVKA'],
         operations: [{ id: 7, op_date: '2026-08-02', type: 'Расходы', category: 'Food', amount: '250.00', amount_text: '250 ₽', currency: 'RUB', description: 'Lavka', workspace_id: 10 }],
-        operation_scope: { workspace_id: 10, period: 'custom', start_date: '2026-08-01', end_date: '2026-08-04', operation_type: 'expense', category: 'all', currency: 'RUB', merchant: 'Lavka' },
+        operation_scope: { workspace_id: 10, period: 'custom', start_date: '2026-08-01', end_date: '2026-08-04', operation_type: 'expense', category: 'all', currency: 'RUB', merchant_key: 'lavka' },
       },
       top_expense_categories: [],
     }, { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', analyticsCurrency: 'RUB', structureMode: 'merchant', search: 'Lav', detailKind: 'merchant', detailValue: 'Lavka', detailCurrency: 'RUB', detailOperationType: 'expense' }, { period: 'current_month', operation_type: 'all', category: 'all' });
 
     expect(html).toContain('Категория, магазин или операция');
     expect(html).toContain('data-action="analytics-structure" data-mode="merchant"');
-    expect(html).toContain('data-action="analytics-drill" data-kind="merchant"');
+    expect(html).toContain('data-action="analytics-drill" data-kind="merchant" data-value="lavka"');
     expect(html).toContain('Средний чек');
+    expect(html).toContain('Частота');
+    expect(html).toContain('Учтённые записи');
     expect(html).toContain('+200 ₽ · +66,67%');
     expect(html).toContain('data-action="operation-detail" data-id="7"');
     expect(html).toContain('data-action="analytics-back"');

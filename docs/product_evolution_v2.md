@@ -171,6 +171,90 @@ Acceptance criteria:
 - Merchant aggregates preserve currency.
 - Existing operation create/edit/delete flows remain compatible.
 
+Implemented architecture:
+
+- Merchant Intelligence is a read-time analytical layer over existing `operations.comment`.
+- Raw operation descriptions/comments remain untouched. Canonical merchant identity is derived for Analytics only and never overwrites `operations.comment` or category-learning state.
+- The reusable service boundary is `services.merchant_intelligence`:
+  - `normalize_merchant_key()` derives deterministic keys;
+  - `fold_merchant_rows()` groups raw operation rows by merchant identity;
+  - `merchant_features()` returns amount, count, average-check, frequency, and share metrics using `Decimal`;
+  - `merchant_baseline()` returns a conservative trailing-median personal baseline.
+- Mini App Analytics uses `merchant_key` for Merchant Structure, merchant search results, merchant detail, and Operations drilldown. Exact `merchant` filtering remains accepted by `/miniapp/api/operations` for backward compatibility.
+
+Normalization rules:
+
+- Unicode text is normalized with NFKC.
+- Leading/trailing whitespace is trimmed.
+- Internal whitespace is collapsed to one space.
+- Case is folded.
+- `ё` is normalized to `е`.
+- Punctuation and symbol separators are treated as spaces, so safe formatting variants such as `Яндекс Лавка`, `Яндекс-Лавка`, and `Яндекс*Лавка` share one key.
+- No transliteration, fuzzy matching, Levenshtein thresholds, embeddings, LLM guessing, global merchant dictionaries, or shared-word merging is used. `lavka` and `Яндекс Лавка` remain different keys unless a future explicit alias system maps them.
+
+Alias scope decision:
+
+- PR 3 introduces deterministic global normalization only.
+- It does not persist semantic aliases and does not reuse category `user_aliases`/`global_aliases`, because those tables have category-learning semantics.
+- Future user/workspace-confirmed merchant aliases should use separate merchant-specific state and must not silently affect unrelated users or inaccessible workspaces.
+
+Canonical display behavior:
+
+- Display labels are chosen deterministically from the raw variants inside the authorized current scope.
+- The selector prefers cleaner raw forms over all-uppercase or punctuation-heavy forms, then uses usage/amount/name ordering for deterministic ties.
+- Raw aliases can be exposed compactly in merchant detail so users can understand why variants were grouped.
+
+Empty merchant semantics:
+
+- Missing comments remain a fallback identity with key `__empty_merchant__`.
+- The fallback displays as `Без описания` but is not a real merchant and is non-drillable.
+- A real raw merchant named `Без описания` normalizes to `без описания` and remains distinct from the fallback key.
+- Synthetic `Остальные` rows keep reserved synthetic keys and remain non-drillable.
+
+Merchant features:
+
+- Merchant detail exposes backend-calculated:
+  - current total;
+  - operation count;
+  - average check;
+  - comparable previous total/count/average check;
+  - amount delta and percentage when valid;
+  - frequency delta and percentage when previous count is non-zero;
+  - average-check delta and percentage when previous average is non-zero;
+  - share of the full selected category denominator;
+  - share of the full selected type/currency scope.
+- All monetary math uses `Decimal`.
+- Multi-currency amounts are never combined; merchant aggregates remain currency-scoped.
+- Custom categories are supported because category denominators use existing stored category values and normalized category keys.
+
+Baseline method:
+
+- V1 baseline uses trailing completed comparable periods with a median statistic.
+- Minimum threshold is 3 prior non-empty comparable periods and at least 3 merchant observations.
+- Insufficient history returns `sufficient_data=false` and must not be presented as "usually" behavior.
+
+Time and weekday decision:
+
+- Time-of-day insights are deferred. The existing model has `op_date` as the transaction date selected/recorded by the user and `created_at` as recording time; `created_at` must not be treated as purchase occurrence time.
+- Weekday analysis may use `op_date` in a later phase because it represents the operation date, not the entry timestamp.
+
+Storage and migration decision:
+
+- No migration is required for PR 3.
+- Merchant keys are derived at read time from existing comments. No merchant key is backfilled into historical operations.
+- Functional indexes are deferred until production-like query plans show the expression filter needs one.
+
+Performance decisions:
+
+- Merchant Structure folds grouped raw-comment SQL rows in Python; it does not query per merchant.
+- Merchant detail uses scoped grouped SQL for full-denominator category and total shares.
+- Operations drilldown filters by a SQL expression over `operations.comment`, while authorization still comes from authenticated Mini App user plus existing workspace filters.
+- Search groups canonical merchant results from a bounded raw-row query; operation search remains individual rows.
+
+Reusable for PR 4:
+
+- PR 4 Insight Engine can consume `services.merchant_intelligence` directly for deterministic merchant keys, feature math, raw-alias explanation, and baseline semantics without parsing Mini App JSON.
+
 ### PR 4: Insight Engine v1
 
 Goal: surface useful deterministic insights from the user's own data after analytics and merchant foundations are in place.

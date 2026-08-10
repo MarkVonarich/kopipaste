@@ -104,6 +104,7 @@ export type AnalyticsResponse = {
     currency: string;
     operation_type: 'expense' | 'income';
     category_key?: string;
+    merchant_key?: string;
     total?: string;
     visible_total?: string;
     previous_total?: string;
@@ -114,6 +115,15 @@ export type AnalyticsResponse = {
     previous_operation_count?: number;
     average_check?: string;
     previous_average_check?: string;
+    frequency_delta?: number;
+    frequency_pct?: string | null;
+    average_check_delta?: string;
+    average_check_pct?: string | null;
+    merchant_share_of_category?: string | null;
+    merchant_share_of_total?: string | null;
+    primary_category?: { category_key: string; category: string; category_total: string; merchant_total: string; merchant_count: number; merchant_share_of_category?: string | null } | null;
+    baseline?: { method: string; periods_used: number; amount: string; count: string | number; average_check: string; sufficient_data: boolean };
+    raw_aliases?: string[];
     merchant_breakdown?: MerchantCurrencyGroup;
     operations: Operation[];
     operation_scope: Record<string, string | number | null>;
@@ -235,7 +245,7 @@ export const api = {
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
   overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
-  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; category_key?: string }, offset = 0, search = '') =>
+  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; merchant_key?: string; category_key?: string }, offset = 0, search = '') =>
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
   categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),

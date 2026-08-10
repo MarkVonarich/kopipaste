@@ -546,6 +546,54 @@ describe('main plan handlers', () => {
     expect(api.track).not.toHaveBeenCalledWith('mini_app_add_to_home_requested', { source: 'mini_app' });
   });
 
+  it('opens merchant analytics operations with canonical merchant key', async () => {
+    const api = installAppMocks();
+    const data = analyticsData(['RUB'], 'RUB');
+    data.selected_detail = {
+      kind: 'merchant',
+      title: 'Яндекс Лавка',
+      merchant_key: 'яндекс лавка',
+      currency: 'RUB',
+      operation_type: 'expense',
+      total: '800.00',
+      previous_total: '300.00',
+      delta: '500.00',
+      pct: '166.67',
+      state: 'ok',
+      operation_count: 2,
+      previous_operation_count: 1,
+      average_check: '400.00',
+      previous_average_check: '300.00',
+      operations: [],
+      operation_scope: {
+        workspace_id: 10,
+        period: 'custom',
+        start_date: '2026-08-01',
+        end_date: '2026-08-07',
+        operation_type: 'expense',
+        category: 'all',
+        currency: 'RUB',
+        merchant_key: 'яндекс лавка',
+      },
+    };
+    api.analytics.mockResolvedValue(data);
+    api.operations.mockResolvedValue({ items: [], has_more: false, limit: 30, offset: 0, period: data.period });
+
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="analytics"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="analytics-open-operations"]')?.click();
+    await flush(8);
+
+    expect(api.operations).toHaveBeenCalledWith(10, expect.objectContaining({
+      currency: 'RUB',
+      merchant_key: 'яндекс лавка',
+      category_key: undefined,
+    }), 0, '');
+    expect(api.operations.mock.calls[0][1]).not.toHaveProperty('merchant');
+  });
+
   it('falls back from stale Analytics EUR to RUB after scope changes without a reload loop', async () => {
     const api = installAppMocks();
     let scope: 'mixed' | 'rub' = 'mixed';
