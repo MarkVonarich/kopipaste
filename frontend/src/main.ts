@@ -941,7 +941,7 @@ function wireEvents(): void {
     state.search = '';
     state.operationScope = {
       currency: String(scope.currency || detail.currency || ''),
-      merchant: detail.kind === 'merchant' ? detail.title : undefined,
+      merchant_key: detail.kind === 'merchant' ? String(scope.merchant_key || detail.merchant_key || '') : undefined,
       category_key: detail.kind === 'category' ? String(detail.category_key || '') : undefined,
     };
     state.tab = 'operations';

@@ -89,6 +89,16 @@ from services.reminders import (
 )
 from utils.text import norm_text
 from services.limit_alerts import alert_status_for_band, threshold_band
+from services.merchant_intelligence import (
+    EMPTY_MERCHANT_KEY,
+    comparable_baseline_periods,
+    fold_merchant_rows,
+    merchant_baseline,
+    merchant_features,
+    merchant_key_sql,
+    normalize_merchant_key,
+    raw_aliases_for_bucket,
+)
 from services.miniapp_limits import (
     MiniAppLimitError,
     StoredLimit,
@@ -1241,6 +1251,13 @@ class MiniAppAPI:
                 values.append(normalized_category_key(category_key))
             except ValueError as exc:
                 raise MiniAppError(400, "bad_category", "Invalid category.") from exc
+        merchant_key = str(params.get("merchant_key") or "").strip()
+        if merchant_key:
+            normalized_merchant = normalize_merchant_key(merchant_key)
+            if not normalized_merchant or normalized_merchant == EMPTY_MERCHANT_KEY or len(normalized_merchant) > 120:
+                raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
+            filters.append(f"{merchant_key_sql('o.comment')}=%s")
+            values.append(normalized_merchant)
         merchant = str(params.get("merchant") or "").strip()
         if merchant:
             if len(merchant) > 120:
@@ -1806,21 +1823,18 @@ class MiniAppAPI:
         return result
 
     def _fold_dimension(self, rows: list[tuple[str, str, Decimal, int]], *, dimension: str) -> dict[str, dict[str, dict[str, Any]]]:
+        if dimension == "merchant":
+            return fold_merchant_rows(rows)
         grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         for name, currency, total, count in rows:
             raw_name = name.strip()
             display_name = raw_name or ("Без описания" if dimension == "merchant" else "Прочее")
-            if dimension == "category":
-                try:
-                    key = normalized_category_key(display_name)
-                except ValueError:
-                    key = normalized_category_key("Прочее")
-                drillable = True
-                fallback = False
-            else:
-                key = raw_name or "__empty_merchant__"
-                drillable = bool(raw_name)
-                fallback = not raw_name
+            try:
+                key = normalized_category_key(display_name)
+            except ValueError:
+                key = normalized_category_key("Прочее")
+            drillable = True
+            fallback = False
             bucket = grouped[currency].setdefault(
                 key,
                 {
@@ -1870,6 +1884,7 @@ class MiniAppAPI:
                     "synthetic": bool(cur.get("synthetic") or prev.get("synthetic")),
                     "drillable": bool(cur.get("drillable", True) and prev.get("drillable", True)),
                     "fallback": bool(cur.get("fallback") or prev.get("fallback")),
+                    **({"source": cur.get("source") or prev.get("source") or "deterministic", "raw_aliases": raw_aliases_for_bucket(cur) or raw_aliases_for_bucket(prev)} if dimension == "merchant" else {}),
                 })
             values.sort(key=lambda item: (-to_decimal_money(item["total"]), str(item.get("category") or item.get("merchant"))))
             currency_total = sum((to_decimal_money(item["total"]) for item in values), Decimal("0.00"))
@@ -1962,7 +1977,7 @@ class MiniAppAPI:
             }
         return {"type": "income" if op_type == "Доходы" else "expense", "currency_groups": groups, "items": [item for group in groups.values() for item in group["items"]]}
 
-    def _analytics_operations_scope(self, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None) -> dict:
+    def _analytics_operations_scope(self, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None, merchant_key: str | None = None) -> dict:
         return {
             "workspace_id": "all" if tx.all_scope else tx.workspace_ids[0],
             "period": tx.period_key,
@@ -1973,10 +1988,11 @@ class MiniAppAPI:
             "currency": currency,
             "category_key": category_key,
             "merchant": merchant,
+            "merchant_key": merchant_key,
         }
 
-    def _detail_operation_rows(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None, limit: int = 8) -> list[dict]:
-        params = self._analytics_operations_scope(tx, op_type, currency, category_key=category_key, merchant=merchant)
+    def _detail_operation_rows(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None, merchant_key: str | None = None, limit: int = 8) -> list[dict]:
+        params = self._analytics_operations_scope(tx, op_type, currency, category_key=category_key, merchant=merchant, merchant_key=merchant_key)
         response = self.operations(req, {**params, "limit": limit, "offset": 0})
         return response["data"]["items"]
 
@@ -1997,27 +2013,33 @@ class MiniAppAPI:
         )
         total = sum((to_decimal_money(row[1]) for row in rows), Decimal("0.00"))
         total_count = sum((int(row[2] or 0) for row in rows), 0)
+        grouped = fold_merchant_rows((str(row[0] or ""), currency, to_decimal_money(row[1]), int(row[2] or 0)) for row in rows)
+        values = sorted(
+            grouped.get(currency, {}).values(),
+            key=lambda item: (-to_decimal_money(item["total"]), str(item["name"])),
+        )
         items = []
-        top_rows = rows[:CHART_TOP_N]
-        for merchant, amount, count in top_rows:
-            raw_merchant = str(merchant or "").strip()
-            item_total = to_decimal_money(amount)
+        top_rows = values[:CHART_TOP_N]
+        for merchant in top_rows:
+            item_total = to_decimal_money(merchant["total"])
             share = int((item_total / total * Decimal("100")).to_integral_value()) if total > 0 else 0
             items.append({
-                "key": raw_merchant or "__empty_merchant__",
-                "merchant": raw_merchant or "Без описания",
+                "key": merchant["key"],
+                "merchant": merchant["name"],
                 "currency": currency,
                 "total": item_total,
-                "count": int(count or 0),
+                "count": int(merchant.get("count") or 0),
                 "share": share,
                 "synthetic": False,
-                "drillable": bool(raw_merchant),
-                "fallback": not raw_merchant,
+                "drillable": bool(merchant.get("drillable", True)),
+                "fallback": bool(merchant.get("fallback")),
+                "source": merchant.get("source") or "deterministic",
+                "raw_aliases": raw_aliases_for_bucket(merchant),
             })
-        other_rows = rows[CHART_TOP_N:]
+        other_rows = values[CHART_TOP_N:]
         if other_rows:
-            other_total = sum((to_decimal_money(row[1]) for row in other_rows), Decimal("0.00"))
-            other_count = sum((int(row[2] or 0) for row in other_rows), 0)
+            other_total = sum((to_decimal_money(row["total"]) for row in other_rows), Decimal("0.00"))
+            other_count = sum((int(row.get("count") or 0) for row in other_rows), 0)
             items.append({
                 "key": "__synthetic_other_merchant__",
                 "merchant": "Остальные",
@@ -2031,12 +2053,18 @@ class MiniAppAPI:
             })
         return {"currency": currency, "total": total, "count": total_count, "items": items}
 
-    def _detail_summary(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None) -> dict[str, Any]:
+    def _detail_summary(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, *, category_key: str | None = None, merchant: str | None = None, merchant_key: str | None = None) -> dict[str, Any]:
         filters = [tx.where_sql, "type=%s", "COALESCE(currency, %s)=%s"]
         values: list[Any] = [*tx.params, op_type, get_user_currency(req.user_id), currency]
         if category_key:
             filters.append(f"{self._category_key_sql('category')}=%s")
             values.append(category_key)
+        if merchant_key:
+            normalized_merchant = normalize_merchant_key(merchant_key)
+            if not normalized_merchant:
+                raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
+            filters.append(f"{merchant_key_sql('comment')}=%s")
+            values.append(normalized_merchant)
         if merchant:
             filters.append("TRIM(COALESCE(comment,''))=%s")
             values.append(merchant)
@@ -2055,6 +2083,116 @@ class MiniAppAPI:
             "operation_count": count,
             "average_check": (total / Decimal(count)).quantize(Decimal("0.01")) if count else Decimal("0.00"),
         }
+
+    def _merchant_context(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
+        normalized_merchant = normalize_merchant_key(merchant_key)
+        if not normalized_merchant:
+            raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
+        category_expr = self._category_key_sql("category")
+        merchant_expr = merchant_key_sql("comment")
+        rows = pg_fetchall(
+            f"""
+            SELECT {category_expr} AS category_key,
+                   MIN(TRIM(COALESCE(category, 'Прочее'))),
+                   COALESCE(SUM(amount),0),
+                   COALESCE(SUM(CASE WHEN {merchant_expr}=%s THEN amount ELSE 0 END),0),
+                   COUNT(*) FILTER (WHERE {merchant_expr}=%s)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type=%s
+               AND COALESCE(currency, %s)=%s
+             GROUP BY {category_expr}
+             ORDER BY COALESCE(SUM(CASE WHEN {merchant_expr}=%s THEN amount ELSE 0 END),0) DESC,
+                      COALESCE(SUM(amount),0) DESC,
+                      MIN(TRIM(COALESCE(category, 'Прочее')))
+            """,
+            (normalized_merchant, normalized_merchant, *tx.params, op_type, get_user_currency(req.user_id), currency, normalized_merchant),
+        )
+        scope_total = sum((to_decimal_money(row[2]) for row in rows), Decimal("0.00"))
+        category_items = []
+        for category_key, category, category_total, merchant_total, merchant_count in rows:
+            merchant_amount = to_decimal_money(merchant_total)
+            if merchant_amount <= 0 and int(merchant_count or 0) <= 0:
+                continue
+            category_amount = to_decimal_money(category_total)
+            category_items.append({
+                "category_key": str(category_key or ""),
+                "category": str(category or "Прочее"),
+                "category_total": category_amount,
+                "merchant_total": merchant_amount,
+                "merchant_count": int(merchant_count or 0),
+                "merchant_share_of_category": merchant_features(
+                    current_total=merchant_amount,
+                    current_count=int(merchant_count or 0),
+                    category_total=category_amount,
+                    scope_total=scope_total,
+                )["merchant_share_of_category"],
+            })
+        primary = category_items[0] if category_items else None
+        return {"scope_total": scope_total, "categories": category_items, "primary_category": primary}
+
+    def _merchant_identity_snapshot(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
+        normalized_merchant = normalize_merchant_key(merchant_key)
+        rows = pg_fetchall(
+            f"""
+            SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(SUM(amount),0), COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type=%s
+               AND COALESCE(currency, %s)=%s
+               AND {merchant_key_sql('comment')}=%s
+             GROUP BY NULLIF(TRIM(COALESCE(comment,'')), '')
+             ORDER BY COUNT(*) DESC, COALESCE(SUM(amount),0) DESC, NULLIF(TRIM(COALESCE(comment,'')), '')
+            """,
+            (*tx.params, op_type, get_user_currency(req.user_id), currency, normalized_merchant),
+        )
+        grouped = fold_merchant_rows((str(row[0] or ""), currency, to_decimal_money(row[1]), int(row[2] or 0)) for row in rows)
+        bucket = grouped.get(currency, {}).get(normalized_merchant)
+        if not bucket:
+            return {"merchant_key": normalized_merchant, "display_name": normalized_merchant, "raw_aliases": []}
+        return {"merchant_key": normalized_merchant, "display_name": bucket["name"], "raw_aliases": raw_aliases_for_bucket(bucket)}
+
+    def _merchant_baseline(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
+        normalized_merchant = normalize_merchant_key(merchant_key)
+        periods = comparable_baseline_periods(tx.start, tx.end, tx.period_key)
+        if not periods:
+            return merchant_baseline([])
+        earliest = periods[-1][0]
+        latest = periods[0][1]
+        date_case = " ".join(
+            f"WHEN op_date BETWEEN %s AND %s THEN {idx}"
+            for idx, (_start, _end) in enumerate(periods)
+        )
+        date_values = [value for period in periods for value in period]
+        rows = pg_fetchall(
+            f"""
+            SELECT bucket, COALESCE(SUM(amount),0), COUNT(*)
+              FROM (
+                    SELECT CASE {date_case} END AS bucket, amount
+                      FROM public.operations
+                     WHERE {tx.where_sql.replace('op_date BETWEEN %s AND %s', 'op_date BETWEEN %s AND %s')}
+                       AND type=%s
+                       AND COALESCE(currency, %s)=%s
+                       AND {merchant_key_sql('comment')}=%s
+                   ) scoped
+             WHERE bucket IS NOT NULL
+             GROUP BY bucket
+             ORDER BY bucket
+            """,
+            (*date_values, *self._replace_tx_period(tx, earliest, latest), op_type, get_user_currency(req.user_id), currency, normalized_merchant),
+        )
+        by_bucket = {int(row[0]): (to_decimal_money(row[1]), int(row[2] or 0)) for row in rows}
+        period_rows = []
+        for idx, (period_start, period_end) in enumerate(periods):
+            total, count = by_bucket.get(idx, (Decimal("0.00"), 0))
+            period_rows.append((period_start, period_end, total, count))
+        return merchant_baseline(period_rows)
+
+    def _replace_tx_period(self, tx: TransactionFilters, start: date, end: date) -> tuple[Any, ...]:
+        values = list(tx.params)
+        period_index = len(tx.params) - (2 + (1 if tx.operation_type != "all" else 0) + (1 if tx.category else 0))
+        values[period_index:period_index + 2] = [start, end]
+        return tuple(values)
 
     def _analytics_detail(self, req: MiniAppRequest, tx: TransactionFilters, prev_tx: TransactionFilters, params: dict[str, Any], op_type: str) -> dict | None:
         kind = str(params.get("detail_kind") or "").strip()
@@ -2094,15 +2232,31 @@ class MiniAppAPI:
                 "visible_total": current_summary["total"],
                 "operation_scope": self._analytics_operations_scope(tx, op_type, currency, category_key=category_key),
             }
-        operation_items = self._detail_operation_rows(req, tx, op_type, currency, merchant=value)
-        current_summary = self._detail_summary(req, tx, op_type, currency, merchant=value)
-        previous_summary = self._detail_summary(req, prev_tx, op_type, currency, merchant=value)
+        merchant_key = normalize_merchant_key(value)
+        if not merchant_key or merchant_key == EMPTY_MERCHANT_KEY:
+            raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
+        operation_items = self._detail_operation_rows(req, tx, op_type, currency, merchant_key=merchant_key)
+        current_summary = self._detail_summary(req, tx, op_type, currency, merchant_key=merchant_key)
+        previous_summary = self._detail_summary(req, prev_tx, op_type, currency, merchant_key=merchant_key)
         comparison = self._metric_comparison(current_summary["total"], previous_summary["total"])
+        context = self._merchant_context(req, tx, op_type, currency, merchant_key)
+        identity = self._merchant_identity_snapshot(req, tx, op_type, currency, merchant_key)
+        primary_category = context["primary_category"]
+        feature_set = merchant_features(
+            current_total=current_summary["total"],
+            current_count=current_summary["operation_count"],
+            previous_total=previous_summary["total"],
+            previous_count=previous_summary["operation_count"],
+            category_total=primary_category["category_total"] if primary_category else None,
+            scope_total=context["scope_total"],
+        )
+        baseline = self._merchant_baseline(req, tx, op_type, currency, merchant_key)
         return {
             "kind": "merchant",
-            "title": value,
+            "title": identity["display_name"],
             "currency": currency,
             "operation_type": "income" if op_type == "Доходы" else "expense",
+            "merchant_key": merchant_key,
             "total": current_summary["total"],
             "previous_total": previous_summary["total"],
             "delta": comparison["delta"],
@@ -2112,8 +2266,17 @@ class MiniAppAPI:
             "previous_operation_count": previous_summary["operation_count"],
             "average_check": current_summary["average_check"],
             "previous_average_check": previous_summary["average_check"],
+            "frequency_delta": feature_set["frequency_delta"],
+            "frequency_pct": feature_set["frequency_pct"],
+            "average_check_delta": feature_set["average_check_delta"],
+            "average_check_pct": feature_set["average_check_pct"],
+            "merchant_share_of_total": feature_set["merchant_share_of_total"],
+            "merchant_share_of_category": feature_set["merchant_share_of_category"],
+            "primary_category": primary_category,
+            "baseline": baseline,
+            "raw_aliases": identity["raw_aliases"],
             "operations": operation_items,
-            "operation_scope": self._analytics_operations_scope(tx, op_type, currency, merchant=value),
+            "operation_scope": self._analytics_operations_scope(tx, op_type, currency, merchant_key=merchant_key),
         }
 
     def _analytics_search(self, req: MiniAppRequest, tx: TransactionFilters, params: dict[str, Any], op_type: str, *, currencies: list[str] | None = None) -> dict:
@@ -2122,6 +2285,8 @@ class MiniAppAPI:
             return {"query": query, "items": []}
         q = f"%{query[:80]}%"
         normalized_q = f"%{norm_text(query[:80])}%"
+        merchant_query_key = normalize_merchant_key(query[:80])
+        merchant_normalized_q = f"%{merchant_query_key}%" if merchant_query_key else ""
         currency_filter = ""
         currency_values: list[Any] = []
         selected_currency = str(params.get("currency") or "").strip().upper()
@@ -2147,18 +2312,20 @@ class MiniAppAPI:
         )
         merchant_rows = pg_fetchall(
             f"""
-            SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s),
+            SELECT {merchant_key_sql('comment')} AS merchant_key,
+                   NULLIF(TRIM(COALESCE(comment,'')), ''),
+                   COALESCE(currency, %s),
                    COALESCE(SUM(amount),0), COUNT(*)
               FROM public.operations
              WHERE {tx.where_sql}
                AND type=%s
                {currency_filter}
-               AND comment ILIKE %s
-             GROUP BY NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s)
-             ORDER BY COUNT(*) DESC, COALESCE(SUM(amount),0) DESC
-             LIMIT 4
+               AND ({merchant_key_sql('comment')} LIKE %s OR comment ILIKE %s)
+               AND {merchant_key_sql('comment')} <> ''
+             GROUP BY {merchant_key_sql('comment')}, NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s)
+             ORDER BY {merchant_key_sql('comment')}, COUNT(*) DESC, COALESCE(SUM(amount),0) DESC
             """,
-            (get_user_currency(req.user_id), *tx.params, op_type, *currency_values, q, get_user_currency(req.user_id)),
+            (get_user_currency(req.user_id), *tx.params, op_type, *currency_values, merchant_normalized_q, q, get_user_currency(req.user_id)),
         )
         operation_rows = pg_fetchall(
             f"""
@@ -2187,20 +2354,29 @@ class MiniAppAPI:
                 "amount": to_decimal_money(total),
                 "params": {"detail_kind": "category", "detail_value": str(category_key or category_name), "detail_currency": currency_code},
             })
-        for merchant, currency, total, count in merchant_rows:
-            currency_code = str(currency)
+        grouped_merchants = fold_merchant_rows((str(merchant or ""), str(currency), to_decimal_money(total), int(count or 0)) for _key, merchant, currency, total, count in merchant_rows)
+        merchant_items = []
+        for currency_code, grouped in grouped_merchants.items():
             if allowed and currency_code not in allowed:
                 continue
-            merchant_name = str(merchant or "").strip()
-            if not merchant_name:
-                continue
+            for merchant in grouped.values():
+                if not merchant.get("drillable", True):
+                    continue
+                merchant_items.append((currency_code, merchant))
+        merchant_items.sort(key=lambda item: (-to_decimal_money(item[1]["total"]), -int(item[1].get("count") or 0), str(item[1]["name"])))
+        for currency_code, merchant in merchant_items[:4]:
             items.append({
                 "kind": "merchant",
-                "title": merchant_name,
-                "subtitle": f"{int(count or 0)} операций",
+                "title": merchant["name"],
+                "subtitle": f"{int(merchant.get('count') or 0)} операций",
                 "currency": currency_code,
-                "amount": to_decimal_money(total),
-                "params": {"detail_kind": "merchant", "detail_value": merchant_name, "detail_currency": currency_code},
+                "amount": to_decimal_money(merchant["total"]),
+                "params": {
+                    "detail_kind": "merchant",
+                    "detail_value": merchant["key"],
+                    "detail_currency": currency_code,
+                    "merchant_key": merchant["key"],
+                },
             })
         for operation_id, _op_date, category, amount, currency, merchant in operation_rows:
             currency_code = str(currency)

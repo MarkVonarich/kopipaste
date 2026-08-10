@@ -57,6 +57,7 @@ function categoryBars(items: ChartCategoryItem[]): string {
 function merchantBars(items: MerchantStructureItem[]): string {
   if (!items.length) return EmptyPanel('Нет мерчантов', 'В выбранном периоде нет описаний операций для группировки.');
   return items.map((item) => {
+    const drillValue = item.key || item.merchant;
     const content = `
       <div class="bar-label"><span>${esc(item.merchant)}</span><strong>${formatMoneyString(item.total, item.currency)}</strong></div>
       <div class="bar-track"><span style="width:${Math.max(4, Math.min(100, item.share))}%"></span></div>
@@ -65,7 +66,7 @@ function merchantBars(items: MerchantStructureItem[]): string {
     if (item.drillable === false || item.synthetic || item.fallback) {
       return `<div class="bar-row">${content}</div>`;
     }
-    return `<button class="bar-row action-row" data-action="analytics-drill" data-kind="merchant" data-value="${esc(item.merchant)}" data-currency="${esc(item.currency)}">${content}</button>`;
+    return `<button class="bar-row action-row" data-action="analytics-drill" data-kind="merchant" data-value="${esc(drillValue)}" data-currency="${esc(item.currency)}">${content}</button>`;
   }).join('');
 }
 
@@ -95,7 +96,7 @@ function searchResults(analytics: AnalyticsResponse | null): string {
     <div class="search-results">
       ${search.items.map((item) => item.kind === 'operation'
         ? `<button class="detail-row light" data-action="operation-detail" data-id="${item.operation_id}"><span>${esc(item.title)}<br><small>${esc(item.subtitle)}</small></span><strong>${formatMoneyString(item.amount, item.currency)}</strong></button>`
-        : `<button class="detail-row light" data-action="analytics-drill" data-kind="${item.kind}" data-value="${esc(item.title)}" data-currency="${esc(item.currency)}"><span>${esc(item.title)}<br><small>${esc(item.subtitle)}</small></span><strong>${formatMoneyString(item.amount, item.currency)}</strong></button>`
+        : `<button class="detail-row light" data-action="analytics-drill" data-kind="${item.kind}" data-value="${esc(item.params?.detail_value || item.title)}" data-currency="${esc(item.currency)}"><span>${esc(item.title)}<br><small>${esc(item.subtitle)}</small></span><strong>${formatMoneyString(item.amount, item.currency)}</strong></button>`
       ).join('')}
     </div>
   `;
@@ -106,6 +107,24 @@ function detailPanel(analytics: AnalyticsResponse | null): string {
   if (!detail) return '';
   const amount = detail.total || detail.visible_total;
   const merchants = detail.kind === 'category' ? merchantBars(detail.merchant_breakdown?.items || []) : '';
+  const frequency = detail.kind === 'merchant' && detail.frequency_delta !== undefined
+    ? `<div class="metric-line"><span>Частота</span><strong>${detail.previous_operation_count || 0} → ${detail.operation_count}${detail.frequency_pct ? ` · ${Number(detail.frequency_pct) > 0 ? '+' : ''}${String(detail.frequency_pct).replace('.', ',')}%` : ''}</strong></div>`
+    : '';
+  const avgDelta = detail.kind === 'merchant' && detail.average_check_delta !== undefined
+    ? `<div class="metric-line"><span>Средний чек к прошлому</span><strong>${Number(detail.average_check_delta) > 0 ? '+' : ''}${formatMoneyString(detail.average_check_delta, detail.currency)}${detail.average_check_pct ? ` · ${Number(detail.average_check_pct) > 0 ? '+' : ''}${String(detail.average_check_pct).replace('.', ',')}%` : ''}</strong></div>`
+    : '';
+  const categoryShare = detail.kind === 'merchant' && detail.primary_category
+    ? `<div class="metric-line"><span>Категория</span><strong>${esc(detail.primary_category.category)}${detail.merchant_share_of_category ? ` · ${String(detail.merchant_share_of_category).replace('.', ',')}%` : ''}</strong></div>`
+    : '';
+  const totalShare = detail.kind === 'merchant' && detail.merchant_share_of_total
+    ? `<div class="metric-line"><span>Доля в срезе</span><strong>${String(detail.merchant_share_of_total).replace('.', ',')}%</strong></div>`
+    : '';
+  const baseline = detail.kind === 'merchant' && detail.baseline?.sufficient_data
+    ? `<div class="metric-line"><span>Обычно</span><strong>${formatMoneyString(detail.baseline.amount, detail.currency)} · ${detail.baseline.periods_used} периода</strong></div>`
+    : '';
+  const aliases = detail.kind === 'merchant' && detail.raw_aliases?.length
+    ? `<details class="chart-details"><summary aria-expanded="false">Учтённые записи</summary>${detail.raw_aliases.map((alias) => `<span class="pill">${esc(alias)}</span>`).join('')}</details>`
+    : '';
   const comparison = detail.delta !== undefined
     ? `<div class="metric-line"><span>К прошлому периоду</span><strong>${esc(deltaText({ delta: detail.delta, pct: detail.pct ?? null, state: detail.state || 'ok' }, detail.currency))}</strong></div>`
     : '';
@@ -116,8 +135,14 @@ function detailPanel(analytics: AnalyticsResponse | null): string {
         <div class="metric-line"><span>Итого</span><strong>${formatMoneyString(amount || '0.00', detail.currency)}</strong></div>
         ${comparison}
         ${detail.average_check ? `<div class="metric-line"><span>Средний чек</span><strong>${formatMoneyString(detail.average_check, detail.currency)}</strong></div>` : ''}
+        ${frequency}
+        ${avgDelta}
+        ${categoryShare}
+        ${totalShare}
+        ${baseline}
       </div>
       ${detail.kind === 'category' ? `<div class="detail-stack">${merchants}</div>` : ''}
+      ${aliases}
       ${TransactionList((detail.operations || []) as Operation[], 'Операций в этом срезе нет.')}
       <button class="button secondary" data-action="analytics-open-operations" type="button">Все операции с этим фильтром</button>
     </section>

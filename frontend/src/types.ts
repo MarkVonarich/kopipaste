@@ -70,6 +70,8 @@ export type MerchantStructureItem = {
   synthetic?: boolean;
   drillable?: boolean;
   fallback?: boolean;
+  source?: string;
+  raw_aliases?: string[];
 };
 
 export type CategoryCurrencyGroup = {
@@ -358,7 +360,7 @@ export type AppState = {
   error?: string;
   detailOperationId?: number;
   search: string;
-  operationScope?: { currency?: string; merchant?: string; category_key?: string };
+  operationScope?: { currency?: string; merchant?: string; merchant_key?: string; category_key?: string };
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;
