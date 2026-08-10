@@ -428,6 +428,25 @@ def test_foreign_workspace_is_denied(monkeypatch):
     assert exc.value.code == "workspace_access_denied"
 
 
+def test_miniapp_group_workspace_context_cannot_be_forged_from_client(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [
+        {"workspace_id": 10, "name": "Личное", "kind": "personal", "role": "owner", "active": True, "read_only": False}
+    ])
+
+    forged_group_workspace_id = -1001234567890
+
+    with pytest.raises(MiniAppError) as exc:
+        api._read_scope(api.request(42), forged_group_workspace_id)
+
+    assert exc.value.code == "workspace_access_denied"
+
+    with pytest.raises(MiniAppError) as exc:
+        api._write_scope(api.request(42), forged_group_workspace_id)
+
+    assert exc.value.code == "workspace_access_denied"
+
+
 def test_update_operation_uses_shared_service(monkeypatch):
     api = _api(monkeypatch)
     calls = []
