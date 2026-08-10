@@ -91,6 +91,7 @@ from utils.text import norm_text
 from services.limit_alerts import alert_status_for_band, threshold_band
 from services.merchant_intelligence import (
     EMPTY_MERCHANT_KEY,
+    comparable_baseline_periods,
     fold_merchant_rows,
     merchant_baseline,
     merchant_features,
@@ -2130,7 +2131,7 @@ class MiniAppAPI:
         primary = category_items[0] if category_items else None
         return {"scope_total": scope_total, "categories": category_items, "primary_category": primary}
 
-    def _merchant_raw_aliases(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> list[str]:
+    def _merchant_identity_snapshot(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
         normalized_merchant = normalize_merchant_key(merchant_key)
         rows = pg_fetchall(
             f"""
@@ -2147,17 +2148,13 @@ class MiniAppAPI:
         )
         grouped = fold_merchant_rows((str(row[0] or ""), currency, to_decimal_money(row[1]), int(row[2] or 0)) for row in rows)
         bucket = grouped.get(currency, {}).get(normalized_merchant)
-        return raw_aliases_for_bucket(bucket or {})
+        if not bucket:
+            return {"merchant_key": normalized_merchant, "display_name": normalized_merchant, "raw_aliases": []}
+        return {"merchant_key": normalized_merchant, "display_name": bucket["name"], "raw_aliases": raw_aliases_for_bucket(bucket)}
 
     def _merchant_baseline(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
         normalized_merchant = normalize_merchant_key(merchant_key)
-        period_length = (tx.end - tx.start).days + 1
-        periods: list[tuple[date, date]] = []
-        period_end = tx.start - timedelta(days=1)
-        for _idx in range(3):
-            period_start = period_end - timedelta(days=period_length - 1)
-            periods.append((period_start, period_end))
-            period_end = period_start - timedelta(days=1)
+        periods = comparable_baseline_periods(tx.start, tx.end, tx.period_key)
         if not periods:
             return merchant_baseline([])
         earliest = periods[-1][0]
@@ -2184,7 +2181,12 @@ class MiniAppAPI:
             """,
             (*date_values, *self._replace_tx_period(tx, earliest, latest), op_type, get_user_currency(req.user_id), currency, normalized_merchant),
         )
-        return merchant_baseline((to_decimal_money(row[1]), int(row[2] or 0)) for row in rows)
+        by_bucket = {int(row[0]): (to_decimal_money(row[1]), int(row[2] or 0)) for row in rows}
+        period_rows = []
+        for idx, (period_start, period_end) in enumerate(periods):
+            total, count = by_bucket.get(idx, (Decimal("0.00"), 0))
+            period_rows.append((period_start, period_end, total, count))
+        return merchant_baseline(period_rows)
 
     def _replace_tx_period(self, tx: TransactionFilters, start: date, end: date) -> tuple[Any, ...]:
         values = list(tx.params)
@@ -2238,8 +2240,7 @@ class MiniAppAPI:
         previous_summary = self._detail_summary(req, prev_tx, op_type, currency, merchant_key=merchant_key)
         comparison = self._metric_comparison(current_summary["total"], previous_summary["total"])
         context = self._merchant_context(req, tx, op_type, currency, merchant_key)
-        raw_aliases = self._merchant_raw_aliases(req, tx, op_type, currency, merchant_key)
-        display_title = raw_aliases[0] if raw_aliases else value
+        identity = self._merchant_identity_snapshot(req, tx, op_type, currency, merchant_key)
         primary_category = context["primary_category"]
         feature_set = merchant_features(
             current_total=current_summary["total"],
@@ -2252,7 +2253,7 @@ class MiniAppAPI:
         baseline = self._merchant_baseline(req, tx, op_type, currency, merchant_key)
         return {
             "kind": "merchant",
-            "title": display_title,
+            "title": identity["display_name"],
             "currency": currency,
             "operation_type": "income" if op_type == "Доходы" else "expense",
             "merchant_key": merchant_key,
@@ -2273,7 +2274,7 @@ class MiniAppAPI:
             "merchant_share_of_category": feature_set["merchant_share_of_category"],
             "primary_category": primary_category,
             "baseline": baseline,
-            "raw_aliases": raw_aliases,
+            "raw_aliases": identity["raw_aliases"],
             "operations": operation_items,
             "operation_scope": self._analytics_operations_scope(tx, op_type, currency, merchant_key=merchant_key),
         }
@@ -2311,16 +2312,18 @@ class MiniAppAPI:
         )
         merchant_rows = pg_fetchall(
             f"""
-            SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s),
+            SELECT {merchant_key_sql('comment')} AS merchant_key,
+                   NULLIF(TRIM(COALESCE(comment,'')), ''),
+                   COALESCE(currency, %s),
                    COALESCE(SUM(amount),0), COUNT(*)
               FROM public.operations
              WHERE {tx.where_sql}
                AND type=%s
                {currency_filter}
                AND ({merchant_key_sql('comment')} LIKE %s OR comment ILIKE %s)
-             GROUP BY NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s)
-             ORDER BY COUNT(*) DESC, COALESCE(SUM(amount),0) DESC
-             LIMIT 40
+               AND {merchant_key_sql('comment')} <> ''
+             GROUP BY {merchant_key_sql('comment')}, NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency, %s)
+             ORDER BY {merchant_key_sql('comment')}, COUNT(*) DESC, COALESCE(SUM(amount),0) DESC
             """,
             (get_user_currency(req.user_id), *tx.params, op_type, *currency_values, merchant_normalized_q, q, get_user_currency(req.user_id)),
         )
@@ -2351,7 +2354,7 @@ class MiniAppAPI:
                 "amount": to_decimal_money(total),
                 "params": {"detail_kind": "category", "detail_value": str(category_key or category_name), "detail_currency": currency_code},
             })
-        grouped_merchants = fold_merchant_rows((str(merchant or ""), str(currency), to_decimal_money(total), int(count or 0)) for merchant, currency, total, count in merchant_rows)
+        grouped_merchants = fold_merchant_rows((str(merchant or ""), str(currency), to_decimal_money(total), int(count or 0)) for _key, merchant, currency, total, count in merchant_rows)
         merchant_items = []
         for currency_code, grouped in grouped_merchants.items():
             if allowed and currency_code not in allowed:

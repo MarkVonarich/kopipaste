@@ -610,7 +610,7 @@ def test_drilldown_summary_uses_full_rows_preview_stays_limited(monkeypatch):
 
     monkeypatch.setattr(api, "_detail_summary", _summary)
     monkeypatch.setattr(api, "_merchant_context", lambda *_args, **_kwargs: {"scope_total": Decimal("12500.00"), "primary_category": None, "categories": []})
-    monkeypatch.setattr(api, "_merchant_raw_aliases", lambda *_args, **_kwargs: ["Lavka"])
+    monkeypatch.setattr(api, "_merchant_identity_snapshot", lambda *_args, **_kwargs: {"display_name": "Lavka", "raw_aliases": ["Lavka"]})
     monkeypatch.setattr(api, "_merchant_baseline", lambda *_args, **_kwargs: {"method": "trailing_median", "periods_used": 0, "amount": Decimal("0.00"), "count": 0, "average_check": Decimal("0.00"), "sufficient_data": False})
 
     merchant = api._analytics_detail(api.request(42), tx, prev_tx, {"detail_kind": "merchant", "detail_value": "Lavka", "detail_currency": "RUB"}, "Расходы")
@@ -680,7 +680,7 @@ def test_merchant_structure_folds_safe_aliases_with_stable_key(monkeypatch):
     assert rub_items["яндекс лавка"]["total"] == Decimal("800.00")
     assert rub_items["яндекс лавка"]["previous_total"] == Decimal("200.00")
     assert rub_items["яндекс лавка"]["count"] == 3
-    assert set(rub_items["яндекс лавка"]["raw_aliases"]) == {"Яндекс Лавка", "ЯНДЕКС ЛАВКА"}
+    assert set(rub_items["яндекс лавка"]["raw_aliases"]) == {"Яндекс Лавка", "ЯНДЕКС*ЛАВКА"}
     assert "coffee point" in rub_items
     assert structure["currency_groups"]["EUR"]["items"][0]["key"] == "яндекс лавка"
 
@@ -707,7 +707,7 @@ def test_merchant_detail_uses_key_preserves_raw_comments_and_features(monkeypatc
     monkeypatch.setattr(api, "_detail_operation_rows", _operation_rows)
     monkeypatch.setattr(api, "_detail_summary", _summary)
     monkeypatch.setattr(api, "_merchant_context", lambda *_args, **_kwargs: {"scope_total": Decimal("1000.00"), "primary_category": {"category_key": "produkty", "category": "Продукты", "category_total": Decimal("1000.00"), "merchant_total": Decimal("800.00"), "merchant_count": 2, "merchant_share_of_category": Decimal("80.00")}, "categories": []})
-    monkeypatch.setattr(api, "_merchant_raw_aliases", lambda *_args, **_kwargs: ["Яндекс Лавка", "Яндекс Лавка"])
+    monkeypatch.setattr(api, "_merchant_identity_snapshot", lambda *_args, **_kwargs: {"display_name": "Яндекс Лавка", "raw_aliases": ["Яндекс Лавка", "ЯНДЕКС*ЛАВКА"]})
     monkeypatch.setattr(api, "_merchant_baseline", lambda *_args, **_kwargs: {"method": "trailing_median", "periods_used": 3, "amount": Decimal("700.00"), "count": Decimal("2.00"), "average_check": Decimal("350.00"), "sufficient_data": True})
 
     detail = api._analytics_detail(api.request(42), tx, prev_tx, {"detail_kind": "merchant", "detail_value": "яндекс лавка", "detail_currency": "RUB"}, "Расходы")
@@ -715,6 +715,8 @@ def test_merchant_detail_uses_key_preserves_raw_comments_and_features(monkeypatc
     assert operations_seen["merchant_key"] == "яндекс лавка"
     assert [row["description"] for row in detail["operations"]] == ["Яндекс Лавка", "ЯНДЕКС*ЛАВКА"]
     assert detail["merchant_key"] == "яндекс лавка"
+    assert detail["title"] == "Яндекс Лавка"
+    assert detail["raw_aliases"] == ["Яндекс Лавка", "ЯНДЕКС*ЛАВКА"]
     assert detail["total"] == Decimal("800.00")
     assert detail["frequency_delta"] == 1
     assert detail["average_check_delta"] == Decimal("100.00")
@@ -751,11 +753,12 @@ def test_analytics_search_returns_canonical_merchant_result_and_key(monkeypatch)
     tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "expense", None, "workspace_id=ANY(%s)", ([10],))
 
     def _fetch(sql, params=()):
-        if "GROUP BY NULLIF(TRIM" in sql and "COALESCE(currency" in sql:
+        if "AS merchant_key" in sql and "COALESCE(currency" in sql:
             assert "%лавка%" in params
+            assert "LIMIT 40" not in sql
             return [
-                ("Яндекс Лавка", "RUB", Decimal("300.00"), 1),
-                ("ЯНДЕКС*ЛАВКА", "RUB", Decimal("500.00"), 1),
+                ("яндекс лавка", "Яндекс Лавка", "RUB", Decimal("300.00"), 1),
+                ("яндекс лавка", "ЯНДЕКС*ЛАВКА", "RUB", Decimal("500.00"), 1),
             ]
         return []
 
@@ -769,6 +772,81 @@ def test_analytics_search_returns_canonical_merchant_result_and_key(monkeypatch)
     assert item["amount"] == Decimal("800.00")
     assert item["subtitle"] == "2 операций"
     assert item["params"]["detail_value"] == "яндекс лавка"
+
+
+def test_analytics_search_does_not_undercount_more_than_raw_prefold_limit(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "expense", None, "workspace_id=ANY(%s)", ([10],))
+
+    def _fetch(sql, params=()):
+        if "AS merchant_key" in sql and "COALESCE(currency" in sql:
+            assert "LIMIT 40" not in sql
+            return [
+                ("яндекс лавка", f"Яндекс{'*' * idx}Лавка", "RUB", Decimal("10.00"), 1)
+                for idx in range(1, 46)
+            ]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    search = api._analytics_search(api.request(42), tx, {"analytics_search": "лавка", "currency": "RUB"}, "Расходы", currencies=["RUB"])
+
+    merchant = search["items"][0]
+    assert merchant["kind"] == "merchant"
+    assert merchant["params"]["detail_value"] == "яндекс лавка"
+    assert merchant["amount"] == Decimal("450.00")
+    assert merchant["subtitle"] == "45 операций"
+
+
+def test_merchant_reconciliation_structure_search_detail_and_open_operations(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "expense", None, "workspace_id=ANY(%s)", ([10],))
+    prev_tx = TransactionFilters([10], False, date(2026, 7, 1), date(2026, 7, 5), "previous_month_to_date", "expense", None, "workspace_id=ANY(%s)", ([10],))
+    source_rows = [
+        ("Яндекс Лавка", Decimal("300.00"), 1),
+        ("ЯНДЕКС*ЛАВКА", Decimal("500.00"), 1),
+        ("Яндекс-Лавка", Decimal("200.00"), 1),
+    ]
+
+    monkeypatch.setattr(api, "_dimension_rows", lambda _req, current_tx, _op_type, *, dimension, currencies=None: [(raw, "RUB", amount, count) for raw, amount, count in source_rows] if dimension == "merchant" and current_tx.start == date(2026, 8, 1) else [])
+    monkeypatch.setattr(api, "_detail_operation_rows", lambda *_args, **kwargs: [
+        {"id": 1, "description": "Яндекс Лавка"},
+        {"id": 2, "description": "ЯНДЕКС*ЛАВКА"},
+        {"id": 3, "description": "Яндекс-Лавка"},
+    ] if kwargs.get("merchant_key") == "яндекс лавка" else [])
+    monkeypatch.setattr(api, "_detail_summary", lambda _req, current_tx, _op_type, _currency, **kwargs: {"total": Decimal("1000.00"), "operation_count": 3, "average_check": Decimal("333.33")} if kwargs.get("merchant_key") == "яндекс лавка" and current_tx.start == date(2026, 8, 1) else {"total": Decimal("0.00"), "operation_count": 0, "average_check": Decimal("0.00")})
+    monkeypatch.setattr(api, "_merchant_context", lambda *_args, **_kwargs: {"scope_total": Decimal("1000.00"), "primary_category": {"category_key": "produkty", "category": "Продукты", "category_total": Decimal("1000.00"), "merchant_total": Decimal("1000.00"), "merchant_count": 3}, "categories": []})
+    monkeypatch.setattr(api, "_merchant_identity_snapshot", lambda *_args, **_kwargs: {"display_name": "Яндекс Лавка", "raw_aliases": ["Яндекс Лавка", "ЯНДЕКС*ЛАВКА", "Яндекс-Лавка"]})
+    monkeypatch.setattr(api, "_merchant_baseline", lambda *_args, **_kwargs: {"method": "trailing_median", "periods_used": 0, "amount": Decimal("0.00"), "count": 0, "average_check": Decimal("0.00"), "sufficient_data": False})
+
+    def _fetch(sql, params=()):
+        if "AS merchant_key" in sql and "COALESCE(currency" in sql:
+            return [("яндекс лавка", raw, "RUB", amount, count) for raw, amount, count in source_rows]
+        if "SELECT o.id, o.op_date" in sql:
+            assert "яндекс лавка" in params
+            return [
+                (1, date(2026, 8, 1), "Расходы", "Продукты", Decimal("300.00"), "RUB", "Яндекс Лавка", 10, 42, datetime(2026, 8, 1, 12), "Family"),
+                (2, date(2026, 8, 2), "Расходы", "Продукты", Decimal("500.00"), "RUB", "ЯНДЕКС*ЛАВКА", 10, 42, datetime(2026, 8, 2, 12), "Family"),
+                (3, date(2026, 8, 3), "Расходы", "Продукты", Decimal("200.00"), "RUB", "Яндекс-Лавка", 10, 42, datetime(2026, 8, 3, 12), "Family"),
+            ]
+        return []
+
+    monkeypatch.setattr("miniapp.api.pg_fetchall", _fetch)
+
+    structure = api._dimension_structure(api.request(42), tx, prev_tx, "Расходы", dimension="merchant", currencies=["RUB"])
+    search = api._analytics_search(api.request(42), tx, {"analytics_search": "лавка", "currency": "RUB"}, "Расходы", currencies=["RUB"])
+    detail = api._analytics_detail(api.request(42), tx, prev_tx, {"detail_kind": "merchant", "detail_value": "яндекс лавка", "detail_currency": "RUB"}, "Расходы")
+    operations = api.operations(api.request(42), {"workspace_id": 10, "period": "custom", "start_date": "2026-08-01", "end_date": "2026-08-05", "operation_type": "expense", "currency": "RUB", "merchant_key": "яндекс лавка"})["data"]["items"]
+
+    merchant_row = structure["currency_groups"]["RUB"]["items"][0]
+    assert merchant_row["key"] == "яндекс лавка"
+    assert merchant_row["total"] == Decimal("1000.00")
+    assert merchant_row["count"] == 3
+    assert search["items"][0]["amount"] == Decimal("1000.00")
+    assert search["items"][0]["subtitle"] == "3 операций"
+    assert detail["total"] == Decimal("1000.00")
+    assert detail["operation_count"] == 3
+    assert [item["description"] for item in operations] == ["Яндекс Лавка", "ЯНДЕКС*ЛАВКА", "Яндекс-Лавка"]
 
 
 def test_operations_merchant_key_filter_keeps_workspace_authorization(monkeypatch):
@@ -809,8 +887,8 @@ def test_analytics_search_and_detail_scope_use_current_filters(monkeypatch):
             assert "workspace_id=ANY" in sql
             assert "type=%s" in sql
             return []
-        if "SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(currency" in sql:
-            return [("Lavka", "RUB", Decimal("500.00"), 2)]
+        if "AS merchant_key" in sql and "COALESCE(currency" in sql:
+            return [("lavka", "Lavka", "RUB", Decimal("500.00"), 2)]
         if "GROUP BY NULLIF(TRIM" in sql:
             return [("Lavka", Decimal("500.00"), 2)]
         if "SELECT id, op_date, category" in sql:
@@ -843,8 +921,8 @@ def test_analytics_search_aggregates_categories_and_returns_real_operations(monk
         if "GROUP BY REPLACE(LOWER" in sql:
             assert "%food%" in params
             return [("food", " Food ", "RUB", Decimal("800.00"), 2)]
-        if "GROUP BY NULLIF(TRIM" in sql:
-            return [("Lavka", "RUB", Decimal("800.00"), 2)]
+        if "AS merchant_key" in sql and "COALESCE(currency" in sql:
+            return [("lavka", "Lavka", "RUB", Decimal("800.00"), 2)]
         if "SELECT id, op_date, category" in sql:
             return [
                 (12, date(2026, 8, 3), "Food", Decimal("500.00"), "RUB", "Lavka"),

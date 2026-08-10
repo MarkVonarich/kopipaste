@@ -122,7 +122,7 @@ export type AnalyticsResponse = {
     merchant_share_of_category?: string | null;
     merchant_share_of_total?: string | null;
     primary_category?: { category_key: string; category: string; category_total: string; merchant_total: string; merchant_count: number; merchant_share_of_category?: string | null } | null;
-    baseline?: { method: string; periods_used: number; amount: string; count: string | number; average_check: string; sufficient_data: boolean };
+    baseline?: { method: string; periods_used: number; amount: string; count: string | number; average_check: string; sufficient_data: boolean; periods?: Array<{ start_date: string; end_date: string; total: string; count: number }> };
     raw_aliases?: string[];
     merchant_breakdown?: MerchantCurrencyGroup;
     operations: Operation[];

@@ -184,13 +184,14 @@ Implemented architecture:
 
 Normalization rules:
 
-- Unicode text is normalized with NFKC.
+- Merchant Key V1 is intentionally limited to transformations that Python and PostgreSQL reproduce with the same explicit contract.
 - Leading/trailing whitespace is trimmed.
 - Internal whitespace is collapsed to one space.
-- Case is folded.
+- ASCII uppercase and Russian uppercase letters are translated through an explicit character map to lowercase.
 - `ё` is normalized to `е`.
-- Punctuation and symbol separators are treated as spaces, so safe formatting variants such as `Яндекс Лавка`, `Яндекс-Лавка`, and `Яндекс*Лавка` share one key.
-- No transliteration, fuzzy matching, Levenshtein thresholds, embeddings, LLM guessing, global merchant dictionaries, or shared-word merging is used. `lavka` and `Яндекс Лавка` remain different keys unless a future explicit alias system maps them.
+- Any character outside `0-9`, `a-z`, and `а-я` is treated as a separator. This makes safe formatting variants such as `Яндекс Лавка`, `Яндекс-Лавка`, and `Яндекс*Лавка` share one key.
+- NFKC, Unicode casefolding, transliteration, and accent folding are not part of Merchant Key V1. Unsupported forms such as full-width Latin letters remain separate exact keys when no supported key characters exist; precomposed accented Latin letters may normalize partially until a future explicit alias feature exists.
+- No fuzzy matching, Levenshtein thresholds, embeddings, LLM guessing, global merchant dictionaries, or shared-word merging is used. `lavka` and `Яндекс Лавка` remain different keys unless a future explicit alias system maps them.
 
 Alias scope decision:
 
@@ -202,7 +203,8 @@ Canonical display behavior:
 
 - Display labels are chosen deterministically from the raw variants inside the authorized current scope.
 - The selector prefers cleaner raw forms over all-uppercase or punctuation-heavy forms, then uses usage/amount/name ordering for deterministic ties.
-- Raw aliases can be exposed compactly in merchant detail so users can understand why variants were grouped.
+- Merchant Structure, merchant search, and merchant detail use the same display-name selection semantics.
+- Raw aliases are a separate explainability field and preserve the actual trimmed source forms, such as `Яндекс Лавка`, `ЯНДЕКС*ЛАВКА`, and `Яндекс-Лавка`. They are deduplicated exactly and bounded for display.
 
 Empty merchant semantics:
 
@@ -230,6 +232,10 @@ Merchant features:
 Baseline method:
 
 - V1 baseline uses trailing completed comparable periods with a median statistic.
+- Current month/month-to-date compares the same month position in prior months, for example Aug 1-10 to Jul 1-10, Jun 1-10, and May 1-10.
+- Full month and `previous_month` scopes compare full prior months.
+- Current week/week-to-date compares the same weekday progress in previous weeks.
+- Custom periods use immediately preceding non-overlapping equal-length windows.
 - Minimum threshold is 3 prior non-empty comparable periods and at least 3 merchant observations.
 - Insufficient history returns `sufficient_data=false` and must not be presented as "usually" behavior.
 
@@ -249,7 +255,7 @@ Performance decisions:
 - Merchant Structure folds grouped raw-comment SQL rows in Python; it does not query per merchant.
 - Merchant detail uses scoped grouped SQL for full-denominator category and total shares.
 - Operations drilldown filters by a SQL expression over `operations.comment`, while authorization still comes from authenticated Mini App user plus existing workspace filters.
-- Search groups canonical merchant results from a bounded raw-row query; operation search remains individual rows.
+- Search groups canonical merchant results before applying the final merchant result limit, so search aggregate totals reconcile with merchant detail. Operation search remains individual rows.
 
 Reusable for PR 4:
 
