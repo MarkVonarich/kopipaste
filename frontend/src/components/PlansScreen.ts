@@ -6,6 +6,7 @@ type PlansData = {
   all_scope_note?: string | null;
   read_only?: boolean;
   goals: Goal[];
+  archived_goals?: Goal[];
   limits: BudgetLimit[];
   general_limits?: GeneralSpendingLimit[];
   category_budgets?: CategoryBudgetGroup[];
@@ -30,28 +31,25 @@ function statusLabel(status: string): string {
   }[status] || status;
 }
 
-function goalCard(goal: Goal): string {
+function goalCard(goal: Goal, archived: boolean, canWrite: boolean): string {
   return `
     <article class="plan-card goal-card" data-goal-id="${goal.id}">
+      <button class="entity-open" data-action="goal-open" data-id="${goal.id}">
       <div class="entity-head">
         <div>
           <h3>${esc(goal.title)}</h3>
           <p>${goal.deadline ? `Срок: ${esc(goal.deadline)}` : 'Без срока'}</p>
         </div>
-        <span class="pill">${esc(statusLabel(goal.status))}</span>
+        <span class="entity-affordance"><span class="pill">${esc(statusLabel(goal.status))}</span>${icon('chevron')}</span>
       </div>
+      </button>
       ${ProgressBar(goal.percent, 'Прогресс цели')}
       <div class="detail-row light"><span>Накоплено</span><strong>${formatMoneyString(goal.current, goal.currency)} / ${formatMoneyString(goal.target, goal.currency)}</strong></div>
       <div class="detail-row light"><span>Следующий шаг</span><strong>${esc(goal.next_action)}</strong></div>
-      <div class="detail-row light"><span>План</span><strong>${esc(goal.frequency)}</strong></div>
-      <div class="actions">
-        <button class="button primary" data-action="goal-contribution" data-id="${goal.id}">Пополнить</button>
+      ${canWrite && !archived ? `<div class="actions">
         <button class="button secondary" data-action="goal-edit" data-id="${goal.id}">Изменить</button>
-      </div>
-      <div class="actions">
-        <button class="button text" data-action="goal-status" data-id="${goal.id}" data-status="${goal.status === 'paused' ? 'active' : 'paused'}">${goal.status === 'paused' ? 'Возобновить' : 'Пауза'}</button>
         <button class="button danger" data-action="goal-status" data-id="${goal.id}" data-status="archived">Архив</button>
-      </div>
+      </div>` : ''}
     </article>
   `;
 }
@@ -140,33 +138,16 @@ function reminderCard(reminder: Reminder): string {
   `;
 }
 
-function categoryCard(category: CategoryOption, canWrite: boolean): string {
-  const refs = category.references;
-  const auto = (refs?.aliases || 0) + (refs?.ml_observations || 0);
+function categoryRow(category: CategoryOption): string {
   return `
-    <article class="plan-card category-card" data-category-token="${esc(category.token || category.normalized_name)}">
-      <div class="entity-head">
-        <div>
-          <h3>${esc(category.name)}</h3>
-          <p>${category.operation_count} операций</p>
-        </div>
-        <span class="pill">${category.protected ? 'системная' : esc(category.source)}</span>
-      </div>
-      <div class="detail-grid compact">
-        <div class="detail-row light"><span>Лимиты</span><strong>${refs?.category_limits || 0}</strong></div>
-        <div class="detail-row light"><span>Бюджеты</span><strong>${refs?.category_budget_groups || 0}</strong></div>
-        <div class="detail-row light"><span>Напоминания</span><strong>${refs?.reminders || 0}</strong></div>
-        <div class="detail-row light"><span>Автокатегоризация</span><strong>${auto}</strong></div>
-      </div>
-      ${canWrite && !category.protected ? `<div class="actions">
-        <button class="button secondary" data-action="category-rename" data-token="${esc(category.token || category.normalized_name)}">Переименовать</button>
-        <button class="button danger" data-action="category-delete" data-token="${esc(category.token || category.normalized_name)}">Удалить</button>
-      </div>` : ''}
-    </article>
+    <button class="settings-row category-row" data-action="category-open" data-token="${esc(category.token || category.normalized_name)}">
+      <span><strong>${esc(category.name)}</strong></span>
+      <em>${category.protected ? '<small>системная</small>' : ''}${icon('chevron')}</em>
+    </button>
   `;
 }
 
-export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 'reminders' | 'categories' = 'goals', canWrite = false): string {
+export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 'reminders' | 'categories' = 'goals', canWrite = false, goalView: 'active' | 'archive' = 'active'): string {
   if (plans?.all_scope_note && mode !== 'reminders' && mode !== 'categories') {
     return `<section class="screen">${EmptyPanel('Выберите пространство', plans.all_scope_note)}</section>`;
   }
@@ -179,27 +160,76 @@ export function PlansScreen(plans: PlansData | null, mode: 'goals' | 'limits' | 
         <button data-action="plans-mode" data-mode="categories" class="${mode === 'categories' ? 'active' : ''}" role="tab" aria-selected="${mode === 'categories'}">Категории</button>
       </div>
       ${mode === 'goals' ? `
-        ${SectionHeader('Цели', 'Крупные намерения и план пополнения', canWrite ? `<button class="icon-button" data-action="goal-create" aria-label="Создать цель">${icon('plus')}</button>` : '')}
-        ${(plans?.goals || []).map(goalCard).join('') || EmptyPanel('Целей пока нет', 'Создайте цель, чтобы видеть прогресс и следующий шаг.')}
+        ${goalView === 'archive'
+          ? `${SectionHeader('Архив целей', 'Завершённые планы можно восстановить или удалить навсегда', '<button class="button text" data-action="goal-archive-back">Назад</button>')}
+             ${(plans?.archived_goals || []).map((goal) => goalCard(goal, true, canWrite)).join('') || EmptyPanel('Архив пуст', 'Архивированные цели появятся здесь.')}`
+          : `${SectionHeader('Цели', 'Копите на крупную покупку или планируйте закрытие кредита или долга. Укажите сумму и срок и следите за прогрессом.', canWrite ? `<button class="icon-button" data-action="goal-create" aria-label="Создать цель">${icon('plus')}</button>` : '')}
+             ${(plans?.goals || []).map((goal) => goalCard(goal, false, canWrite)).join('') || EmptyPanel('Целей пока нет', 'Создайте цель, чтобы видеть прогресс и следующий шаг.')}
+             <button class="settings-row archive-entry" data-action="goal-archive-open"><span><strong>Архив целей</strong><small>${plans?.archived_goals?.length || 0} целей</small></span><em>${icon('chevron')}</em></button>`}
       ` : mode === 'limits' ? `
-        ${SectionHeader('Общие лимиты', 'Один предел для расходов периода', canWrite ? `<button class="icon-button" data-action="limit-create" data-scope="all_expenses" aria-label="Создать общий лимит">${icon('plus')}</button>` : '')}
+        ${SectionHeader('Лимиты', 'Задайте границу расходов для категории или всех трат и следите, насколько быстро она расходуется.')}
+        ${SectionHeader('Общие лимиты', 'Один предел для всех расходов периода', canWrite ? `<button class="icon-button" data-action="limit-create" data-scope="all_expenses" aria-label="Создать общий лимит">${icon('plus')}</button>` : '')}
         ${(plans?.general_limits || []).map(limitCard).join('') || EmptyPanel('Общих лимитов пока нет', 'Добавьте общий лимит на неделю или месяц.')}
-        ${SectionHeader('Бюджеты категорий', 'Несколько категорий под одним бюджетом', canWrite ? `<button class="icon-button" data-action="category-budget-create" aria-label="Создать бюджет категорий">${icon('plus')}</button>` : '')}
+        ${SectionHeader('Общие бюджеты', 'Объединяйте несколько категорий в один бюджет и контролируйте их общую сумму.', canWrite ? `<button class="icon-button" data-action="category-budget-create" aria-label="Создать бюджет категорий">${icon('plus')}</button>` : '')}
         ${(plans?.category_budgets || []).map(categoryBudgetCard).join('') || EmptyPanel('Бюджетов категорий пока нет', 'Соберите несколько категорий в один бюджет.')}
         ${SectionHeader('Лимиты категорий', 'Ограничение одной категории', canWrite ? `<button class="icon-button" data-action="limit-create" data-scope="category" aria-label="Создать лимит категории">${icon('plus')}</button>` : '')}
         ${(plans?.limits || []).map(limitCard).join('') || EmptyPanel('Лимитов категорий пока нет', 'Добавьте лимит на отдельную категорию.')}
       ` : mode === 'reminders' ? `
-        ${SectionHeader('Личные напоминания', 'Те же напоминания, что и в Telegram-боте', canWrite ? `<button class="button secondary" data-action="reminder-create">+ Новое напоминание</button>` : '')}
+        ${SectionHeader('Напоминания', 'Запланируйте будущий расход или доход, чтобы не забыть о платеже и быстро записать его в операции.', canWrite ? `<button class="button secondary" data-action="reminder-create">+ Новое напоминание</button>` : '')}
         ${(plans?.reminders || []).map(reminderCard).join('') || EmptyPanel('Напоминаний пока нет', 'Создайте оплату, подписку или будущий доход.')}
       ` : `
         <div class="segmented compact" role="tablist" aria-label="Тип категорий">
           <button data-action="category-type" data-type="expense" class="${(plans?.category_type || 'expense') === 'expense' ? 'active' : ''}">Расходы</button>
           <button data-action="category-type" data-type="income" class="${plans?.category_type === 'income' ? 'active' : ''}">Доходы</button>
         </div>
-        ${SectionHeader('Категории', 'Список, связи и безопасное управление', canWrite && !plans?.categories_read_only ? `<button class="icon-button" data-action="category-create" aria-label="Создать категорию">${icon('plus')}</button>` : '')}
-        ${(plans?.categories || []).map((category) => categoryCard(category, canWrite && !plans?.categories_read_only)).join('') || EmptyPanel('Категорий пока нет', 'Добавьте категорию или запишите операцию.')}
+        ${SectionHeader('Категории', 'Настройте структуру доходов и расходов: создавайте, переименовывайте и управляйте своими категориями.', canWrite && !plans?.categories_read_only ? `<button class="icon-button" data-action="category-create" aria-label="Создать категорию">${icon('plus')}</button>` : '')}
+        <div class="settings-list category-list">${(plans?.categories || []).map(categoryRow).join('')}</div>
+        ${(plans?.categories || []).length ? '' : EmptyPanel('Категорий пока нет', 'Добавьте категорию или запишите операцию.')}
       `}
     </section>
+  `;
+}
+
+export function CategoryDetail(category: CategoryOption, type: 'expense' | 'income', canWrite: boolean): string {
+  const refs = category.references;
+  const auto = (refs?.aliases || 0) + (refs?.ml_observations || 0);
+  return `
+    <div class="detail-grid" data-category-token="${esc(category.token || category.normalized_name)}">
+      <div class="detail-row"><span>Тип</span><strong>${type === 'income' ? 'Доходы' : 'Расходы'}</strong></div>
+      <div class="detail-row"><span>Операции</span><strong>${refs?.operations ?? category.operation_count}</strong></div>
+      <div class="detail-row"><span>Лимиты</span><strong>${refs?.category_limits || 0}</strong></div>
+      <div class="detail-row"><span>Общие бюджеты</span><strong>${refs?.category_budget_groups || 0}</strong></div>
+      <div class="detail-row"><span>Напоминания</span><strong>${refs?.reminders || 0}</strong></div>
+      <div class="detail-row"><span>Автокатегоризация</span><strong>${auto}</strong></div>
+    </div>
+    ${category.protected ? '<p class="caption">Системную категорию нельзя переименовать или удалить.</p>' : ''}
+    ${canWrite && !category.protected ? `<div class="actions">
+      <button class="button secondary" data-action="category-rename" data-token="${esc(category.token || category.normalized_name)}">Переименовать</button>
+      <button class="button danger" data-action="category-delete" data-token="${esc(category.token || category.normalized_name)}">Удалить</button>
+    </div>` : ''}
+  `;
+}
+
+export function GoalDetail(goal: Goal, canWrite: boolean): string {
+  const archived = goal.status === 'archived';
+  return `
+    <div class="detail-grid" data-goal-id="${goal.id}">
+      <div class="detail-row"><span>Статус</span><strong>${esc(statusLabel(goal.status))}</strong></div>
+      <div class="detail-row"><span>Накоплено</span><strong>${formatMoneyString(goal.current, goal.currency)}</strong></div>
+      <div class="detail-row"><span>Цель</span><strong>${formatMoneyString(goal.target, goal.currency)}</strong></div>
+      <div class="detail-row"><span>Осталось</span><strong>${formatMoneyString(goal.remaining, goal.currency)}</strong></div>
+      <div class="detail-row"><span>Срок</span><strong>${esc(goal.deadline || 'Без срока')}</strong></div>
+      <div class="detail-row"><span>Следующий шаг</span><strong>${esc(goal.next_action)}</strong></div>
+    </div>
+    ${canWrite && archived ? `<div class="actions action-stack">
+      <button class="button primary" data-action="goal-status" data-id="${goal.id}" data-status="active">Восстановить</button>
+      <button class="button danger" data-action="goal-delete" data-id="${goal.id}">Удалить навсегда</button>
+    </div>` : ''}
+    ${canWrite && !archived ? `<div class="actions">
+      <button class="button primary" data-action="goal-contribution" data-id="${goal.id}">Пополнить</button>
+      <button class="button secondary" data-action="goal-edit" data-id="${goal.id}">Изменить</button>
+    </div>
+    <button class="button danger" data-action="goal-status" data-id="${goal.id}" data-status="archived">В архив</button>` : ''}
   `;
 }
 
@@ -217,15 +247,26 @@ export function CategoryForm(category: CategoryOption | null, type: 'expense' | 
 export function CategoryDeleteForm(category: CategoryOption, type: 'expense' | 'income', categories: CategoryOption[], saving = false, error = ''): string {
   const refs = category.references;
   const used = (refs?.total || 0) > 0;
+  const replacements = categories.filter((item) => (item.token || item.normalized_name) !== (category.token || category.normalized_name));
+  const referenceText = [
+    refs?.operations ? `${refs.operations} операций` : '',
+    refs?.category_limits ? `${refs.category_limits} лимитов` : '',
+    refs?.category_budget_groups ? `${refs.category_budget_groups} общих бюджетов` : '',
+    refs?.reminders ? `${refs.reminders} напоминаний` : '',
+    refs?.drafts ? `${refs.drafts} черновиков` : '',
+  ].filter(Boolean).join(', ');
   return `
     <form class="form-grid" data-action="delete-category" data-token="${esc(category.token || category.normalized_name)}">
       <input type="hidden" name="type" value="${esc(type)}" />
-      <p class="caption">${used ? 'Категория используется. Выберите, куда перенести связанные записи и настройки.' : 'Категория не используется и может быть удалена.'}</p>
+      <p class="caption">${used ? `Категория используется: ${esc(referenceText || 'есть связанные настройки')}. Выберите замену: операции и настройки будут перенесены, а финансовые данные сохранятся.` : 'Категория не используется и может быть удалена.'}</p>
       ${used ? `<label class="field">Перенести в<select class="select" name="transfer_to" required>
-        ${categories.filter((item) => (item.token || item.normalized_name) !== (category.token || category.normalized_name)).map((item) => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('')}
+        <option value="">Выберите категорию</option>
+        ${replacements.map((item) => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('')}
       </select></label>` : ''}
+      ${used && !replacements.length ? '<p class="error-text">Сначала создайте другую категорию, чтобы безопасно перенести связанные данные.</p>' : ''}
+      <label class="toggle-row"><input type="checkbox" name="confirmed" required /> Подтверждаю удаление категории</label>
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
-      <button class="button danger" type="submit" ${saving ? 'disabled' : ''}>Удалить</button>
+      <button class="button danger" type="submit" ${saving || (used && !replacements.length) ? 'disabled' : ''}>Удалить категорию</button>
     </form>
   `;
 }
@@ -285,7 +326,9 @@ export function GoalForm(goal: Goal | null, saving = false, error = '', preview?
     <form class="form-grid" data-action="${goal ? 'save-goal' : 'create-goal'}" ${goal ? `data-id="${goal.id}"` : ''}>
       <label class="field">Название<input class="input" name="title" maxlength="80" placeholder="Например, отпуск" value="${esc(value('title', goal?.title || ''))}" required /></label>
       <label class="field">Целевая сумма<input class="input amount-input" name="target_amount" inputmode="decimal" placeholder="0,00" value="${esc(value('target_amount', goal?.target || ''))}" required /></label>
-      <label class="field">Уже накоплено<input class="input amount-input" name="current_amount" inputmode="decimal" placeholder="0,00" value="${esc(value('current_amount', goal?.current || ''))}" /></label>
+      ${goal
+        ? `<div class="detail-row"><span>Уже накоплено</span><strong>${formatMoneyString(goal.current, goal.currency)}</strong></div><p class="caption">Прогресс меняется через пополнение цели.</p>`
+        : `<label class="field">Уже накоплено<input class="input amount-input" name="current_amount" inputmode="decimal" placeholder="0,00" value="${esc(value('current_amount', ''))}" /></label>`}
       <label class="field">Срок<input class="input" name="deadline" type="date" value="${esc(value('deadline', goal?.deadline || ''))}" /></label>
       <label class="field">Стратегия<select class="select" name="strategy">
         <option value="deadline" ${value('strategy', goal?.strategy || 'deadline') === 'deadline' ? 'selected' : ''}>К сроку</option>

@@ -1137,6 +1137,55 @@ textarea:disabled {
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
 }
 
+.plans-screen > .segmented {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.plans-screen > .segmented button {
+  padding-inline: var(--space-1);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.entity-open {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.entity-open .entity-head {
+  width: 100%;
+}
+
+.entity-affordance {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.category-list {
+  border-top: 0;
+}
+
+.category-row em small {
+  color: var(--text-tertiary);
+  font-style: normal;
+}
+
+.archive-entry {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--divider);
+}
+
+@media (max-width: 390px) {
+  .plans-screen > .segmented {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .detail-grid {
   display: grid;
   gap: var(--space-2);

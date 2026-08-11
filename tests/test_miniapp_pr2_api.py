@@ -1085,6 +1085,98 @@ def test_goal_edit_requires_exact_preview_hash(monkeypatch):
     assert exc.value.code == "goal_preview_stale"
 
 
+def test_goal_edit_preview_uses_persisted_balance_and_explicit_empty_deadline(monkeypatch):
+    api = _api(monkeypatch)
+    goal = _goal(current_balance=Decimal("250.00"), deadline=date(2026, 12, 31))
+    monkeypatch.setattr("miniapp.api.get_goal", lambda *_args, **_kwargs: goal)
+    body = {
+        "workspace_id": 10,
+        "title": "Updated trip",
+        "target_amount": "1500.00",
+        "current_amount": "999999.00",
+        "deadline": "",
+        "strategy": "contribution",
+        "frequency": "monthly",
+        "comfortable_amount": "200.00",
+        "day": 10,
+        "reminders_enabled": False,
+    }
+
+    first = api.goal_plan_preview(api.request(42), body, goal_id=7)["data"]["plan_preview"]
+    second = api.goal_plan_preview(api.request(42), {**body, "title": "Another title"}, goal_id=7)["data"]["plan_preview"]
+
+    assert first["remaining_amount"] == "1250.00"
+    assert first["preview_payload_hash"] == second["preview_payload_hash"]
+    assert first["projected_completion_date"] is not None
+
+
+def test_goal_edit_clears_comfortable_amount_and_stale_schedule(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_safe_goal_event", lambda *_args, **_kwargs: None)
+    goal = _goal(strategy="contribution", comfortable_amount=Decimal("200.00"), schedule_config={"day": 5})
+    monkeypatch.setattr("miniapp.api.get_goal", lambda *_args, **_kwargs: goal)
+    captured = []
+    monkeypatch.setattr(
+        "miniapp.api.update_goal_plan",
+        lambda **kwargs: captured.append(kwargs) or _goal(strategy="none", frequency="none", comfortable_amount=None, schedule_config={}),
+    )
+    body = {
+        "workspace_id": 10,
+        "strategy": "none",
+        "frequency": "none",
+        "comfortable_amount": "",
+        "reminders_enabled": False,
+    }
+    req = api.request(42)
+    body["preview_payload_hash"] = api.goal_plan_preview(req, body, goal_id=7)["data"]["plan_preview"]["preview_payload_hash"]
+
+    updated = api.update_goal(req, 7, body)["data"]["goal"]
+
+    assert captured[0]["comfortable_amount"] is None
+    assert captured[0]["schedule_config"] == {}
+    assert updated["strategy"] == "none"
+
+
+def test_goal_archive_restore_and_permanent_delete_are_workspace_scoped(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_safe_goal_event", lambda *_args, **_kwargs: None)
+    archived = _goal(status="archived")
+    monkeypatch.setattr("miniapp.api.set_goal_status", lambda goal_id, owner_user_id, workspace_id, status: _goal(id=goal_id, owner_user_id=owner_user_id, workspace_id=workspace_id, status=status))
+
+    restored = api.goal_status(api.request(42), 7, {"workspace_id": 10, "status": "active"})["data"]["goal"]
+    assert restored["status"] == "active"
+
+    monkeypatch.setattr("miniapp.api.get_goal", lambda *_args, **_kwargs: archived)
+    deleted = []
+    monkeypatch.setattr("miniapp.api.delete_goal_permanently", lambda goal_id, owner_user_id, workspace_id: deleted.append((goal_id, owner_user_id, workspace_id)) or 3)
+    response = api.delete_goal(api.request(42), 7, {"workspace_id": 10})["data"]
+    assert response == {"deleted": True, "goal_id": 7, "deleted_movement_count": 3}
+    assert deleted == [(7, 42, 10)]
+
+    monkeypatch.setattr("miniapp.api.get_goal", lambda *_args, **_kwargs: _goal(status="active"))
+    with pytest.raises(MiniAppError) as active:
+        api.delete_goal(api.request(42), 7, {"workspace_id": 10})
+    assert active.value.code == "goal_not_archived"
+
+
+def test_goal_mutations_reject_read_only_workspace_and_foreign_goal(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "_workspace_detail", lambda _req, _workspace_id: WorkspaceContext(10, -100, 42, "group", "viewer", "Family", True))
+    called = []
+    monkeypatch.setattr("miniapp.api.set_goal_status", lambda *_args, **_kwargs: called.append(True))
+
+    with pytest.raises(MiniAppError) as read_only:
+        api.goal_status(api.request(42), 7, {"workspace_id": 10, "status": "archived"})
+    assert read_only.value.code == "workspace_read_only"
+    assert called == []
+
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.get_goal", lambda *_args, **_kwargs: None)
+    with pytest.raises(MiniAppError) as foreign:
+        api.delete_goal(api.request(42), 999, {"workspace_id": 10})
+    assert foreign.value.code == "goal_not_found"
+
+
 def test_idempotent_goal_create_replays_and_conflicts(monkeypatch):
     api = _api(monkeypatch)
     db = _IdemDB()

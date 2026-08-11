@@ -199,7 +199,7 @@ def _category_exists(cur, *, user_id: int, workspace_id: int | None, op_type: st
     columns = _table_columns(cur, "custom_categories")
     if columns:
         scope, scope_params = _scope_clause(workspace_id)
-        user_filter = "AND (user_id=%s OR %s::bigint IS NULL)"
+        user_filter = "AND (user_id=%s OR %s::bigint IS NOT NULL)"
         cur.execute(
             f"""
             SELECT 1
@@ -295,7 +295,7 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
                      WHERE {scope}
                        AND type=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NULL)
+                       AND (user_id=%s OR %s::bigint IS NOT NULL)
                      ORDER BY name
                      LIMIT %s
                     """,
@@ -771,7 +771,7 @@ def transfer_category(
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NULL)
+                       AND (user_id=%s OR %s::bigint IS NOT NULL)
                      RETURNING id
                     """,
                     (*params, op_type, source_key, user_id, workspace_id),
@@ -918,7 +918,7 @@ def rename_category(
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NULL)
+                       AND (user_id=%s OR %s::bigint IS NOT NULL)
                      RETURNING id
                     """,
                     (destination_name, destination_key, *params, op_type, source_key, user_id, workspace_id),
@@ -1047,7 +1047,7 @@ def hard_delete_category_with_operations(
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NULL)
+                       AND (user_id=%s OR %s::bigint IS NOT NULL)
                      RETURNING id
                     """,
                     (*params, op_type, key, user_id, workspace_id),
@@ -1093,7 +1093,7 @@ def archive_empty_category(*, user_id: int, workspace_id: int | None, op_type: s
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NULL)
+                       AND (user_id=%s OR %s::bigint IS NOT NULL)
                      RETURNING id
                     """,
                     (*params, op_type, key, user_id, workspace_id),
@@ -1172,7 +1172,7 @@ def delete_category_without_operations(*, user_id: int, workspace_id: int | None
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NULL)
+                       AND (user_id=%s OR %s::bigint IS NOT NULL)
                      RETURNING id
                     """,
                     (*params, op_type, key, user_id, workspace_id),
@@ -1213,12 +1213,13 @@ def get_or_create_custom_category(
                 SELECT id, name
                   FROM public.custom_categories
                  WHERE workspace_id IS NOT DISTINCT FROM %s
+                   AND (user_id=%s OR %s::bigint IS NOT NULL)
                    AND type=%s
                    AND normalized_name=%s
                    AND archived_at IS NULL
                  LIMIT 1
                 """,
-                (workspace_id, op_type, key),
+                (workspace_id, user_id, workspace_id, op_type, key),
             )
             row = cur.fetchone()
             if row:

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const plansData = {
+const plansData: any = {
   read_only: false,
   goals: [],
+  archived_goals: [],
   general_limits: [{
     id: 'general:1',
     kind: 'general',
@@ -40,6 +41,26 @@ const plansData = {
   category_budgets: [],
   reminders: [],
 };
+
+function goalData(status: 'active' | 'archived' = 'active') {
+  return {
+    id: 7,
+    title: 'Trip',
+    target: '1000.00',
+    current: '250.00',
+    remaining: '750.00',
+    percent: 25,
+    currency: 'RUB',
+    status,
+    deadline: '2026-12-31',
+    strategy: 'deadline',
+    frequency: 'monthly',
+    schedule_config: { day: 5 },
+    reminders_enabled: false,
+    next_action: status === 'archived' ? 'Цель в архиве' : 'Пополнить 150 ₽',
+    movement_count: 2,
+  };
+}
 
 function analyticsData(currencies: string[], selectedCurrency: string | null = null): any {
   const totals = Object.fromEntries(currencies.map((currency) => [currency, { income: '1000.00', expense: currency === 'EUR' ? '20.00' : '500.00', count: 2 }]));
@@ -112,6 +133,20 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
         : [{ name: 'Food', normalized_name: 'food', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false }],
       read_only: false,
     })),
+    managedCategories: vi.fn(async () => ({
+      items: [
+        { name: 'Food', normalized_name: 'food', token: 'food', type: 'Расходы', source: 'custom', operation_count: 2, has_budget: false, protected: false, references: { operations: 2, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 2 } },
+        { name: 'Other', normalized_name: 'other', token: 'other', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false, protected: false, references: { operations: 0, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 0 } },
+      ],
+      read_only: false,
+    })),
+    deleteCategory: vi.fn(async () => ({ deleted: true, references: {} })),
+    renameCategory: vi.fn(),
+    createCategory: vi.fn(),
+    goalPlanPreview: vi.fn(async () => ({ plan_preview: { strategy: 'deadline', frequency: 'monthly', remaining_amount: '950.00', occurrence_count: 5, recommended_amount: '190.00', next_occurrence: '2026-09-05', projected_completion_date: '2026-12-05', required_contributions: null, feasible: true, reason: null, schedule_config: { day: 5 }, preview_payload_hash: 'preview-hash' } })),
+    updateGoal: vi.fn(async () => ({ goal: {}, plan_preview: {} })),
+    setGoalStatus: vi.fn(async (_id, _workspace, status) => ({ goal: { status } })),
+    deleteGoal: vi.fn(async (id) => ({ deleted: true, goal_id: id, deleted_movement_count: 2 })),
     reminderDetail: vi.fn(async () => ({
       reminder: {
         id: 7,
@@ -217,6 +252,122 @@ describe('main plan handlers', () => {
 
     expect(document.body.textContent).toContain('Удалить лимит?');
     expect(document.querySelector<HTMLButtonElement>('[data-action="confirm-limit-delete"]')?.dataset.id).toBe('general:1');
+  });
+
+  it('opens category detail and safely deletes with immediate list and filter refresh', async () => {
+    const api = installAppMocks();
+    let deleted = false;
+    api.deleteCategory.mockImplementation(async () => {
+      deleted = true;
+      return { deleted: true, references: {} };
+    });
+    api.categories.mockImplementation(async (_workspaceId, type) => ({
+      items: type === 'income' ? [] : deleted ? [{ name: 'Other', normalized_name: 'other', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false }] : [
+        { name: 'Food', normalized_name: 'food', type: 'Расходы', source: 'custom', operation_count: 2, has_budget: false },
+        { name: 'Other', normalized_name: 'other', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false },
+      ],
+      read_only: false,
+    }));
+    api.managedCategories.mockImplementation(async () => ({
+      items: deleted ? [{ name: 'Other', normalized_name: 'other', token: 'other', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false, protected: false, references: { operations: 0, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 0 } }] : [
+        { name: 'Food', normalized_name: 'food', token: 'food', type: 'Расходы', source: 'custom', operation_count: 2, has_budget: false, protected: false, references: { operations: 2, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 2 } },
+        { name: 'Other', normalized_name: 'other', token: 'other', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false, protected: false, references: { operations: 0, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 0 } },
+      ], read_only: false,
+    }));
+    await import('../src/main');
+    await flush();
+
+    const categoryFilter = document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')!;
+    categoryFilter.value = 'Food';
+    categoryFilter.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="plans-mode"][data-mode="categories"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="category-open"][data-token="food"]')?.click();
+    expect(document.body.textContent).toContain('Автокатегоризация');
+    document.querySelector<HTMLButtonElement>('[data-action="category-delete"]')?.click();
+    const form = document.querySelector<HTMLFormElement>('form[data-action="delete-category"]')!;
+    form.querySelector<HTMLSelectElement>('select[name="transfer_to"]')!.value = 'Other';
+    form.querySelector<HTMLInputElement>('input[name="confirmed"]')!.checked = true;
+    form.requestSubmit();
+    await flush(12);
+
+    expect(api.deleteCategory).toHaveBeenCalledWith('food', { workspace_id: 10, type: 'expense', transfer_to: 'Other' });
+    expect(document.querySelector('[data-action="category-open"][data-token="food"]')).toBeNull();
+    expect(document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')?.value).toBe('all');
+  });
+
+  it('navigates the goal archive, restores a goal, and supports Telegram BackButton', async () => {
+    const api = installAppMocks();
+    api.plans.mockResolvedValue({ ...plansData, goals: [{ ...goalData(), id: 8 }], archived_goals: [goalData('archived')] });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-archive-open"]')?.click();
+    expect(document.querySelector('[data-action="goal-archive-back"]')).not.toBeNull();
+
+    const back = (window.Telegram!.WebApp!.BackButton!.onClick as any).mock.calls[0][0];
+    back();
+    expect(document.querySelector('[data-action="goal-archive-open"]')).not.toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-action="goal-archive-open"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-open"][data-id="7"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-status"][data-status="active"]')?.click();
+    await flush(8);
+
+    expect(api.setGoalStatus).toHaveBeenCalledWith(7, 10, 'active');
+    expect(document.querySelector('[data-action="goal-archive-open"]')).not.toBeNull();
+  });
+
+  it('requires explicit confirmation before permanently deleting an archived goal', async () => {
+    const api = installAppMocks();
+    api.plans.mockResolvedValue({ ...plansData, goals: [], archived_goals: [goalData('archived')] });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-archive-open"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-open"][data-id="7"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-delete"]')?.click();
+
+    expect(document.body.textContent).toContain('Удалить цель навсегда?');
+    expect(api.deleteGoal).not.toHaveBeenCalled();
+    document.querySelector<HTMLButtonElement>('[data-action="confirm-goal-delete"]')?.click();
+    await flush(8);
+    expect(api.deleteGoal).toHaveBeenCalledWith(7, 10);
+  });
+
+  it('recalculates an edited goal after every plan change before saving', async () => {
+    const api = installAppMocks();
+    api.plans.mockResolvedValue({ ...plansData, goals: [goalData()], archived_goals: [] });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-edit"][data-id="7"]')?.click();
+
+    const firstForm = document.querySelector<HTMLFormElement>('form[data-action="save-goal"]')!;
+    expect(firstForm.querySelector('[name="current_amount"]')).toBeNull();
+    firstForm.querySelector<HTMLInputElement>('[name="target_amount"]')!.value = '1200';
+    firstForm.querySelector<HTMLButtonElement>('[data-submit-mode="preview"]')!.click();
+    await flush(8);
+    expect(api.goalPlanPreview).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[data-submit-mode="confirm"]')).not.toBeNull();
+
+    const changedTarget = document.querySelector<HTMLInputElement>('form[data-action="save-goal"] [name="target_amount"]')!;
+    changedTarget.value = '1500';
+    changedTarget.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(document.querySelector<HTMLButtonElement>('[data-submit-mode="confirm"]')?.hidden).toBe(true);
+    document.querySelector<HTMLButtonElement>('form[data-action="save-goal"] [data-submit-mode="preview"]')!.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('form[data-action="save-goal"] [data-submit-mode="confirm"]')!.click();
+    await flush(8);
+
+    expect(api.goalPlanPreview).toHaveBeenCalledTimes(2);
+    expect(api.updateGoal).toHaveBeenCalledWith(7, expect.objectContaining({ target_amount: '1500.00', preview_payload_hash: 'preview-hash' }));
   });
 
   it('opens insight detail, records an impression and feedback, and supports BackButton', async () => {

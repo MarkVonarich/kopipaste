@@ -59,6 +59,7 @@ from services.goals import (
     GoalError,
     add_goal_movement,
     create_goal_with_plan_tx,
+    delete_goal_permanently,
     get_goal,
     list_goals,
     list_movements,
@@ -486,6 +487,11 @@ class MiniAppAPI:
         destination = str(body.get("transfer_to") or "").strip()
         try:
             if destination:
+                destination_key = normalized_category_key(destination)
+                available = {item["normalized_name"]: item["name"] for item in self._managed_categories(req, ctx.workspace_id, op_type)}
+                if destination_key not in available:
+                    raise ValueError("destination_not_found")
+                destination = available[destination_key]
                 result = transfer_category(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, source=current["name"], destination=destination, archive_source=True)
                 deleted = True
                 counts = result.counts.as_dict()
@@ -494,7 +500,14 @@ class MiniAppAPI:
                 deleted = bool(result.changed)
                 counts = result.counts.as_dict()
         except ValueError as exc:
-            raise MiniAppError(400, "category_delete_failed", "Category is used. Transfer records before deleting it.") from exc
+            reason = str(exc)
+            code, message = {
+                "protected_category": ("category_protected", "Protected categories cannot be deleted."),
+                "category_has_operations": ("category_transfer_required", "Choose a replacement category before deleting this category."),
+                "destination_not_found": ("category_destination_not_found", "Choose an available replacement category."),
+                "same_category": ("category_same_destination", "Choose a different replacement category."),
+            }.get(reason, ("category_delete_failed", "Category could not be deleted safely."))
+            raise MiniAppError(400, code, message) from exc
         self._track(req, "mini_app_category_deleted", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense", "mode": "transfer" if destination else "empty"})
         return success({"deleted": deleted, "references": counts}, request_id=req.request_id)
 
@@ -732,8 +745,8 @@ class MiniAppAPI:
         if bool(body.get("reminders_enabled")) and frequency == FREQUENCY_NONE:
             raise MiniAppError(400, "schedule_required", "Choose a reminder schedule.")
         target = to_decimal_money(body.get("target_amount") if body.get("target_amount") is not None else (goal.target_amount if goal else 0), positive=True)
-        current = to_decimal_money(body.get("current_amount") if body.get("current_amount") is not None else (goal.current_balance if goal else 0))
-        deadline = date.fromisoformat(str(body["deadline"])) if body.get("deadline") else (goal.deadline if goal else None)
+        current = goal.current_balance if goal else to_decimal_money(body.get("current_amount") or 0)
+        deadline = self._goal_deadline_from_body(body, goal)
         comfortable = to_decimal_money(body.get("comfortable_amount"), positive=True) if body.get("comfortable_amount") not in {None, ""} else None
         schedule = self._schedule_from_body(body, frequency)
         cfg = self._schedule_config(schedule, frequency)
@@ -768,9 +781,10 @@ class MiniAppAPI:
         frequency = str(body.get("frequency") or (goal.frequency if goal else FREQUENCY_NONE))
         schedule = self._schedule_from_body(body, frequency)
         target = to_decimal_money(body.get("target_amount") if body.get("target_amount") is not None else (goal.target_amount if goal else 0), positive=True)
-        current = to_decimal_money(body.get("current_amount") if body.get("current_amount") is not None else (goal.current_balance if goal else 0))
+        current = goal.current_balance if goal else to_decimal_money(body.get("current_amount") or 0)
         comfortable = to_decimal_money(body.get("comfortable_amount"), positive=True) if body.get("comfortable_amount") not in {None, ""} else None
-        deadline = str(body.get("deadline") or (goal.deadline.isoformat() if goal and goal.deadline else ""))
+        parsed_deadline = self._goal_deadline_from_body(body, goal)
+        deadline = parsed_deadline.isoformat() if parsed_deadline else ""
         raw_workspace_id = body.get("workspace_id")
         workspace_id = goal.workspace_id if goal else (int(raw_workspace_id) if raw_workspace_id not in {None, "", "all", "ALL"} else None)
         payload = {
@@ -787,6 +801,15 @@ class MiniAppAPI:
             "reminders_enabled": bool(body.get("reminders_enabled", goal.reminders_enabled if goal else False)),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def _goal_deadline_from_body(self, body: dict[str, Any], goal: Goal | None = None) -> date | None:
+        if "deadline" in body:
+            raw = str(body.get("deadline") or "").strip()
+            try:
+                return date.fromisoformat(raw) if raw else None
+            except ValueError as exc:
+                raise MiniAppError(400, "bad_goal", "Invalid goal deadline.") from exc
+        return goal.deadline if goal else None
 
     def _require_goal_preview_hash(self, req: MiniAppRequest, body: dict[str, Any], goal: Goal | None = None, goal_id: int | None = None) -> None:
         submitted = str(body.get("preview_payload_hash") or "").strip()
@@ -2766,6 +2789,7 @@ class MiniAppAPI:
             return success({
                 "read_only": True,
                 "goals": [],
+                "archived_goals": [],
                 "limits": [],
                 "general_limits": [],
                 "category_budgets": [],
@@ -2788,6 +2812,7 @@ class MiniAppAPI:
         return success({
             "read_only": False,
             "goals": self._goals(req, workspace_id),
+            "archived_goals": self._goals(req, workspace_id, status_group="archive"),
             "limits": [item for item in self._limits(req, workspace_id) if item.get("kind") == "category"],
             "general_limits": general_limits,
             "category_budgets": category_budgets,
@@ -3115,20 +3140,21 @@ class MiniAppAPI:
                     workspace_id=ctx.workspace_id,
                     display_name=str(body.get("title") or body.get("display_name")).strip() if body.get("title") or body.get("display_name") else None,
                     target_amount=body.get("target_amount") or None,
-                    deadline=date.fromisoformat(str(body["deadline"])) if body.get("deadline") else (None if "deadline" in body else ...),
+                    deadline=self._goal_deadline_from_body(body, goal) if "deadline" in body else ...,
                 )
             if any(key in body for key in {"strategy", "frequency", "comfortable_amount", "reminders_enabled", "day", "days", "weekday"}):
                 strategy = str(body.get("strategy") or goal.strategy)
                 frequency = str(body.get("frequency") or goal.frequency or FREQUENCY_NONE)
+                schedule_changed = any(key in body for key in {"frequency", "day", "days", "weekday"})
                 goal = update_goal_plan(
                     goal_id=goal.id,
                     owner_user_id=req.user_id,
                     workspace_id=ctx.workspace_id,
                     strategy=strategy,
                     frequency=frequency,
-                    deadline=date.fromisoformat(str(body["deadline"])) if body.get("deadline") else goal.deadline,
-                    comfortable_amount=body.get("comfortable_amount") if body.get("comfortable_amount") not in {None, ""} else goal.comfortable_amount,
-                    schedule_config=self._schedule_from_body(body, frequency) or goal.schedule_config,
+                    deadline=self._goal_deadline_from_body(body, goal),
+                    comfortable_amount=(body.get("comfortable_amount") or None) if "comfortable_amount" in body else goal.comfortable_amount,
+                    schedule_config=self._schedule_from_body(body, frequency) if schedule_changed else goal.schedule_config,
                     reminders_enabled=body.get("reminders_enabled") if "reminders_enabled" in body else None,
                 )
         except MiniAppError:
@@ -3185,9 +3211,29 @@ class MiniAppAPI:
         status = str(body.get("status") or "")
         if status not in {"active", "paused", "archived", "achieved"}:
             raise MiniAppError(400, "bad_goal_status", "Invalid goal status.")
-        goal = set_goal_status(int(goal_id), req.user_id, ctx.workspace_id, status)
+        try:
+            goal = set_goal_status(int(goal_id), req.user_id, ctx.workspace_id, status)
+        except GoalError as exc:
+            raise MiniAppError(404, "goal_not_found", "Goal was not found.") from exc
         self._safe_goal_event(req, "mini_app_goal_plan_changed", workspace_id=ctx.workspace_id, action=status)
         return success({"goal": self._goal_dict(goal)}, request_id=req.request_id)
+
+    def delete_goal(self, req: MiniAppRequest, goal_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        goal = get_goal(int(goal_id), req.user_id, ctx.workspace_id)
+        if not goal:
+            raise MiniAppError(404, "goal_not_found", "Goal was not found.")
+        if goal.status != "archived":
+            raise MiniAppError(409, "goal_not_archived", "Archive the goal before deleting it permanently.")
+        try:
+            movement_count = delete_goal_permanently(int(goal_id), req.user_id, ctx.workspace_id)
+        except GoalError as exc:
+            if exc.code == "goal_not_archived":
+                raise MiniAppError(409, "goal_not_archived", "Archive the goal before deleting it permanently.") from exc
+            raise MiniAppError(404, "goal_not_found", "Goal was not found.") from exc
+        self._safe_goal_event(req, "mini_app_goal_plan_changed", workspace_id=ctx.workspace_id, action="delete")
+        return success({"deleted": True, "goal_id": int(goal_id), "deleted_movement_count": movement_count}, request_id=req.request_id)
 
     def _limits(self, req: MiniAppRequest, workspace_id: int | None) -> list[dict]:
         items: list[dict] = []

@@ -5,7 +5,7 @@ import { OperationsScreen } from '../src/components/OperationsScreen';
 import { TransactionForm } from '../src/components/TransactionForm';
 import { ConfirmDialog } from '../src/components/ConfirmDialog';
 import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/components/States';
-import { CategoryBudgetForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from '../src/components/PlansScreen';
+import { CategoryBudgetForm, CategoryDetail, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from '../src/components/PlansScreen';
 import { AnalyticsScreen, contributionRows, deltaText } from '../src/components/AnalyticsScreen';
 import { ActivityCalendarView } from '../src/components/ActivityCalendar';
 import { AdditionalMenu, ExportForm, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
@@ -392,6 +392,44 @@ describe('acceptance components', () => {
     expect(limitsHtml).toContain('750 ₽ / 1 000 ₽');
   });
 
+  it('renders categories as a simple first-level list and keeps details in the sheet view', () => {
+    const category = {
+      name: 'Продукты', normalized_name: 'продукты', token: 'продукты', type: 'Расходы' as const,
+      source: 'custom', operation_count: 12, has_budget: true, protected: false,
+      references: { operations: 12, drafts: 0, category_limits: 1, category_budget_groups: 2, reminders: 1, aliases: 3, ml_observations: 4, total: 23 },
+    };
+    const list = PlansScreen({ goals: [], limits: [], categories: [category], category_type: 'expense' }, 'categories', true);
+
+    expect(list).toContain('data-action="category-open"');
+    expect(list).toContain('Продукты');
+    expect(list).not.toContain('Автокатегоризация');
+    expect(list).not.toContain('12 операций');
+
+    const detail = CategoryDetail(category, 'expense', true);
+    expect(detail).toContain('Автокатегоризация');
+    expect(detail).toContain('data-action="category-rename"');
+    expect(detail).toContain('data-action="category-delete"');
+    expect(CategoryDetail(category, 'expense', false)).not.toContain('data-action="category-delete"');
+  });
+
+  it('renders a goal archive entry, archived goals, and protected destructive actions', () => {
+    const archived = {
+      id: 7, title: 'Отпуск', target: '100000.00', current: '25000.00', remaining: '75000.00', percent: 25,
+      currency: 'RUB', status: 'archived', deadline: null, strategy: 'none', frequency: 'none', reminders_enabled: false,
+      next_action: 'Цель в архиве', movement_count: 2,
+    };
+    const active = PlansScreen({ goals: [], archived_goals: [archived], limits: [] }, 'goals', true);
+    const archive = PlansScreen({ goals: [], archived_goals: [archived], limits: [] }, 'goals', true, 'archive');
+    const detail = GoalDetail(archived, true);
+
+    expect(active).toContain('data-action="goal-archive-open"');
+    expect(archive).toContain('Архив целей');
+    expect(archive).toContain('Отпуск');
+    expect(detail).toContain('Восстановить');
+    expect(detail).toContain('Удалить навсегда');
+    expect(GoalDetail(archived, false)).not.toContain('Удалить навсегда');
+  });
+
   it('opens limit forms with correct scopes and preserves edit currency', () => {
     const general = LimitForm(null, [{ name: 'Food' }], false, '', 'all_expenses');
     const category = LimitForm(null, [{ name: 'Food' }], false, '', 'category');
@@ -765,6 +803,18 @@ describe('acceptance components', () => {
     expect(html).toContain('Подтвердить сохранение');
     expect(html).toContain('name="day"');
     expect(html).toContain('Например, 5');
+  });
+
+  it('keeps existing goal balance ledger-derived during edit', () => {
+    const goal = {
+      id: 7, title: 'Trip', target: '1000.00', current: '250.00', remaining: '750.00', percent: 25,
+      currency: 'RUB', status: 'active', deadline: '2026-12-31', strategy: 'deadline', frequency: 'monthly',
+      schedule_config: { day: 5 }, reminders_enabled: false, next_action: 'Пополнить', movement_count: 1,
+    };
+    const html = GoalForm(goal);
+
+    expect(html).toContain('Прогресс меняется через пополнение цели');
+    expect(html).not.toContain('name="current_amount"');
   });
 
   it('does not render invalid repository profile document links', () => {

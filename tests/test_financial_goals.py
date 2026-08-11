@@ -189,3 +189,82 @@ def test_goal_events_registered_and_do_not_need_raw_properties():
         "goal_deleted",
     ]:
         assert PRODUCT_EVENT_GROUPS[name] == "goals"
+
+
+def test_permanent_goal_delete_only_removes_selected_goal_state(monkeypatch):
+    from services import goals
+
+    goal = SimpleNamespace(id=7, owner_user_id=55, workspace_id=10, currency="RUB", status="archived")
+    statements = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params=()):
+            statements.append((" ".join(sql.split()), params))
+
+        def fetchone(self):
+            return (2,)
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(goals, "get_conn", Conn)
+    monkeypatch.setattr(goals, "get_goal_cur", lambda *_args, **_kwargs: goal)
+    monkeypatch.setattr(goals, "suppress_pending_goal_notifications_cur", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(goals, "_safe_track", lambda *_args, **_kwargs: None)
+
+    assert goals.delete_goal_permanently(7, 55, 10) == 2
+    sql = "\n".join(statement for statement, _params in statements)
+    assert "DELETE FROM public.goal_movements WHERE goal_id=%s" in sql
+    assert "payload->>'goal_id'=%s" in sql
+    assert "DELETE FROM public.financial_goals WHERE id=%s" in sql
+    assert "operations" not in sql
+
+
+def test_permanent_goal_delete_rechecks_archive_status_under_lock(monkeypatch):
+    import pytest
+    from services import goals
+
+    goal = SimpleNamespace(id=7, owner_user_id=55, workspace_id=10, currency="RUB", status="active")
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            raise AssertionError("delete must not commit")
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(goals, "get_conn", Conn)
+    monkeypatch.setattr(goals, "get_goal_cur", lambda *_args, **_kwargs: goal)
+
+    with pytest.raises(goals.GoalError) as exc:
+        goals.delete_goal_permanently(7, 55, 10)
+    assert exc.value.code == "goal_not_archived"

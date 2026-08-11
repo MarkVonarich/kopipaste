@@ -544,6 +544,45 @@ def test_categories_endpoint_uses_managed_categories(monkeypatch):
     assert data["items"][0]["name"] == "Food"
 
 
+def test_category_delete_uses_safe_direct_or_transfer_path(monkeypatch):
+    api = _api(monkeypatch)
+    ctx = WorkspaceContext(10, -100, 42, "group", "member", "Family", True)
+    monkeypatch.setattr(api, "_write_scope", lambda *_args: ctx)
+    categories = [
+        {"name": "Food", "normalized_name": "food", "token": "food", "protected": False},
+        {"name": "Other", "normalized_name": "other", "token": "other", "protected": False},
+    ]
+    monkeypatch.setattr(api, "_managed_categories", lambda *_args, **_kwargs: categories)
+    calls = []
+    result = type("Result", (), {"changed": True, "counts": CategoryReferenceCounts(operations=2)})()
+    monkeypatch.setattr("miniapp.api.delete_category_without_operations", lambda **kwargs: calls.append(("direct", kwargs)) or result)
+    monkeypatch.setattr("miniapp.api.transfer_category", lambda **kwargs: calls.append(("transfer", kwargs)) or result)
+
+    api.delete_category(api.request(42), "food", {"workspace_id": 10, "type": "expense"})
+    api.delete_category(api.request(42), "food", {"workspace_id": 10, "type": "expense", "transfer_to": "  OTHER  "})
+
+    assert [kind for kind, _kwargs in calls] == ["direct", "transfer"]
+    assert calls[1][1]["archive_source"] is True
+    assert calls[1][1]["destination"] == "Other"
+
+
+def test_category_delete_rejects_protected_and_unavailable_destination(monkeypatch):
+    api = _api(monkeypatch)
+    ctx = WorkspaceContext(10, -100, 42, "group", "member", "Family", True)
+    monkeypatch.setattr(api, "_write_scope", lambda *_args: ctx)
+    categories = [{"name": "Food", "normalized_name": "food", "token": "food", "protected": True}]
+    monkeypatch.setattr(api, "_managed_categories", lambda *_args, **_kwargs: categories)
+
+    with pytest.raises(MiniAppError) as protected:
+        api.delete_category(api.request(42), "food", {"workspace_id": 10, "type": "expense"})
+    assert protected.value.code == "category_protected"
+
+    categories[0]["protected"] = False
+    with pytest.raises(MiniAppError) as missing:
+        api.delete_category(api.request(42), "food", {"workspace_id": 10, "type": "expense", "transfer_to": "Gone"})
+    assert missing.value.code == "category_destination_not_found"
+
+
 def test_profile_links_are_configured_not_repo_paths(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [])
@@ -699,7 +738,8 @@ def test_update_reminder_without_currency_does_not_reset_currency(monkeypatch):
 def test_plans_separates_general_limits_category_budgets_and_reminders(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "_read_scope", lambda _req, _workspace_id: ([10], False))
-    monkeypatch.setattr("miniapp.api.list_goals", lambda *_args, **_kwargs: [])
+    goal_groups = []
+    monkeypatch.setattr("miniapp.api.list_goals", lambda *_args, **kwargs: goal_groups.append(kwargs.get("status_group")) or [])
     monkeypatch.setattr("miniapp.api.list_general_limits", lambda *_args, **_kwargs: [{
         "id": 1,
         "workspace_id": 10,
@@ -750,6 +790,8 @@ def test_plans_separates_general_limits_category_budgets_and_reminders(monkeypat
     assert data["category_budgets"][0]["title"] == "Еда"
     assert data["limits"][0]["kind"] == "category"
     assert data["reminders"][0]["title"] == "Интернет"
+    assert data["archived_goals"] == []
+    assert "archive" in goal_groups
 
 
 def test_overview_keeps_mixed_currencies_unaggregated(monkeypatch):

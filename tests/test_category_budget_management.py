@@ -5,6 +5,34 @@ from types import SimpleNamespace
 from services.categories import CategoryReferenceCounts, ManagedCategory
 
 
+def test_custom_category_owner_filter_is_personal_only_and_workspace_shared(monkeypatch):
+    from services import categories
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=()):
+            self.calls.append((" ".join(sql.split()), params))
+
+        def fetchone(self):
+            return (1,)
+
+    monkeypatch.setattr(categories, "_table_columns", lambda _cur, table: {"id", "user_id", "workspace_id"} if table == "custom_categories" else set())
+    personal = Cursor()
+    workspace = Cursor()
+
+    assert categories._category_exists(personal, user_id=55, workspace_id=None, op_type="Расходы", name="Food") is True
+    assert categories._category_exists(workspace, user_id=55, workspace_id=10, op_type="Расходы", name="Food") is True
+
+    personal_sql, personal_params = personal.calls[0]
+    workspace_sql, workspace_params = workspace.calls[0]
+    assert "(user_id=%s OR %s::bigint IS NOT NULL)" in personal_sql
+    assert personal_params[-2:] == (55, None)
+    assert "(user_id=%s OR %s::bigint IS NOT NULL)" in workspace_sql
+    assert workspace_params[-2:] == (55, 10)
+
+
 def _category_scope_rows():
     return {
         "operations": [
