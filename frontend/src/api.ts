@@ -20,6 +20,7 @@ import type {
   TimeDynamicsItem,
   ActivityCalendar,
   HomeReminderSummary,
+  Insight,
   CategoryBudgetGroup,
   CategoryBudgetPayload,
   GeneralSpendingLimit,
@@ -49,7 +50,8 @@ export type Overview = {
   challenges?: Array<{ key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_type?: string; period_key: string; period_end?: string | null }>;
   focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
   focus_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean }>;
-  insight?: { kind: string; tone: string; title: string; text: string; currency?: string } | null;
+  insights?: Insight[];
+  insight?: Insight | null;
   reminder?: HomeReminderSummary | null;
   reminders?: HomeReminderSummary[];
   activity?: ActivityCalendar;
@@ -245,6 +247,10 @@ export const api = {
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
   overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
+  insightImpression: (id: string, workspaceId: number | 'all' | null) =>
+    apiFetch<{ recorded: boolean }>(`/miniapp/api/insights/${encodeURIComponent(id)}/impression`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
+  insightFeedback: (id: string, workspaceId: number | 'all' | null, feedbackType: 'useful' | 'not_useful') =>
+    apiFetch<{ recorded: boolean; feedback_type: 'useful' | 'not_useful'; suppressed_until?: string | null }>(`/miniapp/api/insights/${encodeURIComponent(id)}/feedback`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, feedback_type: feedbackType }) }),
   operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; merchant_key?: string; category_key?: string }, offset = 0, search = '') =>
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
   categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>

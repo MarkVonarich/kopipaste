@@ -25,6 +25,41 @@ export type GlobalFinancialFilters = PeriodState & {
   category: string;
 };
 
+export type InsightActionType = 'OPEN_ANALYTICS' | 'OPEN_CATEGORY' | 'OPEN_MERCHANT' | 'OPEN_OPERATIONS' | 'OPEN_LIMIT' | 'CREATE_LIMIT';
+
+export type InsightEvidence = {
+  kind: 'amount_comparison' | 'contribution_share' | 'merchant_contribution' | 'count_comparison' | 'average_check' | 'limit_pace';
+  label: string;
+  currency?: string;
+  current_amount?: string;
+  previous_amount?: string;
+  delta_amount?: string;
+  spent_amount?: string;
+  limit_amount?: string;
+  current_count?: number;
+  previous_count?: number;
+  share_pct?: number;
+  used_percent?: number;
+  period_progress?: number;
+  merchant_key?: string;
+};
+
+export type Insight = {
+  id: string;
+  type: string;
+  detector: string;
+  tone: 'neutral' | 'positive' | 'warning';
+  severity: string;
+  title: string;
+  summary: string;
+  currency: string;
+  period: { key: string; start_date: string; end_date: string };
+  comparison_period: { key: string; start_date: string; end_date: string };
+  evidence: InsightEvidence[];
+  actions: Array<{ type: InsightActionType; label: string; params: Record<string, string | number | null> }>;
+  feedback?: 'useful' | 'not_useful' | null;
+};
+
 export type Operation = {
   id: number;
   op_date: string;
@@ -374,7 +409,7 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
   profileAccordion?: ProfileSection | null;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';
@@ -401,6 +436,7 @@ export type AppState = {
   selectedCategoryBudgetId?: number;
   reminderIdempotencyKey?: string;
   limitCreateScope?: 'all_expenses' | 'category';
+  insightLimitCategory?: string;
   reminderDraft?: Partial<ReminderPayload>;
   homeChallengeIndex?: number;
   homeFocusIndex?: number;

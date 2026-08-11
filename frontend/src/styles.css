@@ -589,8 +589,90 @@ textarea:disabled {
 }
 
 .insight-card {
-  grid-column: 1 / -1;
   min-height: 112px;
+}
+
+.insight-stack {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.insight-stack .insight-card:first-child {
+  grid-column: 1 / -1;
+}
+
+.insight-card.secondary-insight {
+  min-height: 96px;
+}
+
+.insight-detail,
+.insight-evidence {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.insight-detail-conclusion {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+}
+
+.insight-detail-conclusion.warning {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--divider));
+}
+
+.insight-detail-conclusion p,
+.insight-detail-conclusion strong,
+.insight-evidence-row small,
+.insight-evidence-row strong {
+  margin: 0;
+}
+
+.insight-detail-conclusion p,
+.insight-evidence-row small,
+.insight-periods span {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.insight-periods {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.insight-periods span,
+.insight-evidence-row {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-secondary);
+}
+
+.insight-periods strong,
+.insight-evidence-row strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.insight-feedback {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.insight-feedback > span {
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .reminder-card.overdue {

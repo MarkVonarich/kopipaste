@@ -1,5 +1,5 @@
 import { formatMoneyString, subtractMoneyStrings } from '../money';
-import type { GlobalFinancialFilters, HomeReminderSummary, Operation } from '../types';
+import type { GlobalFinancialFilters, HomeReminderSummary, Insight, InsightEvidence, Operation } from '../types';
 import type { Overview } from '../api';
 import { ActivityCalendarView } from './ActivityCalendar';
 import { TransactionList } from './TransactionList';
@@ -143,16 +143,77 @@ function activityCard(overview: Overview | null): string {
   `;
 }
 
+function insightEvidenceRow(item: InsightEvidence, fallbackCurrency: string): string {
+  const currency = item.currency || fallbackCurrency;
+  if (item.kind === 'amount_comparison' || item.kind === 'average_check') {
+    return `<div class="insight-evidence-row">
+      <span>${esc(item.label)}</span>
+      <strong>${esc(formatMoneyString(item.current_amount || '0', currency))}</strong>
+      <small>Было ${esc(formatMoneyString(item.previous_amount || '0', currency))}</small>
+    </div>`;
+  }
+  if (item.kind === 'merchant_contribution') {
+    return `<div class="insight-evidence-row">
+      <span>${esc(item.label)}</span>
+      <strong>+${esc(formatMoneyString(item.delta_amount || '0', currency))}</strong>
+      <small>${esc(item.share_pct || 0)}% роста${item.current_count !== undefined && item.previous_count !== undefined ? ` · ${esc(item.current_count)} покупок вместо ${esc(item.previous_count)}` : ''}</small>
+    </div>`;
+  }
+  if (item.kind === 'count_comparison') {
+    return `<div class="insight-evidence-row"><span>${esc(item.label)}</span><strong>${esc(item.current_count || 0)} вместо ${esc(item.previous_count || 0)}</strong></div>`;
+  }
+  if (item.kind === 'contribution_share') {
+    return `<div class="insight-evidence-row"><span>${esc(item.label)}</span><strong>${esc(item.share_pct || 0)}%</strong></div>`;
+  }
+  if (item.kind === 'limit_pace') {
+    return `<div class="insight-evidence-row">
+      <span>${esc(item.label)}</span>
+      <strong>${esc(formatMoneyString(item.spent_amount || '0', currency))} из ${esc(formatMoneyString(item.limit_amount || '0', currency))}</strong>
+      <small>Использовано ${esc(item.used_percent || 0)}% · прошло ${esc(item.period_progress || 0)}% периода</small>
+    </div>`;
+  }
+  return '';
+}
+
+export function InsightDetail(insight: Insight, saving = false, error = ''): string {
+  return `
+    <div class="insight-detail">
+      <div class="insight-detail-conclusion ${esc(insight.tone)}">
+        <strong>${esc(insight.title)}</strong>
+        <p>${esc(insight.summary)}</p>
+      </div>
+      <div class="insight-periods">
+        <span>Текущий период<br><strong>${esc(insight.period.start_date)} — ${esc(insight.period.end_date)}</strong></span>
+        <span>Сопоставимый<br><strong>${esc(insight.comparison_period.start_date)} — ${esc(insight.comparison_period.end_date)}</strong></span>
+      </div>
+      <div class="insight-evidence" aria-label="Почему показан инсайт">
+        ${insight.evidence.map((item) => insightEvidenceRow(item, insight.currency)).join('')}
+      </div>
+      <div class="form-grid insight-actions">
+        ${insight.actions.map((action, index) => `<button class="button ${index === 0 ? 'primary' : 'secondary'}" type="button" data-action="insight-action" data-index="${index}" ${saving ? 'disabled' : ''}>${esc(action.label)}</button>`).join('')}
+      </div>
+      <div class="insight-feedback" aria-label="Оценка инсайта">
+        <span>Полезно?</span>
+        <button class="button secondary" type="button" data-action="insight-feedback" data-feedback="useful" ${saving || insight.feedback ? 'disabled' : ''}>👍 Полезно</button>
+        <button class="button secondary" type="button" data-action="insight-feedback" data-feedback="not_useful" ${saving || insight.feedback ? 'disabled' : ''}>👎 Не полезно</button>
+      </div>
+      ${insight.feedback ? `<p class="caption">Спасибо, учтём этот выбор.</p>` : ''}
+      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
+    </div>
+  `;
+}
+
 export function HomeScreen(overview: Overview | null, recent: Operation[], fallbackCurrency: string, canWrite: boolean, filters: GlobalFinancialFilters = { period: 'current_month', operation_type: 'all', category: 'all' }, indices: HomeIndices = { challenge: 0, focus: 0, reminder: 0 }): string {
   const period = overview?.period ? `${overview.period.start_date} — ${overview.period.end_date}` : '';
   const emptyAction = canWrite ? `<button class="button primary" data-action="open-add" data-kind="expense">${icon('expense')}Добавить первую операцию</button>` : '';
   const challenge = overview?.challenge;
   const focus = overview?.focus;
-  const insight = overview?.insight;
+  const insights = overview?.insights?.length ? overview.insights : overview?.insight ? [overview.insight] : [];
+  const insight = insights[0];
   const challenges = overview?.challenges?.length ? overview.challenges : challenge ? [challenge] : [];
   const focusItems = overview?.focus_items?.length ? overview.focus_items : focus ? [focus] : [];
   const reminders = overview?.reminders?.length ? overview.reminders : overview?.reminder ? [overview.reminder] : [];
-  const homeInsightText = compactHomeInsightText(overview?.insight?.text || overview?.info?.text || 'Показан выбранный период.');
+  const homeInsightText = compactHomeInsightText(insight?.summary || overview?.info?.text || 'Показан выбранный период.');
   const challengeCards = challenges.map((item) => `
     <div>
       <span>Челлендж · ${esc(item.period_type === 'week' ? 'Неделя' : item.period_type === 'month' ? 'Месяц' : 'Сегодня')}</span>
@@ -207,11 +268,13 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
         ${carousel('challenge', challengeCards, indices.challenge, 'Челленджи', 'home-challenge')}
         ${carousel('focus', focusCards, indices.focus, 'Фокус', 'home-focus', focusActionAttrs)}
         ${carousel('reminder', reminderCards, indices.reminder, 'Напоминания', 'home-reminder', reminderActionAttrs)}
-        <button class="smart-card insight-card ${esc(insight?.tone || 'neutral')}" data-action="home-insight" type="button">
-          <span>Инсайт периода</span>
-          <strong>${esc(insight?.title || overview?.info?.text || 'Период')}</strong>
-          <small>${esc(compactHomeInsightText(insight?.text || overview?.info?.text || 'Данные обновятся после операций'))}</small>
-        </button>
+        ${insights.length ? `<div class="insight-stack" aria-label="Инсайты периода">
+          ${insights.map((item, index) => `<button class="smart-card insight-card ${index ? 'secondary-insight' : ''} ${esc(item.tone || 'neutral')}" data-action="home-insight" data-insight-id="${esc(item.id)}" type="button">
+            <span>${index ? 'Ещё важно' : 'Инсайт периода'}</span>
+            <strong>${esc(item.title)}</strong>
+            <small>${esc(compactHomeInsightText(item.summary))}</small>
+          </button>`).join('')}
+        </div>` : ''}
       </div>
       ${SectionHeader(
         'Последние операции',

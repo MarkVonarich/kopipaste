@@ -349,7 +349,7 @@ function currencyOptions(selected?: string | null, available: string[] = ['RUB',
   return codes.map((code) => `<option value="${esc(code)}" ${code === selected ? 'selected' : ''}>${esc(code)}</option>`).join('');
 }
 
-export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category'): string {
+export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category', initialCategory = ''): string {
   const scope = limit?.scope || initialScope;
   return `
     <form class="form-grid" data-action="${limit ? 'save-limit' : 'create-limit'}" ${limit ? `data-id="${esc(limit.id)}"` : ''}>
@@ -359,7 +359,7 @@ export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: s
         <option value="all_expenses" ${scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
       </select></label>
       <label class="field" data-field="limit-category" ${scope === 'all_expenses' ? 'hidden' : ''}>Категория<select class="select" name="category" ${scope === 'all_expenses' ? 'disabled' : ''}>
-        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${limit?.category === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
+        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${(limit?.category || initialCategory) === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
       </select></label>
       <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" placeholder="0,00" value="${esc(limit?.amount || '')}" required /></label>
       ${limit?.currency ? `<input type="hidden" name="currency" value="${esc(limit.currency)}" />` : ''}

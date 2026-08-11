@@ -5,12 +5,12 @@ import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, Operation, OperationType, PeriodKey, Reminder, ThemeMode, Workspace } from './types';
+import type { AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
 import { ConfirmDialog } from './components/ConfirmDialog';
-import { HomeScreen } from './components/HomeScreen';
+import { HomeScreen, InsightDetail } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
 import { CategoryBudgetForm, CategoryDeleteForm, CategoryForm, GoalContributionForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
@@ -34,12 +34,14 @@ let selectedLimit: BudgetLimit | null = null;
 let selectedReminder: Reminder | null = null;
 let selectedCategoryBudget: CategoryBudgetGroup | null = null;
 let selectedCategory: CategoryOption | null = null;
+let selectedInsight: Insight | null = null;
 let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
 let chartInstances: Chart[] = [];
 let homeScreenEventsRegistered = false;
 let homeScreenCheckSeq = 0;
+const impressedInsightIds = new Set<string>();
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -270,6 +272,9 @@ function renderSheet(): string {
   if (state.confirmLimitDeleteId && selectedLimit) {
     return ConfirmDialog(state.confirmLimitDeleteId, `${selectedLimit.title} · ${formatMoneyString(selectedLimit.amount, selectedLimit.currency)}`, 'Удалить лимит?', 'confirm-limit-delete');
   }
+  if (state.sheet === 'insight-detail' && selectedInsight) {
+    return BottomSheet('Инсайт', InsightDetail(selectedInsight, state.saving, state.saveError));
+  }
   if (!state.sheet && !selectedOperation) return '';
   if (state.sheet === 'goal-create') {
     return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
@@ -281,7 +286,7 @@ function renderSheet(): string {
     return BottomSheet('Пополнить цель', GoalContributionForm(selectedGoal, state.goalIdempotencyKey || requestId(), state.saving, state.saveError));
   }
   if (state.sheet === 'limit-create') {
-    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError, state.limitCreateScope || 'category'));
+    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError, state.limitCreateScope || 'category', state.insightLimitCategory || ''));
   }
   if (state.sheet === 'limit-edit' && selectedLimit) {
     return BottomSheet('Изменить лимит', LimitForm(selectedLimit, categoryOptions, state.saving, state.saveError));
@@ -470,7 +475,14 @@ async function loadScreen(): Promise<void> {
   render();
   try {
     const filters = activeFilters();
-    if (state.tab === 'home') overview = await api.overview(state.workspaceId, filters);
+    if (state.tab === 'home') {
+      overview = await api.overview(state.workspaceId, filters);
+      for (const insight of overview.insights || []) {
+        if (impressedInsightIds.has(insight.id)) continue;
+        impressedInsightIds.add(insight.id);
+        void api.insightImpression(insight.id, state.workspaceId).catch(() => impressedInsightIds.delete(insight.id));
+      }
+    }
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
       const analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
@@ -539,6 +551,74 @@ async function loadScreen(): Promise<void> {
   }
 }
 
+function applyInsightScope(params: Record<string, string | number | null>): void {
+  const workspaceId = params.workspace_id;
+  if (workspaceId === null || typeof workspaceId === 'number') state.workspaceId = workspaceId;
+  const rawPeriod = String(params.period || 'current_month');
+  const period: PeriodKey = rawPeriod === 'current_week' || rawPeriod === 'previous_month' || rawPeriod === 'custom' ? rawPeriod : 'current_month';
+  state.globalFilters = {
+    period,
+    start_date: period === 'custom' ? String(params.start_date || '') : undefined,
+    end_date: period === 'custom' ? String(params.end_date || '') : undefined,
+    operation_type: params.operation_type === 'income' ? 'income' : 'expense',
+    category: 'all',
+  };
+  state.period = state.globalFilters;
+}
+
+async function openInsightAction(type: InsightActionType, params: Record<string, string | number | null>): Promise<void> {
+  applyInsightScope(params);
+  state.sheet = null;
+  state.saveError = undefined;
+  selectedInsight = null;
+  if (type === 'OPEN_OPERATIONS') {
+    state.operationScope = {
+      currency: String(params.currency || ''),
+      merchant_key: params.merchant_key ? String(params.merchant_key) : undefined,
+      category_key: params.category_key ? String(params.category_key) : undefined,
+    };
+    state.tab = 'operations';
+    await loadScreen();
+    return;
+  }
+  if (type === 'OPEN_ANALYTICS' || type === 'OPEN_CATEGORY' || type === 'OPEN_MERCHANT') {
+    if (type === 'OPEN_MERCHANT' && params.category && params.category !== 'all') {
+      state.globalFilters.category = String(params.category);
+      state.period = state.globalFilters;
+    }
+    const detailKind = type === 'OPEN_CATEGORY' ? 'category' : type === 'OPEN_MERCHANT' ? 'merchant' : undefined;
+    const detailValue = detailKind === 'category' ? (params.category || params.category_key) : detailKind === 'merchant' ? params.merchant_key : undefined;
+    state.analyticsFilters = {
+      ...(state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }),
+      categoryType: 'expense',
+      analyticsCurrency: String(params.currency || ''),
+      structureMode: detailKind === 'merchant' ? 'merchant' : 'category',
+      detailKind,
+      detailValue: detailValue ? String(detailValue) : undefined,
+      detailCurrency: String(params.currency || ''),
+      detailOperationType: 'expense',
+    };
+    state.tab = 'analytics';
+    await loadScreen();
+    return;
+  }
+  state.tab = 'plans';
+  state.plansMode = 'limits';
+  await loadScreen();
+  await loadCategoriesFor('expense');
+  if (type === 'OPEN_LIMIT') {
+    selectedLimit = findLimitById(params.limit_id ? String(params.limit_id) : undefined);
+    state.sheet = selectedLimit && canWrite() ? 'limit-edit' : null;
+  } else {
+    selectedLimit = null;
+    state.limitCreateScope = 'category';
+    state.insightLimitCategory = params.category && params.category !== 'all' ? String(params.category) : undefined;
+    state.limitCreateIdempotencyKey = requestId();
+    state.sheet = 'limit-create';
+  }
+  render();
+}
+
 async function bootstrap(): Promise<void> {
   installStartupErrorHandlers();
   const launchError = prepareTelegramLaunch();
@@ -581,6 +661,7 @@ function closeSheet(): void {
   selectedOperation = null;
   selectedGoal = null;
   selectedLimit = null;
+  selectedInsight = null;
   state.selectedWorkspaceId = undefined;
   state.saveError = undefined;
   state.saving = false;
@@ -589,6 +670,7 @@ function closeSheet(): void {
   state.goalIdempotencyKey = undefined;
   state.goalCreateIdempotencyKey = undefined;
   state.limitCreateIdempotencyKey = undefined;
+  state.insightLimitCategory = undefined;
   state.goalPlanPreview = undefined;
   state.goalPreviewPayloadHash = undefined;
   state.goalDraft = undefined;
@@ -1029,10 +1111,43 @@ function wireEvents(): void {
     state.plansMode = mode;
     await loadScreen();
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.addEventListener('click', async () => {
-    await api.track('mini_app_home_insight_opened', { kind: overview?.insight?.kind || 'fallback', source: 'mini_app' });
-    state.tab = 'analytics';
-    await loadScreen();
+  app.querySelectorAll<HTMLButtonElement>('[data-action="home-insight"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      selectedInsight = (overview?.insights || []).find((item) => item.id === button.dataset.insightId) || overview?.insight || null;
+      if (!selectedInsight) return;
+      state.sheet = 'insight-detail';
+      state.saveError = undefined;
+      await api.track('insight_opened', { detector_type: selectedInsight.detector, surface: 'home' });
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="insight-action"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!selectedInsight) return;
+      const action = selectedInsight.actions[Number(button.dataset.index || 0)];
+      if (!action) return;
+      await api.track('insight_action_clicked', { detector_type: selectedInsight.detector, action_type: action.type, surface: 'detail' });
+      await openInsightAction(action.type, action.params);
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="insight-feedback"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!selectedInsight) return;
+      const feedback = button.dataset.feedback === 'not_useful' ? 'not_useful' : 'useful';
+      state.saving = true;
+      state.saveError = undefined;
+      render();
+      try {
+        await api.insightFeedback(selectedInsight.id, state.workspaceId, feedback);
+        selectedInsight.feedback = feedback;
+        showToast('Спасибо, учтём этот выбор.');
+      } catch (error) {
+        state.saveError = safeError(error);
+      } finally {
+        state.saving = false;
+        render();
+      }
+    });
   });
   app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async (event) => {
     const button = event.currentTarget as HTMLButtonElement;

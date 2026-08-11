@@ -89,6 +89,7 @@ from services.reminders import (
 )
 from utils.text import norm_text
 from services.limit_alerts import alert_status_for_band, threshold_band
+from services.insights import PeriodRef, build_snapshot, insight_engine
 from services.merchant_intelligence import (
     EMPTY_MERCHANT_KEY,
     comparable_baseline_periods,
@@ -991,6 +992,7 @@ class MiniAppAPI:
         challenges = self._home_challenges(req)
         focus_items = self._home_focus_items(req, params, tx)
         reminders = self._home_reminders(req)
+        insights = [] if params.get("_skip_insights") else self._home_insights(req, tx, totals, focus_items)
         return success({
             "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
             "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
@@ -1003,7 +1005,8 @@ class MiniAppAPI:
             "challenge": challenges[0] if challenges else None,
             "focus_items": focus_items,
             "focus": focus_items[0] if focus_items else {"kind": "empty", "title": "Фокус свободен", "description": "Добавьте цель или лимит, чтобы видеть главный приоритет.", "target_mode": "goals"},
-            "insight": self._home_insight(req, tx, totals),
+            "insights": insights,
+            "insight": insights[0] if insights else None,
             "reminders": reminders,
             "reminder": reminders[0] if reminders else self._home_reminder(req),
             "activity": self._activity_calendar(req, tx),
@@ -1163,6 +1166,12 @@ class MiniAppAPI:
                     "description": description,
                     "percent": percent,
                     "projected_percent": projected_percent if projected_percent is not None and projected_percent >= 90 else None,
+                    "amount": limit.get("amount"),
+                    "spent": limit.get("spent"),
+                    "currency": limit.get("currency"),
+                    "period": limit.get("period"),
+                    "category": limit.get("category"),
+                    "enabled": limit.get("enabled", True),
                     "status": status,
                     "cta_label": "Открыть лимиты",
                     "target_mode": "limits",
@@ -1179,54 +1188,115 @@ class MiniAppAPI:
             items.append(item)
         return items
 
-    def _home_insight(
+    def _insight_rows(self, req: MiniAppRequest, tx: TransactionFilters) -> list[tuple[Any, Any, Any, Any, Any]]:
+        return pg_fetchall(
+            f"""
+            SELECT COALESCE(category, 'Прочее'),
+                   NULLIF(TRIM(COALESCE(comment,'')), ''),
+                   COALESCE(currency, %s),
+                   COALESCE(SUM(amount),0),
+                   COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type='Расходы'
+             GROUP BY COALESCE(category, 'Прочее'),
+                      NULLIF(TRIM(COALESCE(comment,'')), ''),
+                      COALESCE(currency, %s)
+            """,
+            (get_user_currency(req.user_id), *tx.params, get_user_currency(req.user_id)),
+        )
+
+    def _home_insights(
         self,
         req: MiniAppRequest,
         tx: TransactionFilters,
         totals: dict[str, dict[str, Decimal | int]],
-    ) -> dict:
-        if not totals:
-            return {"kind": "fallback", "tone": "neutral", "title": "Данных пока мало", "text": "Добавьте операции, и здесь появится сравнение периода."}
-        if len(totals) > 1:
-            return {"kind": "currency_mix", "tone": "neutral", "title": "Несколько валют", "text": "Сравнение не складывает разные валюты без конвертации."}
-        currency = next(iter(totals))
+        focus_items: list[dict],
+    ) -> list[dict]:
+        if not totals or tx.all_scope or tx.operation_type == "income":
+            return []
+        preferred_currency = str(get_user_currency(req.user_id) or "").upper()
+        if preferred_currency in totals:
+            currency = preferred_currency
+        elif len(totals) == 1:
+            currency = next(iter(totals))
+        else:
+            return []
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
-        prev_params = dict(operation_type=tx.operation_type, category=tx.category or None)
-        prev_tx = self._transaction_filters(
-            req,
-            {**prev_params, "workspace_id": "all" if tx.all_scope else tx.workspace_ids[0], "period": "custom", "start_date": prev_start.isoformat(), "end_date": prev_end.isoformat()},
-        )
+        prev_tx = self._tx_for_period(req, tx, prev_start, prev_end, _prev_key)
         try:
-            rows = pg_fetchall(
-                f"""
-                SELECT type, COALESCE(SUM(amount),0)
-                  FROM public.operations
-                 WHERE {prev_tx.where_sql}
-                   AND COALESCE(currency, %s)=%s
-                 GROUP BY type
-                """,
-                (*prev_tx.params, get_user_currency(req.user_id), currency),
+            current_rows = self._insight_rows(req, tx)
+            previous_rows = self._insight_rows(req, prev_tx)
+            limits = [item for item in focus_items if item.get("kind") == "limit"]
+            workspace_row = next(
+                (item for item in self._workspace_rows(req.user_id) if item.get("workspace_id") == tx.workspace_ids[0]),
+                None,
+            )
+            snapshot = build_snapshot(
+                user_id=req.user_id,
+                workspace_id=tx.workspace_ids[0],
+                workspace_kind="personal" if tx.workspace_ids[0] is None else "workspace",
+                currency=currency,
+                period=PeriodRef(tx.period_key, tx.start, tx.end),
+                comparison_period=PeriodRef(_prev_key, prev_start, prev_end),
+                current_rows=current_rows,
+                previous_rows=previous_rows,
+                limits=limits,
+                can_write=bool(workspace_row and workspace_row.get("role") in WRITE_ROLES),
+            )
+            return insight_engine.generate(
+                snapshot,
+                today=user_local_date(req.user_id, tx.workspace_ids[0]),
             )
         except Exception as exc:
-            log.info("miniapp_home_insight_unavailable reason=%s", type(exc).__name__)
-            return {"kind": "fallback", "tone": "neutral", "title": "Сравнение недоступно", "text": "Период показан без автоматического вывода."}
-        previous = {"income": Decimal("0.00"), "expense": Decimal("0.00")}
-        for typ, total in rows:
-            if typ == "Доходы":
-                previous["income"] = to_decimal_money(total)
-            elif typ == "Расходы":
-                previous["expense"] = to_decimal_money(total)
-        current_expense = to_decimal_money(totals[currency].get("expense", 0))
-        previous_expense = previous["expense"]
-        if previous_expense <= 0:
-            return {"kind": "previous_empty", "tone": "neutral", "title": "Есть текущий период", "text": "Для сравнения нужен предыдущий период с расходами."}
-        delta = current_expense - previous_expense
-        pct = int((abs(delta) / previous_expense * Decimal("100")).to_integral_value()) if previous_expense else 0
-        if delta < 0:
-            return {"kind": "expense_down", "tone": "positive", "title": "Расходы ниже", "text": f"На {pct}% меньше, чем в прошлом сопоставимом периоде.", "currency": currency}
-        if delta > 0:
-            return {"kind": "expense_up", "tone": "warning", "title": "Расходы выше", "text": f"На {pct}% больше, чем в прошлом сопоставимом периоде.", "currency": currency}
-        return {"kind": "expense_flat", "tone": "neutral", "title": "Расходы без изменений", "text": "Период совпадает с прошлым по расходам.", "currency": currency}
+            log.info("miniapp_home_insights_unavailable reason=%s", type(exc).__name__)
+            return []
+
+    def _insight_workspace(self, req: MiniAppRequest, workspace_id: Any) -> int | None:
+        workspace_ids, all_scope = self._read_scope(req, workspace_id)
+        if all_scope or len(workspace_ids) != 1:
+            raise MiniAppError(400, "concrete_workspace_required", "Choose one workspace.")
+        return workspace_ids[0]
+
+    def insight_impression(self, req: MiniAppRequest, insight_id: str, body: dict[str, Any]) -> dict:
+        fingerprint = str(insight_id or "").strip().lower()
+        if len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
+            raise MiniAppError(400, "bad_insight_id", "Invalid insight.")
+        workspace_id = self._insight_workspace(req, body.get("workspace_id"))
+        state = insight_engine.impression(req.user_id, workspace_id, fingerprint)
+        if not state:
+            raise MiniAppError(404, "insight_not_found", "Insight was not found.")
+        self._track(
+            req,
+            "insight_impression",
+            workspace_id=workspace_id,
+            properties={"detector_type": state.detector_type, "surface": "home"},
+        )
+        return success({"recorded": True}, request_id=req.request_id)
+
+    def insight_feedback(self, req: MiniAppRequest, insight_id: str, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        fingerprint = str(insight_id or "").strip().lower()
+        feedback_type = str(body.get("feedback_type") or "").strip().lower()
+        if len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
+            raise MiniAppError(400, "bad_insight_id", "Invalid insight.")
+        if feedback_type not in {"useful", "not_useful"}:
+            raise MiniAppError(400, "bad_insight_feedback", "Invalid feedback.")
+        workspace_id = self._insight_workspace(req, body.get("workspace_id"))
+        state = insight_engine.feedback(req.user_id, workspace_id, fingerprint, feedback_type)
+        if not state:
+            raise MiniAppError(404, "insight_not_found", "Insight was not found.")
+        self._track(
+            req,
+            "insight_feedback",
+            workspace_id=workspace_id,
+            properties={"detector_type": state.detector_type, "feedback_type": feedback_type, "surface": "detail"},
+        )
+        return success({
+            "recorded": True,
+            "feedback_type": feedback_type,
+            "suppressed_until": state.suppression_until,
+        }, request_id=req.request_id)
 
     def operations(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
@@ -1500,7 +1570,7 @@ class MiniAppAPI:
 
     def analytics(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         tx = self._transaction_filters(req, params)
-        overview = self.overview(req, params)["data"]
+        overview = self.overview(req, {**params, "_skip_insights": True})["data"]
         available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
         requested_currency = str(params.get("currency") or "").strip().upper()
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
@@ -3556,6 +3626,8 @@ class MiniAppAPI:
             "mini_app_home_challenge_opened",
             "mini_app_home_focus_opened",
             "mini_app_home_insight_opened",
+            "insight_opened",
+            "insight_action_clicked",
             "mini_app_profile_section_opened",
             "mini_app_profile_setting_changed",
             "mini_app_challenge_carousel_changed",
@@ -3567,7 +3639,7 @@ class MiniAppAPI:
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total"}
+            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total"}
         }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)
