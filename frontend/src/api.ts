@@ -251,7 +251,7 @@ export const api = {
     apiFetch<{ recorded: boolean }>(`/miniapp/api/insights/${encodeURIComponent(id)}/impression`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   insightFeedback: (id: string, workspaceId: number | 'all' | null, feedbackType: 'useful' | 'not_useful') =>
     apiFetch<{ recorded: boolean; feedback_type: 'useful' | 'not_useful'; suppressed_until?: string | null }>(`/miniapp/api/insights/${encodeURIComponent(id)}/feedback`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, feedback_type: feedbackType }) }),
-  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; merchant_key?: string; category_key?: string }, offset = 0, search = '') =>
+  operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; merchant_key?: string; category_key?: string; scope_category?: string }, offset = 0, search = '') =>
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
   categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),
@@ -272,7 +272,7 @@ export const api = {
   updateOperation: (id: number, payload: Partial<OperationPayload>) =>
     apiFetch<{ operation: Operation }>(`/miniapp/api/operations/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteOperation: (id: number) => apiFetch<{ deleted: boolean; operation_id: number }>(`/miniapp/api/operations/${id}`, { method: 'DELETE', body: '{}' }),
-  analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string; analytics_search?: string; detail_kind?: string; detail_value?: string; detail_currency?: string; detail_operation_type?: string }) =>
+  analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string; analytics_search?: string; detail_kind?: string; detail_value?: string; detail_currency?: string; detail_operation_type?: string; detail_category_key?: string }) =>
     apiFetch<AnalyticsResponse>(
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
     ),

@@ -478,9 +478,10 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'home') {
       overview = await api.overview(state.workspaceId, filters);
       for (const insight of overview.insights || []) {
-        if (impressedInsightIds.has(insight.id)) continue;
-        impressedInsightIds.add(insight.id);
-        void api.insightImpression(insight.id, state.workspaceId).catch(() => impressedInsightIds.delete(insight.id));
+        const impressionKey = `${state.workspaceId ?? 'personal'}:${insight.id}`;
+        if (impressedInsightIds.has(impressionKey)) continue;
+        impressedInsightIds.add(impressionKey);
+        void api.insightImpression(insight.id, state.workspaceId).catch(() => impressedInsightIds.delete(impressionKey));
       }
     }
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
@@ -497,7 +498,8 @@ async function loadScreen(): Promise<void> {
         detail_kind: analyticsFilters.detailKind,
         detail_value: analyticsFilters.detailValue,
         detail_currency: analyticsFilters.detailCurrency,
-        detail_operation_type: analyticsFilters.detailOperationType
+        detail_operation_type: analyticsFilters.detailOperationType,
+        detail_category_key: analyticsFilters.detailCategoryKey
       });
       const fallbackCurrency = response.available_currencies.includes(requestedCurrency || '') ? requestedCurrency : response.available_currencies[0];
       const shouldRetryCurrency = Boolean(fallbackCurrency) && (requestedCurrency !== fallbackCurrency) && (Boolean(requestedCurrency) || response.available_currencies.length > 1);
@@ -509,6 +511,7 @@ async function loadScreen(): Promise<void> {
           detailValue: requestedCurrency === fallbackCurrency ? analyticsFilters.detailValue : undefined,
           detailCurrency: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCurrency : undefined,
           detailOperationType: requestedCurrency === fallbackCurrency ? analyticsFilters.detailOperationType : undefined,
+          detailCategoryKey: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCategoryKey : undefined,
         };
       }
       if (shouldRetryCurrency) {
@@ -523,7 +526,8 @@ async function loadScreen(): Promise<void> {
           detail_kind: undefined,
           detail_value: undefined,
           detail_currency: undefined,
-          detail_operation_type: undefined
+          detail_operation_type: undefined,
+          detail_category_key: undefined
         });
       }
       overview = response.overview;
@@ -561,7 +565,7 @@ function applyInsightScope(params: Record<string, string | number | null>): void
     start_date: period === 'custom' ? String(params.start_date || '') : undefined,
     end_date: period === 'custom' ? String(params.end_date || '') : undefined,
     operation_type: params.operation_type === 'income' ? 'income' : 'expense',
-    category: 'all',
+    category: params.category && params.category !== 'all' ? String(params.category) : 'all',
   };
   state.period = state.globalFilters;
 }
@@ -576,18 +580,15 @@ async function openInsightAction(type: InsightActionType, params: Record<string,
       currency: String(params.currency || ''),
       merchant_key: params.merchant_key ? String(params.merchant_key) : undefined,
       category_key: params.category_key ? String(params.category_key) : undefined,
+      scope_category: params.scope_category ? String(params.scope_category) : undefined,
     };
     state.tab = 'operations';
     await loadScreen();
     return;
   }
   if (type === 'OPEN_ANALYTICS' || type === 'OPEN_CATEGORY' || type === 'OPEN_MERCHANT') {
-    if (type === 'OPEN_MERCHANT' && params.category && params.category !== 'all') {
-      state.globalFilters.category = String(params.category);
-      state.period = state.globalFilters;
-    }
     const detailKind = type === 'OPEN_CATEGORY' ? 'category' : type === 'OPEN_MERCHANT' ? 'merchant' : undefined;
-    const detailValue = detailKind === 'category' ? (params.category || params.category_key) : detailKind === 'merchant' ? params.merchant_key : undefined;
+    const detailValue = detailKind === 'category' ? (params.target_category || params.category_key) : detailKind === 'merchant' ? params.merchant_key : undefined;
     state.analyticsFilters = {
       ...(state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }),
       categoryType: 'expense',
@@ -597,6 +598,7 @@ async function openInsightAction(type: InsightActionType, params: Record<string,
       detailValue: detailValue ? String(detailValue) : undefined,
       detailCurrency: String(params.currency || ''),
       detailOperationType: 'expense',
+      detailCategoryKey: detailKind === 'merchant' && params.category_key ? String(params.category_key) : undefined,
     };
     state.tab = 'analytics';
     await loadScreen();
@@ -612,7 +614,9 @@ async function openInsightAction(type: InsightActionType, params: Record<string,
   } else {
     selectedLimit = null;
     state.limitCreateScope = 'category';
-    state.insightLimitCategory = params.category && params.category !== 'all' ? String(params.category) : undefined;
+    state.insightLimitCategory = params.target_category
+      ? String(params.target_category)
+      : params.category && params.category !== 'all' ? String(params.category) : undefined;
     state.limitCreateIdempotencyKey = requestId();
     state.sheet = 'limit-create';
   }
@@ -975,6 +979,7 @@ function wireEvents(): void {
     state.analyticsFilters.search = (event.currentTarget as HTMLInputElement).value.trim();
     state.analyticsFilters.detailKind = undefined;
     state.analyticsFilters.detailValue = undefined;
+    state.analyticsFilters.detailCategoryKey = undefined;
     hapticSelection();
     await api.track('mini_app_analytics_search_used', { has_query: String(Boolean(state.analyticsFilters.search)), source: 'mini_app' });
     await loadScreen();
@@ -995,6 +1000,7 @@ function wireEvents(): void {
       state.analyticsFilters.detailValue = button.dataset.value || '';
       state.analyticsFilters.detailCurrency = button.dataset.currency || state.analyticsFilters.analyticsCurrency;
       state.analyticsFilters.detailOperationType = state.globalFilters.operation_type === 'income' ? 'income' : state.globalFilters.operation_type === 'expense' ? 'expense' : state.analyticsFilters.categoryType;
+      state.analyticsFilters.detailCategoryKey = undefined;
       hapticSelection();
       await api.track('mini_app_analytics_drilldown_opened', { kind: state.analyticsFilters.detailKind, source: 'mini_app' });
       await loadScreen();
@@ -1006,6 +1012,7 @@ function wireEvents(): void {
     state.analyticsFilters.detailValue = undefined;
     state.analyticsFilters.detailCurrency = undefined;
     state.analyticsFilters.detailOperationType = undefined;
+    state.analyticsFilters.detailCategoryKey = undefined;
     hapticSelection();
     await loadScreen();
   });
@@ -1018,13 +1025,14 @@ function wireEvents(): void {
       start_date: String(scope.start_date || analytics?.period.start_date || ''),
       end_date: String(scope.end_date || analytics?.period.end_date || ''),
       operation_type: detail.operation_type,
-      category: 'all',
+      category: scope.scope_category ? String(scope.scope_category) : 'all',
     });
     state.search = '';
     state.operationScope = {
       currency: String(scope.currency || detail.currency || ''),
       merchant_key: detail.kind === 'merchant' ? String(scope.merchant_key || detail.merchant_key || '') : undefined,
-      category_key: detail.kind === 'category' ? String(detail.category_key || '') : undefined,
+      category_key: scope.category_key ? String(scope.category_key) : detail.kind === 'category' ? String(detail.category_key || '') : undefined,
+      scope_category: scope.scope_category ? String(scope.scope_category) : undefined,
     };
     state.tab = 'operations';
     state.sheet = null;

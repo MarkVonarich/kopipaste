@@ -84,11 +84,11 @@ function analyticsData(currencies: string[], selectedCurrency: string | null = n
   };
 }
 
-function installAppMocks(homeInsights: any[] = []) {
+function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ workspace_id: 10, name: 'Family', kind: 'group', role: 'member', active: true, read_only: false }]) {
   const api = {
     bootstrap: vi.fn(async () => ({
       user: { currency: 'RUB', timezone: 'Europe/Moscow' },
-      workspaces: [{ workspace_id: 10, name: 'Family', kind: 'group', role: 'member', active: true, read_only: false }],
+      workspaces,
       theme: 'telegram',
       notifications: {},
       version: 'test'
@@ -140,7 +140,7 @@ function installAppMocks(homeInsights: any[] = []) {
   return api;
 }
 
-function homeInsight(actions: any[] = [{ type: 'OPEN_MERCHANT', label: 'Посмотреть Лавку', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'Продукты', category_key: 'продукты', merchant_key: 'яндекс лавка', currency: 'RUB' } }]) {
+function homeInsight(actions: any[] = [{ type: 'OPEN_MERCHANT', label: 'Посмотреть Лавку', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'all', scope_category: null, target_category: 'Продукты', category_key: 'продукты', merchant_key: 'яндекс лавка', currency: 'RUB' } }]) {
   return {
     id: 'a'.repeat(64),
     type: 'category_contribution',
@@ -254,12 +254,81 @@ describe('main plan handlers', () => {
       detail_kind: 'merchant',
       detail_value: 'яндекс лавка',
       detail_currency: 'RUB',
-      category: 'Продукты',
+      detail_category_key: 'продукты',
+      category: 'all',
+    }));
+  });
+
+  it('preserves a selected Home category through merchant Analytics drilldown', async () => {
+    const action = { type: 'OPEN_MERCHANT', label: 'Посмотреть Bistro', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'Рестораны', scope_category: 'Рестораны', target_category: 'Рестораны', category_key: 'рестораны', merchant_key: 'bistro', currency: 'RUB' } };
+    const api = installAppMocks([homeInsight([action])]);
+    api.analytics.mockImplementation(async () => {
+      const response = analyticsData(['RUB'], 'RUB');
+      response.selected_detail = {
+        kind: 'merchant',
+        title: 'Bistro',
+        currency: 'RUB',
+        operation_type: 'expense',
+        merchant_key: 'bistro',
+        category_key: 'рестораны',
+        operation_count: 8,
+        operations: [],
+        operation_scope: {
+          period: 'current_month',
+          start_date: '2026-08-01',
+          end_date: '2026-08-10',
+          operation_type: 'expense',
+          category: 'all',
+          scope_category: 'Рестораны',
+          category_key: 'рестораны',
+          merchant_key: 'bistro',
+          currency: 'RUB',
+        },
+      };
+      return response;
+    });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="insight-action"]')?.click();
+    await flush(8);
+
+    expect(api.analytics).toHaveBeenCalledWith(10, expect.objectContaining({
+      category: 'Рестораны',
+      detail_kind: 'merchant',
+      detail_value: 'bistro',
+      detail_category_key: 'рестораны',
+    }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="analytics-open-operations"]')?.click();
+    await flush(8);
+    expect(api.operations).toHaveBeenCalledWith(10, expect.objectContaining({
+      category: 'Рестораны',
+      scope_category: 'Рестораны',
+      category_key: 'рестораны',
+      merchant_key: 'bistro',
+    }), 0, '');
+  });
+
+  it('uses canonical category key instead of an exact display variant for merchant detail', async () => {
+    const action = { type: 'OPEN_MERCHANT', label: 'Посмотреть магазин', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'all', scope_category: null, target_category: 'Прочее', category_key: 'прочее', merchant_key: 'shop', currency: 'RUB' } };
+    const api = installAppMocks([homeInsight([action])]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="insight-action"]')?.click();
+    await flush(8);
+
+    expect(api.analytics).toHaveBeenCalledWith(10, expect.objectContaining({
+      category: 'all',
+      detail_category_key: 'прочее',
     }));
   });
 
   it('opens the existing category Analytics detail with preserved scope', async () => {
-    const categoryAction = { type: 'OPEN_CATEGORY', label: 'Посмотреть категорию', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'Продукты', category_key: 'продукты', currency: 'RUB' } };
+    const categoryAction = { type: 'OPEN_CATEGORY', label: 'Посмотреть категорию', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'all', scope_category: null, target_category: 'Продукты', category_key: 'продукты', currency: 'RUB' } };
     const api = installAppMocks([homeInsight([categoryAction])]);
     await import('../src/main');
     await flush();
@@ -303,7 +372,7 @@ describe('main plan handlers', () => {
 
     vi.resetModules();
     document.body.innerHTML = '<div id="app">Загрузка КопиPaste…</div>';
-    const createLimitAction = { type: 'CREATE_LIMIT', label: 'Установить лимит', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'Food', category_key: 'food', currency: 'RUB' } };
+    const createLimitAction = { type: 'CREATE_LIMIT', label: 'Установить лимит', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'all', target_category: 'Food', category_key: 'food', currency: 'RUB' } };
     installAppMocks([homeInsight([createLimitAction])]);
     await import('../src/main');
     await flush();
@@ -314,6 +383,28 @@ describe('main plan handlers', () => {
 
     expect(document.querySelector('form[data-action="create-limit"]')).not.toBeNull();
     expect(document.querySelector<HTMLSelectElement>('select[name="category"]')?.value).toBe('Food');
+  });
+
+  it('records identical insight fingerprints once per workspace', async () => {
+    const api = installAppMocks(
+      [homeInsight()],
+      [
+        { workspace_id: 10, name: 'Family', kind: 'group', role: 'member', active: true, read_only: false },
+        { workspace_id: 11, name: 'Work', kind: 'group', role: 'member', active: false, read_only: false },
+      ],
+    );
+    await import('../src/main');
+    await flush();
+    expect(api.insightImpression).toHaveBeenCalledWith('a'.repeat(64), 10);
+
+    const workspace = document.querySelector<HTMLSelectElement>('[data-action="workspace"]');
+    if (!workspace) throw new Error('workspace filter missing');
+    workspace.value = '11';
+    workspace.dispatchEvent(new Event('change'));
+    await flush(8);
+
+    expect(api.insightImpression).toHaveBeenCalledWith('a'.repeat(64), 11);
+    expect(api.insightImpression).toHaveBeenCalledTimes(2);
   });
 
   it('opens create limit forms with the scope from the clicked plus button', async () => {

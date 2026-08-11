@@ -395,7 +395,7 @@ export type AppState = {
   error?: string;
   detailOperationId?: number;
   search: string;
-  operationScope?: { currency?: string; merchant?: string; merchant_key?: string; category_key?: string };
+  operationScope?: { currency?: string; merchant?: string; merchant_key?: string; category_key?: string; scope_category?: string };
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;
@@ -429,6 +429,7 @@ export type AppState = {
     detailValue?: string;
     detailCurrency?: string;
     detailOperationType?: 'expense' | 'income';
+    detailCategoryKey?: string;
   };
   selectedGoalId?: number;
   selectedLimitId?: string;

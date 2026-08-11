@@ -7,6 +7,7 @@ from decimal import Decimal
 from services.insights import (
     InsightEngine,
     InsightState,
+    PostgresInsightStateStore,
     PeriodRef,
     assign_fingerprint,
     build_snapshot,
@@ -30,6 +31,7 @@ PREVIOUS = PeriodRef("previous_month_to_date", date(2026, 7, 1), date(2026, 7, 1
 class MemoryStore:
     def __init__(self) -> None:
         self.values: dict[tuple[int, int | None, str], InsightState] = {}
+        self.now = NOW
 
     def load(self, user_id: int, workspace_id: int | None) -> list[InsightState]:
         return [state for (owner, workspace, _fingerprint), state in self.values.items() if owner == user_id and workspace == workspace_id]
@@ -44,7 +46,10 @@ class MemoryStore:
         state = self.values.get(key)
         if not state:
             return None
-        updated = replace(state, show_count=state.show_count + 1, last_shown_at=NOW)
+        if not state.first_shown_at or state.first_shown_at <= self.now - timedelta(hours=24):
+            updated = replace(state, show_count=1, first_shown_at=self.now, last_shown_at=self.now)
+        else:
+            updated = replace(state, show_count=state.show_count + 1, last_shown_at=self.now)
         self.values[key] = updated
         return updated
 
@@ -70,6 +75,7 @@ def snapshot(
     user_id: int = 42,
     workspace_id: int = 10,
     limits=(),
+    scope_category: str | None = None,
     can_write: bool = True,
 ):
     return build_snapshot(
@@ -82,6 +88,7 @@ def snapshot(
         current_rows=current_rows,
         previous_rows=previous_rows,
         limits=limits,
+        scope_category=scope_category,
         can_write=can_write,
     )
 
@@ -106,6 +113,48 @@ def test_meaningful_overall_spending_change_detected():
     assert len(items) == 1
     assert items[0].absolute_delta == Decimal("4100.00")
     assert items[0].relative_delta == Decimal("0.2867")
+
+
+def test_selected_category_scope_uses_scoped_wording_and_actions():
+    value = snapshot(
+        [("Рестораны", "Bistro", "RUB", Decimal("8400"), 8)],
+        [("Рестораны", "Bistro", "RUB", Decimal("4400"), 5)],
+        scope_category="Рестораны",
+    )
+
+    assert detect_category_contribution(value) == []
+    result = InsightEngine(MemoryStore()).generate(value, today=date(2026, 8, 10), now=NOW)
+
+    assert len(result) == 1
+    assert result[0]["title"] == "Расходы на Рестораны выросли на 4 000 ₽"
+    assert {item["kind"] for item in result[0]["evidence"]} >= {"amount_comparison", "merchant_contribution"}
+    merchant_action = next(action for action in result[0]["actions"] if action["type"] == "OPEN_MERCHANT")
+    assert merchant_action["params"]["category"] == "Рестораны"
+    assert merchant_action["params"]["scope_category"] == "Рестораны"
+    assert merchant_action["params"]["category_key"] == "рестораны"
+
+
+def test_merchant_action_keeps_canonical_category_key_without_exact_display_scope():
+    value = snapshot(
+        [
+            ("Прочее", "Shop", "RUB", Decimal("3000"), 3),
+            (" прочее ", "Shop", "RUB", Decimal("3000"), 3),
+            ("ПРОЧЕЕ", "Other", "RUB", Decimal("2400"), 3),
+        ],
+        [
+            ("Прочее", "Shop", "RUB", Decimal("1000"), 3),
+            (" прочее ", "Shop", "RUB", Decimal("1000"), 3),
+            ("ПРОЧЕЕ", "Other", "RUB", Decimal("1400"), 3),
+        ],
+    )
+
+    grouped = group_candidates(detect_candidates(value, today=date(2026, 8, 10)))
+    merchant_action = next(action for action in grouped[0].actions if action.type == "OPEN_MERCHANT")
+
+    assert merchant_action.params["category"] == "all"
+    assert merchant_action.params["scope_category"] is None
+    assert merchant_action.params["category_key"] == "прочее"
+    assert merchant_action.params["target_category"] in {"Прочее", "прочее", "ПРОЧЕЕ"}
 
 
 def test_tiny_high_percentage_change_is_suppressed():
@@ -220,7 +269,55 @@ def test_limit_pace_uses_elapsed_period_math_and_active_control():
     assert limit.detector_type == "limit_pace"
     assert limit.content_data["used_percent"] == 82
     assert limit.content_data["period_progress"] == 32
+    assert limit.content_data["pace_excess"] == Decimal("5000.00")
+    assert limit.absolute_delta == Decimal("5000.00")
+    assert limit.relative_delta == Decimal("0.5")
     assert limit.active_control is True
+
+
+def test_limit_pace_ranks_more_used_and_larger_monetary_excess_higher():
+    value = snapshot([], [], limits=[
+        {"id": "limit-70", "title": "70", "amount": Decimal("10000"), "spent": Decimal("7000"), "currency": "RUB", "period": "month", "percent": 70},
+        {"id": "limit-97", "title": "97", "amount": Decimal("10000"), "spent": Decimal("9700"), "currency": "RUB", "period": "month", "percent": 97},
+    ])
+    candidates = detect_limit_pace(value, today=date(2026, 8, 10))
+    for item in candidates:
+        assign_fingerprint(item, generated_at=NOW)
+
+    by_id = {item.entity_key: item for item in candidates}
+    assert by_id["limit-97"].impact > by_id["limit-70"].impact
+    assert rank_candidates(candidates, now=NOW)[0].entity_key == "limit-97"
+
+    same_severity = snapshot([], [], limits=[
+        {"id": "small", "title": "Small", "amount": Decimal("1000"), "spent": Decimal("900"), "currency": "RUB", "period": "month", "percent": 90},
+        {"id": "large", "title": "Large", "amount": Decimal("2000"), "spent": Decimal("1800"), "currency": "RUB", "period": "month", "percent": 90},
+    ])
+    candidates = detect_limit_pace(same_severity, today=date(2026, 8, 10))
+    for item in candidates:
+        assign_fingerprint(item, generated_at=NOW)
+    assert rank_candidates(candidates, now=NOW)[0].entity_key == "large"
+
+
+def test_category_growth_uses_existing_limit_or_create_action_by_canonical_key():
+    existing = acceptance_snapshot(limits=[{
+        "id": "category:month:OTHER",
+        "title": "Продукты",
+        "category": " ПРОДУКТЫ ",
+        "amount": Decimal("46000"),
+        "spent": Decimal("18400"),
+        "currency": "RUB",
+        "period": "month",
+        "percent": 40,
+    }])
+    with_limit = detect_category_contribution(existing)[0]
+    without_limit = detect_category_contribution(acceptance_snapshot())[0]
+    read_only = detect_category_contribution(replace(existing, can_write=False))[0]
+
+    assert [action.type for action in with_limit.actions] == ["OPEN_CATEGORY", "OPEN_OPERATIONS", "OPEN_LIMIT"]
+    assert with_limit.actions[-1].params["limit_id"] == "category:month:OTHER"
+    assert with_limit.active_control is True
+    assert [action.type for action in without_limit.actions][-1] == "CREATE_LIMIT"
+    assert [action.type for action in read_only.actions] == ["OPEN_CATEGORY", "OPEN_OPERATIONS"]
 
 
 def test_mixed_currencies_are_filtered_not_combined():
@@ -317,6 +414,31 @@ def test_general_limit_risk_absorbs_related_growth_narrative():
     assert {item["kind"] for item in grouped[0].evidence} >= {"limit_pace", "amount_comparison", "merchant_contribution"}
 
 
+def test_selected_category_limit_keeps_one_grouped_story():
+    value = snapshot(
+        [("Рестораны", "Bistro", "RUB", Decimal("9700"), 12)],
+        [("Рестораны", "Bistro", "RUB", Decimal("5400"), 7)],
+        scope_category="Рестораны",
+        limits=[{
+            "id": "category:month:restaurants",
+            "title": "Рестораны",
+            "category": "РЕСТОРАНЫ",
+            "amount": Decimal("10000"),
+            "spent": Decimal("9700"),
+            "currency": "RUB",
+            "period": "month",
+            "percent": 97,
+        }],
+    )
+
+    grouped = group_candidates(detect_candidates(value, today=date(2026, 8, 10)))
+
+    assert [item.detector_type for item in grouped] == ["limit_pace"]
+    assert {item["kind"] for item in grouped[0].evidence} >= {
+        "limit_pace", "amount_comparison", "merchant_contribution", "count_comparison",
+    }
+
+
 def test_final_list_is_capped_at_three():
     base = detect_spending_change(snapshot(
         [("A", "A", "RUB", Decimal("27000"), 10)],
@@ -334,11 +456,77 @@ def test_final_list_is_capped_at_three():
 def test_repeat_penalty_and_hard_repeat_window():
     candidate = detect_spending_change(acceptance_snapshot())[0]
     assign_fingerprint(candidate, generated_at=NOW)
-    once = InsightState(candidate.fingerprint, candidate.detector_type, show_count=1, last_shown_at=NOW)
-    repeated = InsightState(candidate.fingerprint, candidate.detector_type, show_count=3, last_shown_at=NOW)
+    once = InsightState(candidate.fingerprint, candidate.detector_type, show_count=1, first_shown_at=NOW, last_shown_at=NOW)
+    repeated = InsightState(candidate.fingerprint, candidate.detector_type, show_count=3, first_shown_at=NOW, last_shown_at=NOW)
 
     assert rank_candidates([candidate], [once], now=NOW)[0].score < rank_candidates([candidate], now=NOW)[0].score
     assert rank_candidates([candidate], [repeated], now=NOW) == []
+
+
+def test_repeat_window_resets_count_and_penalty_after_24_hours():
+    store = MemoryStore()
+    engine = InsightEngine(store)
+    first = engine.generate(acceptance_snapshot(), today=date(2026, 8, 10), now=NOW)
+    fingerprint = first[0]["id"]
+    key = (42, 10, fingerprint)
+    store.values[key] = replace(
+        store.values[key],
+        show_count=2,
+        first_shown_at=NOW - timedelta(hours=25),
+        last_shown_at=NOW - timedelta(hours=23),
+    )
+
+    candidate = group_candidates(detect_candidates(acceptance_snapshot(), today=date(2026, 8, 10)))[0]
+    assign_fingerprint(candidate, generated_at=NOW)
+    fresh_score = rank_candidates([candidate], now=NOW)[0].score
+    reset_score = rank_candidates([candidate], [store.values[key]], now=NOW)[0].score
+    assert reset_score == fresh_score
+
+    store.now = NOW
+    state = engine.impression(42, 10, fingerprint)
+    assert state and state.show_count == 1
+    assert state.first_shown_at == NOW
+
+
+def test_postgres_impression_update_resets_the_existing_24_hour_window(monkeypatch):
+    captured = {}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchone(self):
+            return ("a" * 64, "spending_change", 1, NOW, NOW, None, None)
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            captured["committed"] = True
+
+        def rollback(self):
+            raise AssertionError("unexpected rollback")
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr("services.insights.get_conn", lambda: Connection())
+
+    state = PostgresInsightStateStore().record_impression(42, 10, "a" * 64)
+
+    assert state and state.show_count == 1 and state.first_shown_at == NOW
+    assert "first_shown_at <= now() - interval '24 hours'" in captured["sql"]
+    assert "THEN 1" in captured["sql"]
+    assert captured["params"] == (42, 10, "a" * 64)
+    assert captured["committed"] is True and captured["closed"] is True
 
 
 def test_negative_feedback_suppresses_only_same_detector_in_same_scope():

@@ -974,6 +974,26 @@ def test_global_category_focus_relevance_does_not_recompute_limit_spent(monkeypa
     assert calls[0]["period"] == "current_week"
 
 
+def test_global_category_focus_matches_existing_limit_by_canonical_key(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:food",
+        "title": "Food",
+        "category": " FOOD ",
+        "percent": 40,
+        "spent": "4000.00",
+        "amount": "10000.00",
+        "currency": "RUB",
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10, "category": "Food"}, _focus_tx("Food"))
+
+    assert item["id"] == "category:month:food"
+
+
 def test_home_insights_select_default_currency_without_combining(monkeypatch):
     api = _api(monkeypatch)
     tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "all", None, "", ())
@@ -1000,6 +1020,32 @@ def test_home_insights_select_default_currency_without_combining(monkeypatch):
 
     assert data == []
     assert captured["snapshot"].currency == "RUB"
+
+
+def test_home_insights_preserve_selected_category_scope(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters(
+        [10], False, date(2026, 8, 1), date(2026, 8, 5),
+        "current_month", "expense", "Рестораны", "category=%s", ("Рестораны",),
+    )
+    captured = {}
+    monkeypatch.setattr(api, "_tx_for_period", lambda *_args: tx)
+    monkeypatch.setattr(api, "_insight_rows", lambda *_args: [("Рестораны", "Bistro", "RUB", Decimal("8400"), 8)])
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [{"workspace_id": 10, "role": "member"}])
+    monkeypatch.setattr(
+        "miniapp.api.insight_engine.generate",
+        lambda snapshot, **_kwargs: captured.setdefault("snapshot", snapshot) and [],
+    )
+
+    api._home_insights(
+        api.request(42),
+        tx,
+        {"RUB": {"income": Decimal("0.00"), "expense": Decimal("8400.00"), "count": 8}},
+        [],
+    )
+
+    assert captured["snapshot"].scope_category == "Рестораны"
+    assert captured["snapshot"].scope_category_key == "рестораны"
 
 
 def test_insight_feedback_requires_authorized_concrete_workspace(monkeypatch):

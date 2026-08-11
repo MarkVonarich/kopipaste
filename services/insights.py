@@ -133,6 +133,8 @@ class InsightSnapshot:
     categories: tuple[CategoryAggregate, ...]
     merchants: tuple[MerchantAggregate, ...]
     limits: tuple[LimitAggregate, ...] = ()
+    scope_category: str | None = None
+    scope_category_key: str | None = None
     operation_type: str = "expense"
     can_write: bool = True
 
@@ -181,6 +183,7 @@ class InsightState:
     fingerprint: str
     detector_type: str
     show_count: int = 0
+    first_shown_at: datetime | None = None
     last_shown_at: datetime | None = None
     feedback_type: str | None = None
     suppression_until: datetime | None = None
@@ -203,8 +206,8 @@ class PostgresInsightStateStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT fingerprint, detector_type, show_count, last_shown_at,
-                           feedback_type, suppression_until
+                    SELECT fingerprint, detector_type, show_count, first_shown_at,
+                           last_shown_at, feedback_type, suppression_until
                      FROM public.insight_states
                      WHERE user_id=%s
                        AND workspace_scope_key=COALESCE(%s::bigint, 0)
@@ -229,9 +232,10 @@ class PostgresInsightStateStore:
                 fingerprint=str(row[0]),
                 detector_type=str(row[1]),
                 show_count=int(row[2] or 0),
-                last_shown_at=row[3],
-                feedback_type=str(row[4]) if row[4] else None,
-                suppression_until=row[5],
+                first_shown_at=row[3],
+                last_shown_at=row[4],
+                feedback_type=str(row[5]) if row[5] else None,
+                suppression_until=row[6],
             )
             for row in rows
         ]
@@ -294,15 +298,26 @@ class PostgresInsightStateStore:
                     cur.execute(
                         """
                         UPDATE public.insight_states
-                           SET first_shown_at=COALESCE(first_shown_at, now()),
-                               last_shown_at=now(), show_count=show_count + 1,
+                           SET first_shown_at=CASE
+                                 WHEN first_shown_at IS NULL
+                                   OR first_shown_at <= now() - interval '24 hours'
+                                 THEN now()
+                                 ELSE first_shown_at
+                               END,
+                               last_shown_at=now(),
+                               show_count=CASE
+                                 WHEN first_shown_at IS NULL
+                                   OR first_shown_at <= now() - interval '24 hours'
+                                 THEN 1
+                                 ELSE show_count + 1
+                               END,
                                updated_at=now()
                          WHERE user_id=%s
                            AND workspace_scope_key=COALESCE(%s::bigint, 0)
                            AND fingerprint=%s
                            AND valid_until > now()
-                        RETURNING fingerprint, detector_type, show_count, last_shown_at,
-                                  feedback_type, suppression_until
+                        RETURNING fingerprint, detector_type, show_count, first_shown_at,
+                                  last_shown_at, feedback_type, suppression_until
                         """,
                         (int(user_id), workspace_id, fingerprint),
                     )
@@ -321,8 +336,8 @@ class PostgresInsightStateStore:
                            AND workspace_scope_key=COALESCE(%s::bigint, 0)
                            AND fingerprint=%s
                            AND valid_until > now()
-                        RETURNING fingerprint, detector_type, show_count, last_shown_at,
-                                  feedback_type, suppression_until
+                        RETURNING fingerprint, detector_type, show_count, first_shown_at,
+                                  last_shown_at, feedback_type, suppression_until
                         """,
                         (feedback_type, suppression, int(user_id), workspace_id, fingerprint),
                     )
@@ -342,9 +357,10 @@ class PostgresInsightStateStore:
             fingerprint=str(row[0]),
             detector_type=str(row[1]),
             show_count=int(row[2] or 0),
-            last_shown_at=row[3],
-            feedback_type=str(row[4]) if row[4] else None,
-            suppression_until=row[5],
+            first_shown_at=row[3],
+            last_shown_at=row[4],
+            feedback_type=str(row[5]) if row[5] else None,
+            suppression_until=row[6],
         )
 
 
@@ -365,7 +381,8 @@ def _scope_params(snapshot: InsightSnapshot) -> dict[str, str | int | None]:
         "start_date": snapshot.period.start.isoformat(),
         "end_date": snapshot.period.end.isoformat(),
         "operation_type": snapshot.operation_type,
-        "category": "all",
+        "category": snapshot.scope_category or "all",
+        "scope_category": snapshot.scope_category,
         "currency": snapshot.currency,
     }
 
@@ -373,7 +390,8 @@ def _scope_params(snapshot: InsightSnapshot) -> dict[str, str | int | None]:
 def _action(action_type: str, label: str, params: dict[str, str | int | None]) -> InsightAction:
     allowed = {
         "workspace_id", "period", "start_date", "end_date", "operation_type",
-        "category", "category_key", "merchant_key", "currency", "limit_id",
+        "category", "scope_category", "category_key", "target_category",
+        "merchant_key", "currency", "limit_id",
     }
     return InsightAction(action_type, label, {key: value for key, value in params.items() if key in allowed})
 
@@ -397,6 +415,7 @@ def _candidate(
     group_key: str,
     actionability: int,
     active_control: bool = False,
+    impact_amount: Decimal | None = None,
 ) -> InsightCandidate:
     threshold = minimum_absolute_delta(snapshot.currency)
     return InsightCandidate(
@@ -408,7 +427,7 @@ def _candidate(
         baseline_value=baseline_value,
         absolute_delta=absolute_delta,
         relative_delta=relative_delta,
-        impact=abs(absolute_delta) / max(threshold, Decimal("0.01")),
+        impact=abs(impact_amount if impact_amount is not None else absolute_delta) / max(threshold, Decimal("0.01")),
         confidence=confidence,
         severity=severity,
         title_key=title_key,
@@ -438,11 +457,13 @@ def detect_spending_change(snapshot: InsightSnapshot) -> list[InsightCandidate]:
     direction = "up" if delta > 0 else "down"
     severity = "high" if delta > 0 and relative >= Decimal("0.50") else "medium"
     scope = _scope_params(snapshot)
+    scope_category = snapshot.scope_category
+    scope_category_key = snapshot.scope_category_key
     return [_candidate(
         snapshot,
         detector_type="spending_change",
-        entity_type="scope",
-        entity_key="expenses",
+        entity_type="category" if scope_category_key else "scope",
+        entity_key=scope_category_key or "expenses",
         current_value=snapshot.current_total,
         baseline_value=snapshot.previous_total,
         absolute_delta=delta,
@@ -450,22 +471,59 @@ def detect_spending_change(snapshot: InsightSnapshot) -> list[InsightCandidate]:
         confidence="high",
         severity=severity,
         title_key=f"spending_{direction}",
-        content_data={"direction": direction},
+        content_data={
+            "direction": direction,
+            "scope_category": scope_category,
+            "scope_category_key": scope_category_key,
+        },
         evidence=[{
             "kind": "amount_comparison",
-            "label": "Расходы",
+            "label": scope_category or "Расходы",
             "current_amount": snapshot.current_total,
             "previous_amount": snapshot.previous_total,
             "delta_amount": delta,
             "currency": snapshot.currency,
         }],
         actions=[_action("OPEN_ANALYTICS", "Посмотреть аналитику", scope)],
-        group_key=f"spending:{snapshot.currency}",
+        group_key=(
+            f"category:{snapshot.currency}:{scope_category_key}"
+            if scope_category_key else f"spending:{snapshot.currency}"
+        ),
         actionability=6,
     )]
 
 
+def _relevant_limit_period(snapshot: InsightSnapshot) -> str | None:
+    return {
+        "current_week": "week",
+        "current_month": "month",
+    }.get(snapshot.period.key)
+
+
+def _matching_category_limit(snapshot: InsightSnapshot, category_key: str) -> LimitAggregate | None:
+    expected_period = _relevant_limit_period(snapshot)
+    if not expected_period:
+        return None
+    for limit in snapshot.limits:
+        if (
+            not limit.enabled
+            or not limit.category
+            or limit.currency != snapshot.currency
+            or limit.period != expected_period
+        ):
+            continue
+        try:
+            limit_category_key = normalized_category_key(limit.category)
+        except ValueError:
+            continue
+        if limit_category_key == category_key:
+            return limit
+    return None
+
+
 def detect_category_contribution(snapshot: InsightSnapshot) -> list[InsightCandidate]:
+    if snapshot.scope_category_key:
+        return []
     total_delta = snapshot.current_total - snapshot.previous_total
     if total_delta <= 0:
         return []
@@ -486,13 +544,21 @@ def detect_category_contribution(snapshot: InsightSnapshot) -> list[InsightCandi
             or contribution_share < MIN_CATEGORY_CONTRIBUTION_SHARE
         ):
             continue
-        params = {**scope, "category_key": category.key, "category": category.name}
+        params = {**scope, "category_key": category.key, "target_category": category.name}
         actions = [
             _action("OPEN_CATEGORY", "Посмотреть категорию", params),
             _action("OPEN_OPERATIONS", "Посмотреть операции", params),
         ]
+        matching_limit = _matching_category_limit(snapshot, category.key)
         if snapshot.can_write:
-            actions.append(_action("CREATE_LIMIT", "Установить лимит", params))
+            if matching_limit:
+                actions.append(_action(
+                    "OPEN_LIMIT",
+                    "Открыть лимит",
+                    {**params, "limit_id": matching_limit.identifier},
+                ))
+            else:
+                actions.append(_action("CREATE_LIMIT", "Установить лимит", params))
         candidates.append(_candidate(
             snapshot,
             detector_type="category_contribution",
@@ -520,7 +586,8 @@ def detect_category_contribution(snapshot: InsightSnapshot) -> list[InsightCandi
             }],
             actions=actions,
             group_key=f"category:{snapshot.currency}:{category.key}",
-            actionability=10,
+            actionability=12 if matching_limit else 10,
+            active_control=matching_limit is not None,
         ))
     return candidates
 
@@ -549,7 +616,7 @@ def detect_merchant_contribution(snapshot: InsightSnapshot) -> list[InsightCandi
         params = {
             **scope,
             "category_key": merchant.category_key,
-            "category": merchant.category_name,
+            "target_category": merchant.category_name,
             "merchant_key": merchant.key,
         }
         candidates.append(_candidate(
@@ -610,7 +677,7 @@ def detect_frequency_change(snapshot: InsightSnapshot) -> list[InsightCandidate]
         params = {
             **scope,
             "category_key": merchant.category_key,
-            "category": merchant.category_name,
+            "target_category": merchant.category_name,
             "merchant_key": merchant.key,
         }
         candidates.append(_candidate(
@@ -674,7 +741,7 @@ def detect_average_check_change(snapshot: InsightSnapshot) -> list[InsightCandid
         params = {
             **scope,
             "category_key": merchant.category_key,
-            "category": merchant.category_name,
+            "target_category": merchant.category_name,
             "merchant_key": merchant.key,
         }
         candidates.append(_candidate(
@@ -733,6 +800,14 @@ def detect_limit_pace(snapshot: InsightSnapshot, *, today: date) -> list[Insight
     for limit in snapshot.limits:
         if not limit.enabled or limit.currency != snapshot.currency or limit.period != expected_period or limit.amount <= 0:
             continue
+        if snapshot.scope_category_key:
+            if not limit.category:
+                continue
+            try:
+                if normalized_category_key(limit.category) != snapshot.scope_category_key:
+                    continue
+            except ValueError:
+                continue
         period_progress = _period_progress(today, limit.period)
         pace_lead = limit.used_percent - period_progress
         if (
@@ -742,10 +817,12 @@ def detect_limit_pace(snapshot: InsightSnapshot, *, today: date) -> list[Insight
         ):
             continue
         category_key = normalized_category_key(limit.category) if limit.category else "all_expenses"
+        expected_spend = limit.amount * Decimal(period_progress) / Decimal("100")
+        pace_excess = max(limit.spent - expected_spend, Decimal("0"))
         params = {
             **scope,
-            "category": limit.category or "all",
             "category_key": category_key if limit.category else None,
+            "target_category": limit.category,
             "limit_id": limit.identifier,
         }
         candidates.append(_candidate(
@@ -755,8 +832,8 @@ def detect_limit_pace(snapshot: InsightSnapshot, *, today: date) -> list[Insight
             entity_key=limit.identifier,
             current_value=limit.spent,
             baseline_value=limit.amount,
-            absolute_delta=limit.spent - limit.amount,
-            relative_delta=Decimal(limit.used_percent) / Decimal("100"),
+            absolute_delta=pace_excess,
+            relative_delta=Decimal(pace_lead) / Decimal("100"),
             confidence="high",
             severity="critical" if limit.used_percent >= 100 else "high" if limit.used_percent >= 90 else "medium",
             title_key="limit_pace",
@@ -766,6 +843,7 @@ def detect_limit_pace(snapshot: InsightSnapshot, *, today: date) -> list[Insight
                 "category_key": category_key,
                 "used_percent": limit.used_percent,
                 "period_progress": period_progress,
+                "pace_excess": pace_excess,
             },
             evidence=[{
                 "kind": "limit_pace",
@@ -783,6 +861,7 @@ def detect_limit_pace(snapshot: InsightSnapshot, *, today: date) -> list[Insight
             group_key=f"limit:{snapshot.currency}:{category_key}",
             actionability=12,
             active_control=True,
+            impact_amount=pace_excess,
         ))
     return candidates
 
@@ -852,6 +931,38 @@ def group_candidates(candidates: Iterable[InsightCandidate]) -> list[InsightCand
                 _merge_evidence(category, overall)
                 suppressed.add(id(overall))
 
+    for overall in overall_candidates:
+        scope_category_key = overall.content_data.get("scope_category_key")
+        if not scope_category_key or id(overall) in suppressed:
+            continue
+        related_merchants = [
+            merchant for merchant in merchant_candidates
+            if id(merchant) not in suppressed
+            and merchant.currency == overall.currency
+            and merchant.content_data.get("category_key") == scope_category_key
+        ]
+        if not related_merchants:
+            continue
+        merchant = max(related_merchants, key=lambda item: (item.absolute_delta, item.entity_key))
+        _merge_evidence(overall, merchant)
+        merchant_action = next((action for action in merchant.actions if action.type == "OPEN_MERCHANT"), None)
+        if merchant_action:
+            overall.actions = [merchant_action] + [
+                action for action in overall.actions
+                if action.type != "OPEN_MERCHANT"
+            ][:2]
+        overall.content_data["merchant"] = merchant.content_data.get("merchant")
+        overall.content_data["merchant_key"] = merchant.entity_key
+        suppressed.add(id(merchant))
+        for behavior in values:
+            if (
+                behavior.detector_type in {"merchant_frequency", "average_check_change"}
+                and behavior.entity_key == merchant.entity_key
+                and behavior.currency == merchant.currency
+            ):
+                _merge_evidence(overall, behavior)
+                suppressed.add(id(behavior))
+
     for limit in limit_candidates:
         category_key = limit.content_data.get("category_key")
         if category_key == "all_expenses":
@@ -874,6 +985,14 @@ def group_candidates(candidates: Iterable[InsightCandidate]) -> list[InsightCand
             if category.currency == limit.currency and category.entity_key == category_key:
                 _merge_evidence(limit, category)
                 suppressed.add(id(category))
+        for overall in overall_candidates:
+            if (
+                id(overall) not in suppressed
+                and overall.currency == limit.currency
+                and overall.content_data.get("scope_category_key") == category_key
+            ):
+                _merge_evidence(limit, overall)
+                suppressed.add(id(overall))
 
     behavior_by_merchant: dict[tuple[str, str], list[InsightCandidate]] = {}
     for item in values:
@@ -919,7 +1038,22 @@ def assign_fingerprint(candidate: InsightCandidate, *, generated_at: datetime) -
     return candidate
 
 
-def candidate_score(candidate: InsightCandidate, state: InsightState | None = None) -> Decimal:
+def _window_show_count(state: InsightState | None, *, now: datetime) -> int:
+    if (
+        not state
+        or not state.first_shown_at
+        or state.first_shown_at <= now - timedelta(hours=REPEAT_WINDOW_HOURS)
+    ):
+        return 0
+    return state.show_count
+
+
+def candidate_score(
+    candidate: InsightCandidate,
+    state: InsightState | None = None,
+    *,
+    now: datetime | None = None,
+) -> Decimal:
     impact_score = min(Decimal("40"), candidate.impact * Decimal("8"))
     relative_score = min(Decimal("22"), abs(candidate.relative_delta or Decimal("0")) * Decimal("30"))
     severity_score = {
@@ -931,7 +1065,8 @@ def candidate_score(candidate: InsightCandidate, state: InsightState | None = No
     confidence_score = Decimal("10") if candidate.confidence == "high" else Decimal("5")
     action_score = Decimal(candidate.actionability)
     control_score = Decimal("20") if candidate.active_control else Decimal("0")
-    repeat_penalty = Decimal(min((state.show_count if state else 0) * 8, 24))
+    window_count = _window_show_count(state, now=now or datetime.now(timezone.utc))
+    repeat_penalty = Decimal(min(window_count * 8, 24))
     return impact_score + relative_score + severity_score + confidence_score + action_score + control_score - repeat_penalty
 
 
@@ -956,11 +1091,11 @@ def rank_candidates(
         if (
             state
             and state.show_count >= MAX_IMPRESSIONS_IN_REPEAT_WINDOW
-            and state.last_shown_at
-            and state.last_shown_at > now - timedelta(hours=REPEAT_WINDOW_HOURS)
+            and state.first_shown_at
+            and state.first_shown_at > now - timedelta(hours=REPEAT_WINDOW_HOURS)
         ):
             continue
-        candidate.score = candidate_score(candidate, state)
+        candidate.score = candidate_score(candidate, state, now=now)
         eligible.append(candidate)
     eligible.sort(key=lambda item: (-item.score, item.detector_type, item.entity_type, item.entity_key, item.fingerprint))
     return eligible[: max(0, min(limit, MAX_VISIBLE_INSIGHTS))]
@@ -978,11 +1113,15 @@ def present_candidate(candidate: InsightCandidate) -> dict[str, Any]:
     delta_text = format_money(abs(candidate.absolute_delta), candidate.currency)
     relative_text = _percent_text(candidate.relative_delta)
     if candidate.title_key == "spending_up":
-        title = f"Расходы выросли на {delta_text}"
+        category = data.get("scope_category")
+        title = f"Расходы на {category} выросли на {delta_text}" if category else f"Расходы выросли на {delta_text}"
         summary = f"{relative_text} к сопоставимому периоду"
+        if data.get("merchant"):
+            summary += f" · основная причина — {data['merchant']}"
         tone = "warning"
     elif candidate.title_key == "spending_down":
-        title = f"Расходы снизились на {delta_text}"
+        category = data.get("scope_category")
+        title = f"Расходы на {category} снизились на {delta_text}" if category else f"Расходы снизились на {delta_text}"
         summary = f"{relative_text} к сопоставимому периоду"
         tone = "positive"
     elif candidate.title_key == "category_growth":
@@ -1076,9 +1215,15 @@ def build_snapshot(
     current_rows: Iterable[tuple[Any, Any, Any, Any, Any]],
     previous_rows: Iterable[tuple[Any, Any, Any, Any, Any]],
     limits: Iterable[dict[str, Any]] = (),
+    scope_category: str | None = None,
     can_write: bool = True,
 ) -> InsightSnapshot:
     selected_currency = currency.upper()
+    selected_scope_category = str(scope_category or "").strip() or None
+    selected_scope_category_key = (
+        normalized_category_key(selected_scope_category)
+        if selected_scope_category else None
+    )
     current_values = [row for row in current_rows if str(row[2]).upper() == selected_currency]
     previous_values = [row for row in previous_rows if str(row[2]).upper() == selected_currency]
     category_totals: dict[str, dict[str, Any]] = {}
@@ -1185,6 +1330,8 @@ def build_snapshot(
         categories=categories,
         merchants=merchants,
         limits=limit_values,
+        scope_category=selected_scope_category,
+        scope_category_key=selected_scope_category_key,
         can_write=can_write,
     )
 

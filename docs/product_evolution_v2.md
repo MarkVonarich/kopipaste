@@ -282,8 +282,8 @@ Candidate model:
 
 V1 detectors:
 
-- `spending_change`: total expense change against the Analytics 2.0 comparable period.
-- `category_contribution`: a canonical category that materially explains positive total growth.
+- `spending_change`: total expense change against the Analytics 2.0 comparable period. When Home has a selected category, the detector names that category and treats it as the source scope.
+- `category_contribution`: a canonical category that materially explains positive total growth. It is omitted when the source is already filtered to one category, where a 100% contribution would be redundant.
 - `merchant_contribution`: a Merchant Key V1 identity that materially explains category growth.
 - `merchant_frequency`: a meaningful increase in operation count for a canonical merchant.
 - `average_check_change`: a meaningful merchant average-check increase using `merchant_features()`.
@@ -302,6 +302,7 @@ Significance thresholds:
 Ranking and hierarchy:
 
 - Score is deterministic: capped normalized impact (40) + relative significance (22) + severity (0/8/18/30) + confidence (5/10) + actionability + active-control boost (20) - repeat penalty (up to 24).
+- Limit impact is the positive amount ahead of linear period pace: `max(spent - limit_amount * elapsed_percent / 100, 0)`. Relative significance is the percentage-point pace lead, so a more exhausted equivalent limit cannot rank lower merely because less remains.
 - Tie-breaking is detector, entity type/key, then fingerprint.
 - Category contribution absorbs related overall growth, merchant contribution, frequency, and average-check evidence.
 - A category limit-pace risk absorbs related category-growth evidence and ranks as the active financial control.
@@ -326,7 +327,8 @@ Home and detail UX:
 - Home keeps its existing hero, activity, income/expense, challenge, focus, reminder, and recent-operation structure.
 - Up to three compact insight cards occupy the existing intelligence surface. No filler or permanent empty card is rendered.
 - The existing bottom-sheet pattern shows conclusion, explicit current/comparison dates, structured evidence, contextual actions, and feedback. Telegram BackButton closes it predictably.
-- Category and merchant actions preserve workspace, period, operation type, currency, and canonical key. Operations uses existing scoped filters. Existing limit edit opens by identifier; create-limit preselects the safe category context.
+- Category and merchant actions preserve workspace, period, operation type, currency, the exact selected source category when present, and the canonical target key. Merchant detail accepts `detail_category_key`, so canonical variants reconcile without narrowing to one display string. Operations applies the same source scope plus canonical key.
+- Category growth opens an existing enabled limit with the same canonical category, currency, and current week/month period. `CREATE_LIMIT` is offered only when no matching control exists; read-only workspaces receive neither mutation action.
 - Insights never create/edit limits, operations, goals, categories, or reminders automatically.
 
 Feedback, repeat suppression, and lifecycle:
@@ -334,7 +336,7 @@ Feedback, repeat suppression, and lifecycle:
 - Migration `20260811_021_insight_engine_state.sql` adds one `insight_states` table. It stores user/workspace scope, SHA-256 fingerprint, detector and entity type, currency, periods, shown timestamps/count, feedback, temporary suppression, and validity timestamps. It does not store raw operation comments, merchant display text, transaction properties, or rendered prose.
 - The unique user/workspace/fingerprint index makes candidate refresh idempotent.
 - A fingerprint includes detector, safe entity key, currency, periods, and currency-floor material buckets. Materially changed values can become a new eligible instance; tiny changes retain the same lifecycle.
-- Each actual Mini App session records an impression once per visible fingerprint. Repeats receive an 8-point penalty per recent impression, capped at 24; after 3 impressions within 24 hours the exact instance is temporarily omitted.
+- Each Mini App session records an impression once per workspace/fingerprint pair. The database counter is a real rolling window anchored by `first_shown_at`: after 24 hours the next impression starts at 1. Repeats receive an 8-point penalty per impression in the current window, capped at 24; after 3 impressions in that window the exact instance is temporarily omitted.
 - `useful` is recorded. `not_useful` suppresses only the same detector family for that user and workspace for 30 days; unrelated detector families and other users/workspaces are unaffected.
 - State is valid for seven days from generation and state reads are bounded to 120 days. Old-period rows are not served as payloads; candidates are always recomputed from the currently selected scope.
 
