@@ -28,7 +28,10 @@ import type {
   ReminderPayload,
   ReminderRecordPayload,
   ReminderSnoozePayload,
-  Workspace
+  Workspace,
+  HomePreferences,
+  ShoppingItem,
+  Announcement
 } from './types';
 
 type Envelope<T> = {
@@ -50,11 +53,17 @@ export type Overview = {
   challenges?: Array<{ key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_type?: string; period_key: string; period_end?: string | null }>;
   focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
   focus_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean }>;
+  goal_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; severity?: string; target_mode?: 'goals' }>;
+  limit_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; target_mode?: 'limits' }>;
   insights?: Insight[];
   insight?: Insight | null;
   reminder?: HomeReminderSummary | null;
   reminders?: HomeReminderSummary[];
   activity?: ActivityCalendar;
+  home_widgets?: HomePreferences['widgets'];
+  home_preferences?: Omit<HomePreferences, 'widgets'>;
+  shopping?: { items: ShoppingItem[]; active_count: number; completed_count: number; read_only: boolean; available: boolean };
+  announcements?: Announcement[];
 };
 
 export type AnalyticsResponse = {
@@ -252,6 +261,15 @@ export const api = {
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
   overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
+  homePreferences: () => apiFetch<HomePreferences>('/miniapp/api/profile/home'),
+  saveHomePreferences: (order: HomePreferences['order'], enabled: HomePreferences['enabled']) =>
+    apiFetch<HomePreferences>('/miniapp/api/profile/home', { method: 'POST', body: JSON.stringify({ order, enabled }) }),
+  shoppingItems: (workspaceId: number | 'all' | null) => apiFetch<{ items: ShoppingItem[]; read_only: boolean; note?: string }>(`/miniapp/api/shopping${query({ workspace_id: workspaceId })}`),
+  createShoppingItem: (workspace_id: number | 'all' | null, text: string) => apiFetch<{ item: ShoppingItem }>('/miniapp/api/shopping', { method: 'POST', body: JSON.stringify({ workspace_id, text }) }),
+  updateShoppingItem: (id: number, workspace_id: number | 'all' | null, payload: { text?: string; completed?: boolean }) => apiFetch<{ item: ShoppingItem }>(`/miniapp/api/shopping/${id}`, { method: 'PATCH', body: JSON.stringify({ workspace_id, ...payload }) }),
+  deleteShoppingItem: (id: number, workspace_id: number | 'all' | null) => apiFetch<{ deleted: boolean }>(`/miniapp/api/shopping/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),
+  clearCompletedShoppingItems: (workspace_id: number | 'all' | null) => apiFetch<{ deleted: number }>('/miniapp/api/shopping/completed', { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),
+  dismissAnnouncement: (id: string) => apiFetch<{ dismissed: boolean }>(`/miniapp/api/announcements/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: '{}' }),
   insightImpression: (id: string, workspaceId: number | 'all' | null) =>
     apiFetch<{ recorded: boolean }>(`/miniapp/api/insights/${encodeURIComponent(id)}/impression`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   insightFeedback: (id: string, workspaceId: number | 'all' | null, feedbackType: 'useful' | 'not_useful') =>
@@ -325,7 +343,7 @@ export const api = {
     apiFetch<{ budget: CategoryBudgetGroup }>(`/miniapp/api/category-budgets/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCategoryBudget: (id: number, workspaceId: number | 'all' | null) =>
     apiFetch<{ deleted: boolean; budget_id: number }>(`/miniapp/api/category-budgets/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),
-  profile: () => apiFetch<{ theme: ThemeMode; preferred_name?: string | null; display_name?: string; currency: string; available_currencies?: string[]; timezone: string; timezone_options?: Array<{ label: string; value: string }>; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] } }>('/miniapp/api/profile'),
+  profile: () => apiFetch<{ theme: ThemeMode; preferred_name?: string | null; display_name?: string; currency: string; available_currencies?: string[]; timezone: string; timezone_options?: Array<{ label: string; value: string }>; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] }; home_preferences: HomePreferences }>('/miniapp/api/profile'),
   setTheme: (theme: ThemeMode) => apiFetch<{ theme: ThemeMode }>('/miniapp/api/profile/theme', { method: 'POST', body: JSON.stringify({ theme }) }),
   setPreferredName: (preferred_name: string) => apiFetch<{ preferred_name?: string | null; display_name: string }>('/miniapp/api/profile/preferred-name', { method: 'POST', body: JSON.stringify({ preferred_name }) }),
   setCurrency: (currency: string) => apiFetch<{ currency: string }>('/miniapp/api/profile/currency', { method: 'POST', body: JSON.stringify({ currency }) }),

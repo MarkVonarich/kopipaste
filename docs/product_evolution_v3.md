@@ -80,6 +80,36 @@ Fields that affect planning are submitted explicitly. An empty deadline means no
 
 PR 1 requires no migration. Existing `financial_goals` statuses, timestamps, `goal_movements`, category storage, and reference tables already support the final lifecycle.
 
+## Custom Home architecture
+
+PR 2 evolves the existing Home instead of adding a second dashboard. The existing authenticated `overview` response remains the aggregate read model for financial result, activity, income and expenses, challenges, goals, limits, reminders, insights, and recent operations. Shopping summary, Home preferences, the canonical widget registry, and eligible announcements are added to that response, so Home does not issue one request per widget.
+
+The canonical registry order is `financial_result`, `activity`, `income_expense`, `whats_new`, `challenges`, `goals`, `limits`, `reminders`, `insights`, `shopping_list`, and `recent_operations`. Registry entries declare stable identity, Russian label/description, default enabled/order metadata, and `compact` or `wide` layout. User preferences are global to the user, not workspace-specific. Reads reconcile saved state by removing unknown/deprecated keys, de-duplicating keys, and appending newly registered keys with their registry defaults. Saving all widgets disabled is valid and renders `Главная настроена минимально` with a configuration action.
+
+The Profile editor keeps an unsaved local draft. Every widget has a toggle, a Pointer Events drag handle, and explicit up/down fallback controls. `Включить все`, `Сбросить`, and `Сохранить` are separate actions. The Home renderer consumes the reconciled order directly and uses flex wrapping: wide widgets use a full row, while compact widgets share a row and grow when a sibling is absent. Disabled or unavailable widgets never reserve cells. Goals and limits are separate views over the existing focus candidates and existing Plans services; no duplicate goal or limit calculations were introduced.
+
+## Shopping list
+
+Shopping items belong to one concrete workspace and are shared with every workspace member. Existing workspace access controls authorize reads; existing write roles authorize create, edit, complete, restore, delete, and confirmed clear-completed operations. `all` and legacy scope without a concrete workspace are read-only/unavailable. Viewer UI contains no mutation controls.
+
+Item text is normalized, rejects control characters, and is limited to 200 characters. Product events record only bounded action/result metadata and never item text. Personal-workspace rows are removed by workspace cascade during account deletion. Shared-workspace rows remain, while matching `created_by` and `updated_by` attribution is set to `NULL` before the member row is removed.
+
+## What's New
+
+What's New candidates are immutable code-defined release metadata, not remotely supplied HTML. Each candidate has a stable ID, family, release date, Russian title/description, and a typed action. Allowed targets are `OPEN_HOME_SETTINGS`, `OPEN_SHOPPING_LIST`, `OPEN_PLANS`, `OPEN_PROFILE`, `OPEN_ANALYTICS`, and `OPEN_DETAIL`; the client maps these values to existing navigation only.
+
+The resolver excludes dismissed candidates and uses an explicit half-open freshness interval: a card is eligible while `0 <= age_in_days < 21`, and expires at age 21. It then keeps the newest candidate in each family, sorts newest first, and returns at most five. Dismissal is user-scoped. The carousel moves only through swipe, keyboard arrows, card/CTA activation, or dots; it never advances automatically. The first release includes Custom Home, Shopping List, and Plans 2.0 cards.
+
+The resolver accepts a candidate collection before applying eligibility and ranking. Reports 2.0 can therefore concatenate user-specific report-ready candidates with the static catalogue and reuse the same dismissal, family replacement, TTL, ordering, and limit policy without changing the carousel.
+
+Product analytics uses the existing outbox and bounded event properties for customization open/save, shopping mutations, and announcement impression/open/dismiss actions. Shopping text, financial amounts, operation descriptions, and arbitrary target data are never included.
+
+Permanent release rule: every future user-visible release must add or deliberately update a code-defined What's New candidate in the same pull request. Reuse a family only when the new card supersedes an older message. Candidate copy must contain no personal data, financial values, secrets, raw user text, or arbitrary navigation URL.
+
+## PR 2 storage and privacy
+
+Migration `20260811_022_custom_home_shopping_announcements.sql` adds `user_home_preferences`, `shopping_items`, and `user_announcement_state`. It is additive and is not applied by this pull request. Home preferences and announcement dismissals are user-owned deletion data. Shopping content follows workspace ownership, with shared actor attribution anonymized as described above.
+
 ## Explicitly deferred
 
-PR 1 does not implement Home widgets, Home customization, shopping lists, What's New, Smart Planning calculations, Reports 2.0, Vacation Mode, new privacy controls, category priority, credits as a separate product, FX conversion, or new Telegram group behavior.
+PR 2 does not implement Smart Planning calculations, Reports 2.0, Vacation Mode, category priority, credits as a separate product, FX conversion, new Telegram group behavior, or any production deployment/configuration change.

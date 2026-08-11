@@ -1,4 +1,4 @@
-import type { CategoryOption, NotificationPreferences, PremiumInfo, ProfileSection, ThemeMode, Workspace } from '../types';
+import type { CategoryOption, HomePreferences, NotificationPreferences, PremiumInfo, ProfileSection, ThemeMode, Workspace } from '../types';
 import { formatMoneyString } from '../money';
 import { SectionHeader, esc, icon } from './ui';
 
@@ -18,11 +18,13 @@ export type ProfileData = {
   notifications?: NotificationPreferences;
   premium?: PremiumInfo;
   export?: { available: boolean; status: string; presets: string[]; privacy_note: string };
+  home_preferences?: HomePreferences;
 };
 
 const SECTIONS: Array<[ProfileSection, string]> = [
   ['user', 'Пользователь'],
   ['appearance', 'Внешний вид'],
+  ['home', 'Главная'],
   ['workspaces', 'Пространства'],
   ['notifications', 'Уведомления'],
   ['premium', 'Premium'],
@@ -92,6 +94,7 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
             ${(['telegram', 'light', 'dark'] as ThemeMode[]).map((theme) => `<button data-theme="${theme}" class="${activeTheme === theme ? 'active' : ''}">${theme === 'telegram' ? 'Telegram' : theme === 'light' ? 'Светлая' : 'Тёмная'}</button>`).join('')}
           </div>
         `)}
+        ${panel('home', activeSection, `<div class="settings-list">${row('Настройка главной', `${profile?.home_preferences?.enabled.length ?? 0} виджетов`, 'Выберите порядок и состав главной', 'home-settings-open')}</div>`)}
         ${panel('workspaces', activeSection, `
           <div class="settings-list">
             ${visibleWorkspaces.map((workspace) => row(workspace.name, `${workspace.role}${workspace.active ? ' · активно' : ''}`, workspace.kind, workspace.role === 'owner' || workspace.role === 'admin' ? 'profile-workspace-open' : 'profile-active-workspace-set', `data-id="${esc(workspace.workspace_id)}"`)).join('') || '<p class="caption">Нет доступных пространств.</p>'}

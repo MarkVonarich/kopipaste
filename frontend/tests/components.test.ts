@@ -97,7 +97,7 @@ describe('acceptance components', () => {
     expect(html).toContain('1/2');
     expect(html).toContain('Запишите 2 операции сегодня.');
     expect(html).not.toContain('реальные операции');
-    expect(html).toContain('Фокус');
+    expect(html).toContain('Лимиты');
     expect(html).toContain('Инсайт периода');
     expect(html).not.toContain('Food 4');
   });
@@ -121,7 +121,9 @@ describe('acceptance components', () => {
     }, [], 'RUB', true);
 
     expect(html).toContain('class="smart-card home-carousel"');
-    expect(html.match(/class="smart-card home-carousel"/g)).toHaveLength(3);
+    expect(html.match(/class="smart-card home-carousel"/g)).toHaveLength(4);
+    expect(html).toContain('Цели');
+    expect(html).toContain('Лимиты');
     expect(html).toContain('data-action="carousel-dot"');
     expect(html).toContain('class="smart-card insight-card');
     expect(html).not.toContain('<button class="smart-card"');

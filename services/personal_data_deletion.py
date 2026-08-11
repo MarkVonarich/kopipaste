@@ -28,6 +28,8 @@ PERSONAL_TABLES = {
     "user_aliases": "user_id=%s",
     "ml_observations": "user_id=%s",
     "insight_states": "user_id=%s OR workspace_id = ANY(%s)",
+    "user_home_preferences": "user_id=%s",
+    "user_announcement_state": "user_id=%s",
     "action_tokens": "user_id=%s",
     "user_workspace_settings": "user_id=%s",
     "workspace_members": "user_id=%s",
@@ -41,6 +43,7 @@ class DeletionResult:
     user_id: int
     counts: dict[str, int]
     anonymized_shared_operations: int = 0
+    anonymized_shared_shopping_items: int = 0
     deleted: bool = False
 
 
@@ -293,6 +296,7 @@ def delete_user_data(user_id: int) -> DeletionResult:
     conn = get_conn()
     counts: dict[str, int] = {}
     anonymized = 0
+    anonymized_shopping = 0
     try:
         with conn.cursor() as cur:
             workspace_ids = _personal_workspace_ids(cur, user_id)
@@ -315,6 +319,23 @@ def delete_user_data(user_id: int) -> DeletionResult:
                     )
                     anonymized = cur.rowcount
 
+            shopping_columns = _table_columns(cur, "shopping_items")
+            if {"workspace_id", "created_by", "updated_by"} <= shopping_columns and _table_exists(cur, "workspace_members"):
+                cur.execute(
+                    """
+                    UPDATE public.shopping_items i
+                       SET created_by=CASE WHEN i.created_by=%s THEN NULL ELSE i.created_by END,
+                           updated_by=CASE WHEN i.updated_by=%s THEN NULL ELSE i.updated_by END
+                      FROM public.workspace_members m
+                     WHERE i.workspace_id=m.workspace_id
+                       AND (i.created_by=%s OR i.updated_by=%s)
+                       AND m.user_id<>%s
+                       AND m.status='active'
+                    """,
+                    (user_id, user_id, user_id, user_id, user_id),
+                )
+                anonymized_shopping = int(cur.rowcount)
+
             for table, where in PERSONAL_TABLES.items():
                 columns = _table_columns(cur, table)
                 if not columns or not _where_supported(columns, where):
@@ -331,7 +352,13 @@ def delete_user_data(user_id: int) -> DeletionResult:
                 cur.execute("DELETE FROM public.users WHERE user_id=%s", (user_id,))
                 counts["users"] = int(cur.rowcount)
         conn.commit()
-        return DeletionResult(user_id=user_id, counts=counts, anonymized_shared_operations=anonymized, deleted=True)
+        return DeletionResult(
+            user_id=user_id,
+            counts=counts,
+            anonymized_shared_operations=anonymized,
+            anonymized_shared_shopping_items=anonymized_shopping,
+            deleted=True,
+        )
     except Exception:
         conn.rollback()
         raise

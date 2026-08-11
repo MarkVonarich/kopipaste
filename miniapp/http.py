@@ -100,6 +100,25 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_category(req, token, body))
         if method == "GET" and path == "/miniapp/api/overview":
             return _json_response(start_response, 200, api.overview(req, params))
+        if method == "GET" and path == "/miniapp/api/profile/home":
+            return _json_response(start_response, 200, api.home_preferences(req))
+        if method == "POST" and path == "/miniapp/api/profile/home":
+            return _json_response(start_response, 200, api.update_home_preferences(req, body))
+        if method == "GET" and path == "/miniapp/api/shopping":
+            return _json_response(start_response, 200, api.shopping_items(req, params))
+        if method == "POST" and path == "/miniapp/api/shopping":
+            return _json_response(start_response, 200, api.create_shopping_item(req, body))
+        if method == "DELETE" and path == "/miniapp/api/shopping/completed":
+            return _json_response(start_response, 200, api.clear_completed_shopping_items(req, body))
+        if path.startswith("/miniapp/api/shopping/"):
+            item_id = int(path.rsplit("/", 1)[-1])
+            if method == "PATCH":
+                return _json_response(start_response, 200, api.update_shopping_item(req, item_id, body))
+            if method == "DELETE":
+                return _json_response(start_response, 200, api.delete_shopping_item(req, item_id, body))
+        if method == "POST" and path.startswith("/miniapp/api/announcements/") and path.endswith("/dismiss"):
+            candidate_id = path.strip("/").split("/")[3]
+            return _json_response(start_response, 200, api.dismiss_announcement(req, candidate_id))
         if path.startswith("/miniapp/api/insights/"):
             parts = path.strip("/").split("/")
             if len(parts) == 5:
