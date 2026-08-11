@@ -73,6 +73,7 @@ export function initialState(): AppState {
     sheet: null,
     profileAccordion: persisted.profileAccordion ?? null,
     plansMode: 'goals',
+    plansGoalView: 'active',
     homeChallengeIndex: 0,
     homeFocusIndex: 0,
     homeReminderIndex: 0,

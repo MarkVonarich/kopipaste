@@ -723,11 +723,21 @@ def delete_goal_permanently(goal_id: int, owner_user_id: int, workspace_id: int 
     try:
         with conn.cursor() as cur:
             goal = get_goal_cur(cur, goal_id, owner_user_id, workspace_id, lock=True)
+            if goal.status != "archived":
+                raise GoalError("goal_not_archived")
             cur.execute("SELECT COUNT(*) FROM public.goal_movements WHERE goal_id=%s", (goal.id,))
             movement_count = int(cur.fetchone()[0] or 0)
             suppress_pending_goal_notifications_cur(cur, goal.id, reason="goal_deleted")
             cur.execute("DELETE FROM public.goal_movements WHERE goal_id=%s", (goal.id,))
-            cur.execute("DELETE FROM public.goal_drafts WHERE owner_user_id=%s AND workspace_id IS NOT DISTINCT FROM %s", (owner_user_id, workspace_id))
+            cur.execute(
+                """
+                DELETE FROM public.goal_drafts
+                 WHERE owner_user_id=%s
+                   AND workspace_id IS NOT DISTINCT FROM %s
+                   AND payload->>'goal_id'=%s
+                """,
+                (owner_user_id, workspace_id, str(goal.id)),
+            )
             cur.execute("DELETE FROM public.financial_goals WHERE id=%s", (goal.id,))
         conn.commit()
         _safe_track("goal_deleted", user_id=owner_user_id, workspace_id=workspace_id, currency=goal.currency, properties={"status": "deleted"})

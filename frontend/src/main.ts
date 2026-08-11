@@ -13,7 +13,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { HomeScreen, InsightDetail } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
-import { CategoryBudgetForm, CategoryDeleteForm, CategoryForm, GoalContributionForm, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
+import { CategoryBudgetForm, CategoryDeleteForm, CategoryDetail, CategoryForm, GoalContributionForm, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
 import { AdditionalMenu, CurrencyForm, ExportForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
@@ -62,6 +62,10 @@ function esc(value: unknown): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function categoryKey(value: unknown): string {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru').replace(/ё/g, 'е');
 }
 
 function applyTheme(mode: ThemeMode): void {
@@ -235,7 +239,11 @@ function renderAnalytics(): string {
 }
 
 function renderPlans(): string {
-  return PlansScreen(plans, state.plansMode || 'goals', canWrite());
+  return PlansScreen(plans, state.plansMode || 'goals', canWrite(), state.plansGoalView || 'active');
+}
+
+function allGoals(): Goal[] {
+  return [...(plans?.goals || []), ...(plans?.archived_goals || [])];
 }
 
 function findLimitById(id: string | undefined): BudgetLimit | null {
@@ -273,12 +281,24 @@ function renderSheet(): string {
   if (state.confirmLimitDeleteId && selectedLimit) {
     return ConfirmDialog(state.confirmLimitDeleteId, `${selectedLimit.title} · ${formatMoneyString(selectedLimit.amount, selectedLimit.currency)}`, 'Удалить лимит?', 'confirm-limit-delete');
   }
+  if (state.confirmGoalDeleteId && selectedGoal) {
+    return ConfirmDialog(
+      state.confirmGoalDeleteId,
+      `Цель «${selectedGoal.title}» и её история пополнений будут удалены. Финансовые операции останутся без изменений.`,
+      'Удалить цель навсегда?',
+      'confirm-goal-delete',
+      state.saveError,
+    );
+  }
   if (state.sheet === 'insight-detail' && selectedInsight) {
     return BottomSheet('Инсайт', InsightDetail(selectedInsight, state.saving, state.saveError));
   }
   if (!state.sheet && !selectedOperation) return '';
   if (state.sheet === 'goal-create') {
     return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
+  }
+  if (state.sheet === 'goal-detail' && selectedGoal) {
+    return BottomSheet(selectedGoal.title, GoalDetail(selectedGoal, canWrite()));
   }
   if (state.sheet === 'goal-edit' && selectedGoal) {
     return BottomSheet('Изменить цель', GoalForm(selectedGoal, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
@@ -334,6 +354,9 @@ function renderSheet(): string {
   }
   if (state.sheet === 'category-budget-edit' && selectedCategoryBudget) {
     return BottomSheet('Изменить бюджет категорий', CategoryBudgetForm(selectedCategoryBudget, categoryOptions, state.saving, state.saveError, profile?.available_currencies, state.boot?.user.currency || 'RUB'));
+  }
+  if (state.sheet === 'category-detail' && selectedCategory) {
+    return BottomSheet(selectedCategory.name, CategoryDetail(selectedCategory, state.categoryType || 'expense', canWrite() && !plans?.categories_read_only));
   }
   if (state.sheet === 'category-create') {
     return BottomSheet('Новая категория', CategoryForm(null, state.categoryType || 'expense', state.saving, state.saveError));
@@ -425,7 +448,7 @@ function render(): void {
   renderCharts();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
-    if (state.confirmDeleteId || state.sheet || selectedOperation) tg.BackButton.show();
+    if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
     else tg.BackButton.hide();
   }
 }
@@ -439,6 +462,15 @@ function safeError(error: unknown): string {
     workspace_read_only: 'Это пространство доступно только для чтения.',
     concrete_workspace_required: 'Выберите одно пространство.',
     category_not_available: 'Выберите категорию из списка.',
+    category_protected: 'Системную категорию нельзя удалить.',
+    category_transfer_required: 'Выберите категорию, куда перенести связанные данные.',
+    category_destination_not_found: 'Категория для переноса больше недоступна. Обновите список.',
+    category_same_destination: 'Выберите другую категорию для переноса.',
+    category_delete_failed: 'Не удалось безопасно удалить категорию. Обновите список и попробуйте снова.',
+    goal_not_found: 'Цель не найдена или уже была удалена.',
+    goal_not_archived: 'Сначала переместите цель в архив.',
+    schedule_required: 'Выберите расписание для расчёта.',
+    bad_goal: 'Проверьте поля цели.',
     idempotency_conflict: 'Эта попытка сохранения уже использовалась для другой операции.',
     idempotency_pending: 'Операция уже сохраняется. Подождите немного.',
     goal_preview_stale: 'План изменился. Обновите предпросмотр.',
@@ -639,7 +671,7 @@ async function bootstrap(): Promise<void> {
   const tg = getTelegramWebApp();
   tg?.onEvent?.('themeChanged', () => applyTheme(state.theme));
   registerHomeScreenEvents();
-  tg?.BackButton?.onClick(() => closeSheet());
+  tg?.BackButton?.onClick(() => navigateBack());
   try {
     const boot = await api.bootstrap();
     state.boot = boot;
@@ -665,11 +697,19 @@ function closeSheet(): void {
     render();
     return;
   }
+  if (state.confirmGoalDeleteId) {
+    state.confirmGoalDeleteId = undefined;
+    render();
+    return;
+  }
   if (state.dirty && !window.confirm('Закрыть без сохранения?')) return;
   state.sheet = null;
   selectedOperation = null;
   selectedGoal = null;
   selectedLimit = null;
+  selectedReminder = null;
+  selectedCategoryBudget = null;
+  selectedCategory = null;
   selectedInsight = null;
   state.selectedWorkspaceId = undefined;
   state.saveError = undefined;
@@ -686,8 +726,20 @@ function closeSheet(): void {
   state.goalDraft = undefined;
   state.reminderDraft = undefined;
   state.confirmLimitDeleteId = undefined;
+  state.confirmGoalDeleteId = undefined;
   state.formDraft = undefined;
   render();
+}
+
+function navigateBack(): void {
+  if (state.confirmDeleteId || state.confirmLimitDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation) {
+    closeSheet();
+    return;
+  }
+  if (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive') {
+    state.plansGoalView = 'active';
+    render();
+  }
 }
 
 function syncGoalScheduleFields(): void {
@@ -794,13 +846,15 @@ function goalPayload(form: HTMLFormElement): GoalPayload {
     preview_payload_hash: state.goalPreviewPayloadHash,
     title: String(data.get('title') || '').trim(),
     target_amount: normalizeMoneyText(String(data.get('target_amount') || '0')),
-    current_amount: normalizeMoneyText(String(data.get('current_amount') || '0')),
     deadline: String(data.get('deadline') || ''),
     strategy: String(data.get('strategy') || 'none') as GoalPayload['strategy'],
     frequency,
     comfortable_amount: String(data.get('comfortable_amount') || '').trim() ? normalizeMoneyText(String(data.get('comfortable_amount'))) : '',
     reminders_enabled: data.get('reminders_enabled') === 'on',
   };
+  if (form.dataset.action === 'create-goal') {
+    payload.current_amount = normalizeMoneyText(String(data.get('current_amount') || '0'));
+  }
   if (frequency === 'monthly') payload.day = globalThis.parseInt(String(data.get('day') || ''), 10);
   if (frequency === 'twice_monthly') payload.days = [
     globalThis.parseInt(String(data.get('day_first') || ''), 10),
@@ -858,13 +912,13 @@ async function loadFilterCategories(): Promise<void> {
   for (const type of types) {
     try {
       const response = await api.categories(state.workspaceId, type);
-      for (const item of response.items) map.set(item.normalized_name || item.name.toLowerCase(), item);
+      for (const item of response.items) map.set(categoryKey(item.normalized_name || item.name), item);
     } catch {
       // Read-only/all scopes simply hide category options.
     }
   }
   globalCategoryOptions = [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-  if (state.globalFilters.category !== 'all' && !globalCategoryOptions.some((item) => item.name === state.globalFilters.category)) {
+  if (state.globalFilters.category !== 'all' && !globalCategoryOptions.some((item) => categoryKey(item.name) === categoryKey(state.globalFilters.category))) {
     setGlobalFilters({ ...state.globalFilters, category: 'all' });
   }
 }
@@ -1049,6 +1103,7 @@ function wireEvents(): void {
     button.addEventListener('click', async () => {
       hapticSelection();
       state.plansMode = button.dataset.mode === 'limits' ? 'limits' : button.dataset.mode === 'reminders' ? 'reminders' : button.dataset.mode === 'categories' ? 'categories' : 'goals';
+      if (state.plansMode === 'goals') state.plansGoalView = 'active';
       await loadScreen();
     });
   });
@@ -1203,9 +1258,28 @@ function wireEvents(): void {
     state.dirty = false;
     render();
   });
+  app.querySelector<HTMLButtonElement>('[data-action="goal-archive-open"]')?.addEventListener('click', () => {
+    state.plansGoalView = 'archive';
+    hapticSelection();
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="goal-archive-back"]')?.addEventListener('click', () => {
+    state.plansGoalView = 'active';
+    hapticSelection();
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="goal-open"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectedGoal = allGoals().find((goal) => goal.id === Number(button.dataset.id)) || null;
+      state.sheet = selectedGoal ? 'goal-detail' : null;
+      state.saveError = undefined;
+      state.dirty = false;
+      render();
+    });
+  });
   app.querySelectorAll<HTMLButtonElement>('[data-action="goal-edit"]').forEach((button) => {
     button.addEventListener('click', () => {
-      selectedGoal = (plans?.goals || []).find((goal) => goal.id === Number(button.dataset.id)) || null;
+      selectedGoal = allGoals().find((goal) => goal.id === Number(button.dataset.id)) || null;
       state.sheet = selectedGoal ? 'goal-edit' : null;
       state.goalPlanPreview = undefined;
       state.goalPreviewPayloadHash = undefined;
@@ -1217,7 +1291,7 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="goal-contribution"]').forEach((button) => {
     button.addEventListener('click', () => {
-      selectedGoal = (plans?.goals || []).find((goal) => goal.id === Number(button.dataset.id)) || null;
+      selectedGoal = allGoals().find((goal) => goal.id === Number(button.dataset.id)) || null;
       state.goalIdempotencyKey = requestId();
       state.sheet = selectedGoal ? 'goal-contribution' : null;
       state.saveError = undefined;
@@ -1231,8 +1305,12 @@ function wireEvents(): void {
       state.saving = true;
       render();
       try {
-        await api.setGoalStatus(Number(button.dataset.id), state.workspaceId, button.dataset.status || 'active');
-        showToast('Цель обновлена');
+        const status = button.dataset.status || 'active';
+        await api.setGoalStatus(Number(button.dataset.id), state.workspaceId, status);
+        state.sheet = null;
+        selectedGoal = null;
+        if (status === 'active') state.plansGoalView = 'active';
+        showToast(status === 'archived' ? 'Цель перемещена в архив' : status === 'active' ? 'Цель восстановлена' : 'Цель обновлена');
         await reloadActive();
       } catch (error) {
         state.saving = false;
@@ -1240,6 +1318,33 @@ function wireEvents(): void {
         render();
       }
     });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="goal-delete"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectedGoal = allGoals().find((goal) => goal.id === Number(button.dataset.id)) || null;
+      if (!selectedGoal || selectedGoal.status !== 'archived') return;
+      state.saveError = undefined;
+      state.confirmGoalDeleteId = selectedGoal.id;
+      render();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="confirm-goal-delete"]')?.addEventListener('click', async (event) => {
+    if (state.saving) return;
+    const id = Number((event.currentTarget as HTMLButtonElement).dataset.id || 0);
+    state.saving = true;
+    render();
+    try {
+      await api.deleteGoal(id, state.workspaceId);
+      state.confirmGoalDeleteId = undefined;
+      state.sheet = null;
+      selectedGoal = null;
+      showToast('Цель удалена навсегда');
+      await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="limit-create"]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -1475,6 +1580,16 @@ function wireEvents(): void {
     state.sheet = 'category-create';
     state.saveError = undefined;
     render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="category-open"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const token = button.dataset.token || '';
+      selectedCategory = (plans?.categories || []).find((item) => (item.token || item.normalized_name) === token) || null;
+      state.sheet = selectedCategory ? 'category-detail' : null;
+      state.saveError = undefined;
+      state.dirty = false;
+      render();
+    });
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="category-rename"]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1740,6 +1855,7 @@ function wireEvents(): void {
   app.querySelector<HTMLButtonElement>('[data-action="cancel-delete"]')?.addEventListener('click', () => {
     state.confirmDeleteId = undefined;
     state.confirmLimitDeleteId = undefined;
+    state.confirmGoalDeleteId = undefined;
     render();
   });
   app.querySelector<HTMLButtonElement>('[data-action="confirm-delete"]')?.addEventListener('click', async (event) => {
@@ -2134,12 +2250,20 @@ function wireEvents(): void {
     state.saveError = undefined;
     render();
     try {
+      const deletedCategory = selectedCategory;
       await api.deleteCategory(form.dataset.token || '', { workspace_id: state.workspaceId, type, transfer_to: String(data.get('transfer_to') || '').trim() || undefined });
-      closeSheet();
-      showToast('Категория удалена');
+      state.sheet = null;
+      selectedCategory = null;
+      state.saving = false;
+      state.dirty = false;
       state.categoryType = type;
       state.plansMode = 'categories';
+      if (deletedCategory && categoryKey(state.globalFilters.category) === categoryKey(deletedCategory.name)) {
+        setGlobalFilters({ ...state.globalFilters, category: 'all' });
+      }
+      await loadFilterCategories();
       await loadScreen();
+      showToast('Категория удалена');
     } catch (error) {
       state.saving = false;
       state.saveError = safeError(error);

@@ -144,6 +144,7 @@ export type OperationsResponse = {
 export type PlansResponse = {
   read_only: boolean;
   goals: Goal[];
+  archived_goals: Goal[];
   limits: BudgetLimit[];
   general_limits: GeneralSpendingLimit[];
   category_budgets: CategoryBudgetGroup[];
@@ -229,6 +230,10 @@ function query(params: Record<string, unknown>): string {
   return rendered ? `?${rendered}` : '';
 }
 
+function categoryPathToken(token: string): string {
+  return encodeURIComponent(encodeURIComponent(token));
+}
+
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
@@ -260,9 +265,9 @@ export const api = {
   createCategory: (payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
     apiFetch<{ category: CategoryOption; created: boolean }>('/miniapp/api/categories', { method: 'POST', body: JSON.stringify(payload) }),
   renameCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
-    apiFetch<{ category: CategoryOption; result: string }>(`/miniapp/api/categories/${encodeURIComponent(token)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    apiFetch<{ category: CategoryOption; result: string }>(`/miniapp/api/categories/${categoryPathToken(token)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; transfer_to?: string }) =>
-    apiFetch<{ deleted: boolean; references: Record<string, number> }>(`/miniapp/api/categories/${encodeURIComponent(token)}`, { method: 'DELETE', body: JSON.stringify(payload) }),
+    apiFetch<{ deleted: boolean; references: Record<string, number> }>(`/miniapp/api/categories/${categoryPathToken(token)}`, { method: 'DELETE', body: JSON.stringify(payload) }),
   operationDetail: (id: number) => apiFetch<Operation>(`/miniapp/api/operations/${id}`),
   createOperation: (payload: OperationPayload) =>
     apiFetch<{ operation: Operation }>('/miniapp/api/operations', {
@@ -277,7 +282,7 @@ export const api = {
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
     ),
   plans: (workspaceId: number | 'all' | null) => apiFetch<PlansResponse>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
-  goals: (workspaceId: number | 'all' | null) => apiFetch<{ items: Goal[]; read_only: boolean; note?: string }>(`/miniapp/api/goals${query({ workspace_id: workspaceId })}`),
+  goals: (workspaceId: number | 'all' | null, statusGroup: 'active' | 'archive' = 'active') => apiFetch<{ items: Goal[]; read_only: boolean; note?: string }>(`/miniapp/api/goals${query({ workspace_id: workspaceId, status_group: statusGroup })}`),
   goalDetail: (id: number, workspaceId: number | 'all' | null) =>
     apiFetch<{ goal: Goal; movements: GoalMovement[] }>(`/miniapp/api/goals/${id}${query({ workspace_id: workspaceId })}`),
   createGoal: (payload: GoalPayload) =>
@@ -290,6 +295,8 @@ export const api = {
     apiFetch<{ goal: Goal; movement?: GoalMovement | null; created: boolean }>(`/miniapp/api/goals/${id}/contributions`, { method: 'POST', body: JSON.stringify(payload) }),
   setGoalStatus: (id: number, workspaceId: number | 'all' | null, status: string) =>
     apiFetch<{ goal: Goal }>(`/miniapp/api/goals/${id}/status`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, status }) }),
+  deleteGoal: (id: number, workspaceId: number | 'all' | null) =>
+    apiFetch<{ deleted: boolean; goal_id: number; deleted_movement_count: number }>(`/miniapp/api/goals/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),
   setGoalReminders: (id: number, workspaceId: number | 'all' | null, enabled: boolean) =>
     apiFetch<{ goal: Goal }>(`/miniapp/api/goals/${id}/reminders`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, enabled }) }),
   reminders: () => apiFetch<{ items: Reminder[] }>('/miniapp/api/reminders'),

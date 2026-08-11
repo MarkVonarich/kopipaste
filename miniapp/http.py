@@ -173,6 +173,8 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.goal_detail(req, goal_id, params))
             if method == "PATCH" and not tail:
                 return _json_response(start_response, 200, api.update_goal(req, goal_id, body))
+            if method == "DELETE" and not tail:
+                return _json_response(start_response, 200, api.delete_goal(req, goal_id, body))
             if method == "POST" and tail == "contributions":
                 return _json_response(start_response, 200, api.goal_contribution(req, goal_id, body))
             if method == "POST" and tail == "plan-preview":

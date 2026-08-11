@@ -368,10 +368,13 @@ export type CategoryOption = {
     operations: number;
     drafts: number;
     category_limits: number;
+    category_limit_states?: number;
     category_budget_groups: number;
     reminders: number;
     aliases: number;
     ml_observations: number;
+    subscription_patterns?: number;
+    recurring_spend_patterns?: number;
     total: number;
   };
 };
@@ -406,13 +409,15 @@ export type AppState = {
   goalPreviewPayloadHash?: string;
   goalDraft?: Record<string, unknown>;
   confirmLimitDeleteId?: string;
+  confirmGoalDeleteId?: number;
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'goal-create' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
   profileAccordion?: ProfileSection | null;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';
+  plansGoalView?: 'active' | 'archive';
   categoryType?: 'expense' | 'income';
   analyticsFilters?: {
     categoryType: 'expense' | 'income';
