@@ -100,6 +100,15 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_category(req, token, body))
         if method == "GET" and path == "/miniapp/api/overview":
             return _json_response(start_response, 200, api.overview(req, params))
+        if path.startswith("/miniapp/api/insights/"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 5:
+                insight_id = parts[3]
+                tail = parts[4]
+                if method == "POST" and tail == "impression":
+                    return _json_response(start_response, 200, api.insight_impression(req, insight_id, body))
+                if method == "POST" and tail == "feedback":
+                    return _json_response(start_response, 200, api.insight_feedback(req, insight_id, body))
         if method == "GET" and path == "/miniapp/api/operations":
             return _json_response(start_response, 200, api.operations(req, params))
         if method == "POST" and path == "/miniapp/api/operations":

@@ -89,6 +89,7 @@ from services.reminders import (
 )
 from utils.text import norm_text
 from services.limit_alerts import alert_status_for_band, threshold_band
+from services.insights import PeriodRef, build_snapshot, insight_engine
 from services.merchant_intelligence import (
     EMPTY_MERCHANT_KEY,
     comparable_baseline_periods,
@@ -991,6 +992,7 @@ class MiniAppAPI:
         challenges = self._home_challenges(req)
         focus_items = self._home_focus_items(req, params, tx)
         reminders = self._home_reminders(req)
+        insights = [] if params.get("_skip_insights") else self._home_insights(req, tx, totals, focus_items)
         return success({
             "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
             "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
@@ -1003,7 +1005,8 @@ class MiniAppAPI:
             "challenge": challenges[0] if challenges else None,
             "focus_items": focus_items,
             "focus": focus_items[0] if focus_items else {"kind": "empty", "title": "Фокус свободен", "description": "Добавьте цель или лимит, чтобы видеть главный приоритет.", "target_mode": "goals"},
-            "insight": self._home_insight(req, tx, totals),
+            "insights": insights,
+            "insight": insights[0] if insights else None,
             "reminders": reminders,
             "reminder": reminders[0] if reminders else self._home_reminder(req),
             "activity": self._activity_calendar(req, tx),
@@ -1064,6 +1067,10 @@ class MiniAppAPI:
         severity_rank = {"critical": 400, "high": 300, "medium": 200, "normal": 100}
         today = user_local_date(req.user_id, tx.workspace_ids[0])
         try:
+            selected_category_key = normalized_category_key(tx.category) if tx.category else None
+        except ValueError:
+            selected_category_key = None
+        try:
             goals = self.goals(req, params)["data"].get("items", [])
             for goal in goals:
                 percent = int(goal.get("percent") or 0)
@@ -1114,8 +1121,18 @@ class MiniAppAPI:
         try:
             limits = self.limits(req, params)["data"].get("items", [])
             for limit in limits:
-                if tx.category and limit.get("category") and limit.get("category") != tx.category:
-                    continue
+                limit_category_key = None
+                if limit.get("category"):
+                    try:
+                        limit_category_key = normalized_category_key(str(limit["category"]))
+                    except ValueError:
+                        continue
+                if tx.category and limit.get("category"):
+                    if selected_category_key and limit_category_key:
+                        if limit_category_key != selected_category_key:
+                            continue
+                    elif str(limit["category"]) != tx.category:
+                        continue
                 percent = int(limit.get("percent") or 0)
                 projected_percent: int | None = None
                 try:
@@ -1152,7 +1169,7 @@ class MiniAppAPI:
                     status = limit.get("status") or "normal"
                     description = "Лимит в рабочем режиме."
                 score = severity_rank[severity] + min(percent, 200)
-                if tx.category and limit.get("category") == tx.category and severity != "normal":
+                if selected_category_key and limit_category_key == selected_category_key and severity != "normal":
                     score += 25
                 candidates.append({
                     "score": score,
@@ -1163,6 +1180,12 @@ class MiniAppAPI:
                     "description": description,
                     "percent": percent,
                     "projected_percent": projected_percent if projected_percent is not None and projected_percent >= 90 else None,
+                    "amount": limit.get("amount"),
+                    "spent": limit.get("spent"),
+                    "currency": limit.get("currency"),
+                    "period": limit.get("period"),
+                    "category": limit.get("category"),
+                    "enabled": limit.get("enabled", True),
                     "status": status,
                     "cta_label": "Открыть лимиты",
                     "target_mode": "limits",
@@ -1179,59 +1202,126 @@ class MiniAppAPI:
             items.append(item)
         return items
 
-    def _home_insight(
+    def _insight_rows(self, req: MiniAppRequest, tx: TransactionFilters) -> list[tuple[Any, Any, Any, Any, Any]]:
+        return pg_fetchall(
+            f"""
+            SELECT COALESCE(category, 'Прочее'),
+                   NULLIF(TRIM(COALESCE(comment,'')), ''),
+                   COALESCE(currency, %s),
+                   COALESCE(SUM(amount),0),
+                   COUNT(*)
+              FROM public.operations
+             WHERE {tx.where_sql}
+               AND type='Расходы'
+             GROUP BY COALESCE(category, 'Прочее'),
+                      NULLIF(TRIM(COALESCE(comment,'')), ''),
+                      COALESCE(currency, %s)
+            """,
+            (get_user_currency(req.user_id), *tx.params, get_user_currency(req.user_id)),
+        )
+
+    def _home_insights(
         self,
         req: MiniAppRequest,
         tx: TransactionFilters,
         totals: dict[str, dict[str, Decimal | int]],
-    ) -> dict:
-        if not totals:
-            return {"kind": "fallback", "tone": "neutral", "title": "Данных пока мало", "text": "Добавьте операции, и здесь появится сравнение периода."}
-        if len(totals) > 1:
-            return {"kind": "currency_mix", "tone": "neutral", "title": "Несколько валют", "text": "Сравнение не складывает разные валюты без конвертации."}
-        currency = next(iter(totals))
+        focus_items: list[dict],
+    ) -> list[dict]:
+        if not totals or tx.all_scope or tx.operation_type == "income":
+            return []
+        preferred_currency = str(get_user_currency(req.user_id) or "").upper()
+        if preferred_currency in totals:
+            currency = preferred_currency
+        elif len(totals) == 1:
+            currency = next(iter(totals))
+        else:
+            return []
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
-        prev_params = dict(operation_type=tx.operation_type, category=tx.category or None)
-        prev_tx = self._transaction_filters(
-            req,
-            {**prev_params, "workspace_id": "all" if tx.all_scope else tx.workspace_ids[0], "period": "custom", "start_date": prev_start.isoformat(), "end_date": prev_end.isoformat()},
-        )
+        prev_tx = self._tx_for_period(req, tx, prev_start, prev_end, _prev_key)
         try:
-            rows = pg_fetchall(
-                f"""
-                SELECT type, COALESCE(SUM(amount),0)
-                  FROM public.operations
-                 WHERE {prev_tx.where_sql}
-                   AND COALESCE(currency, %s)=%s
-                 GROUP BY type
-                """,
-                (*prev_tx.params, get_user_currency(req.user_id), currency),
+            current_rows = self._insight_rows(req, tx)
+            previous_rows = self._insight_rows(req, prev_tx)
+            limits = [item for item in focus_items if item.get("kind") == "limit"]
+            workspace_row = next(
+                (item for item in self._workspace_rows(req.user_id) if item.get("workspace_id") == tx.workspace_ids[0]),
+                None,
+            )
+            snapshot = build_snapshot(
+                user_id=req.user_id,
+                workspace_id=tx.workspace_ids[0],
+                workspace_kind="personal" if tx.workspace_ids[0] is None else "workspace",
+                currency=currency,
+                period=PeriodRef(tx.period_key, tx.start, tx.end),
+                comparison_period=PeriodRef(_prev_key, prev_start, prev_end),
+                current_rows=current_rows,
+                previous_rows=previous_rows,
+                limits=limits,
+                scope_category=tx.category,
+                can_write=bool(workspace_row and workspace_row.get("role") in WRITE_ROLES),
+            )
+            return insight_engine.generate(
+                snapshot,
+                today=user_local_date(req.user_id, tx.workspace_ids[0]),
             )
         except Exception as exc:
-            log.info("miniapp_home_insight_unavailable reason=%s", type(exc).__name__)
-            return {"kind": "fallback", "tone": "neutral", "title": "Сравнение недоступно", "text": "Период показан без автоматического вывода."}
-        previous = {"income": Decimal("0.00"), "expense": Decimal("0.00")}
-        for typ, total in rows:
-            if typ == "Доходы":
-                previous["income"] = to_decimal_money(total)
-            elif typ == "Расходы":
-                previous["expense"] = to_decimal_money(total)
-        current_expense = to_decimal_money(totals[currency].get("expense", 0))
-        previous_expense = previous["expense"]
-        if previous_expense <= 0:
-            return {"kind": "previous_empty", "tone": "neutral", "title": "Есть текущий период", "text": "Для сравнения нужен предыдущий период с расходами."}
-        delta = current_expense - previous_expense
-        pct = int((abs(delta) / previous_expense * Decimal("100")).to_integral_value()) if previous_expense else 0
-        if delta < 0:
-            return {"kind": "expense_down", "tone": "positive", "title": "Расходы ниже", "text": f"На {pct}% меньше, чем в прошлом сопоставимом периоде.", "currency": currency}
-        if delta > 0:
-            return {"kind": "expense_up", "tone": "warning", "title": "Расходы выше", "text": f"На {pct}% больше, чем в прошлом сопоставимом периоде.", "currency": currency}
-        return {"kind": "expense_flat", "tone": "neutral", "title": "Расходы без изменений", "text": "Период совпадает с прошлым по расходам.", "currency": currency}
+            log.info("miniapp_home_insights_unavailable reason=%s", type(exc).__name__)
+            return []
+
+    def _insight_workspace(self, req: MiniAppRequest, workspace_id: Any) -> int | None:
+        workspace_ids, all_scope = self._read_scope(req, workspace_id)
+        if all_scope or len(workspace_ids) != 1:
+            raise MiniAppError(400, "concrete_workspace_required", "Choose one workspace.")
+        return workspace_ids[0]
+
+    def insight_impression(self, req: MiniAppRequest, insight_id: str, body: dict[str, Any]) -> dict:
+        fingerprint = str(insight_id or "").strip().lower()
+        if len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
+            raise MiniAppError(400, "bad_insight_id", "Invalid insight.")
+        workspace_id = self._insight_workspace(req, body.get("workspace_id"))
+        state = insight_engine.impression(req.user_id, workspace_id, fingerprint)
+        if not state:
+            raise MiniAppError(404, "insight_not_found", "Insight was not found.")
+        self._track(
+            req,
+            "insight_impression",
+            workspace_id=workspace_id,
+            properties={"detector_type": state.detector_type, "surface": "home"},
+        )
+        return success({"recorded": True}, request_id=req.request_id)
+
+    def insight_feedback(self, req: MiniAppRequest, insight_id: str, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        fingerprint = str(insight_id or "").strip().lower()
+        feedback_type = str(body.get("feedback_type") or "").strip().lower()
+        if len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
+            raise MiniAppError(400, "bad_insight_id", "Invalid insight.")
+        if feedback_type not in {"useful", "not_useful"}:
+            raise MiniAppError(400, "bad_insight_feedback", "Invalid feedback.")
+        workspace_id = self._insight_workspace(req, body.get("workspace_id"))
+        state = insight_engine.feedback(req.user_id, workspace_id, fingerprint, feedback_type)
+        if not state:
+            raise MiniAppError(404, "insight_not_found", "Insight was not found.")
+        self._track(
+            req,
+            "insight_feedback",
+            workspace_id=workspace_id,
+            properties={"detector_type": state.detector_type, "feedback_type": feedback_type, "surface": "detail"},
+        )
+        return success({
+            "recorded": True,
+            "feedback_type": feedback_type,
+            "suppressed_until": state.suppression_until,
+        }, request_id=req.request_id)
 
     def operations(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
         category_key = str(params.get("category_key") or "").strip()
-        tx_params = {**params, "category": "all"} if category_key else params
+        scope_category = str(params.get("scope_category") or "").strip()
+        tx_params = (
+            {**params, "category": scope_category}
+            if scope_category
+            else {**params, "category": "all"} if category_key else params
+        )
         tx = self._transaction_filters(req, tx_params, alias="o")
         limit = min(max(int(params.get("limit") or DEFAULT_PAGE_SIZE), 1), READ_PAGE_LIMIT)
         offset = max(int(params.get("offset") or 0), 0)
@@ -1500,7 +1590,7 @@ class MiniAppAPI:
 
     def analytics(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         tx = self._transaction_filters(req, params)
-        overview = self.overview(req, params)["data"]
+        overview = self.overview(req, {**params, "_skip_insights": True})["data"]
         available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
         requested_currency = str(params.get("currency") or "").strip().upper()
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
@@ -1985,6 +2075,7 @@ class MiniAppAPI:
             "end_date": tx.end.isoformat(),
             "operation_type": "income" if op_type == "Доходы" else "expense",
             "category": "all" if category_key else tx.category or "all",
+            "scope_category": tx.category if category_key else None,
             "currency": currency,
             "category_key": category_key,
             "merchant": merchant,
@@ -2084,12 +2175,14 @@ class MiniAppAPI:
             "average_check": (total / Decimal(count)).quantize(Decimal("0.01")) if count else Decimal("0.00"),
         }
 
-    def _merchant_context(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
+    def _merchant_context(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str, *, category_key: str | None = None) -> dict[str, Any]:
         normalized_merchant = normalize_merchant_key(merchant_key)
         if not normalized_merchant:
             raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
         category_expr = self._category_key_sql("category")
         merchant_expr = merchant_key_sql("comment")
+        category_filter = f"AND {category_expr}=%s" if category_key else ""
+        category_values = (category_key,) if category_key else ()
         rows = pg_fetchall(
             f"""
             SELECT {category_expr} AS category_key,
@@ -2101,12 +2194,22 @@ class MiniAppAPI:
              WHERE {tx.where_sql}
                AND type=%s
                AND COALESCE(currency, %s)=%s
+               {category_filter}
              GROUP BY {category_expr}
              ORDER BY COALESCE(SUM(CASE WHEN {merchant_expr}=%s THEN amount ELSE 0 END),0) DESC,
                       COALESCE(SUM(amount),0) DESC,
                       MIN(TRIM(COALESCE(category, 'Прочее')))
             """,
-            (normalized_merchant, normalized_merchant, *tx.params, op_type, get_user_currency(req.user_id), currency, normalized_merchant),
+            (
+                normalized_merchant,
+                normalized_merchant,
+                *tx.params,
+                op_type,
+                get_user_currency(req.user_id),
+                currency,
+                *category_values,
+                normalized_merchant,
+            ),
         )
         scope_total = sum((to_decimal_money(row[2]) for row in rows), Decimal("0.00"))
         category_items = []
@@ -2131,8 +2234,10 @@ class MiniAppAPI:
         primary = category_items[0] if category_items else None
         return {"scope_total": scope_total, "categories": category_items, "primary_category": primary}
 
-    def _merchant_identity_snapshot(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
+    def _merchant_identity_snapshot(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str, *, category_key: str | None = None) -> dict[str, Any]:
         normalized_merchant = normalize_merchant_key(merchant_key)
+        category_filter = f"AND {self._category_key_sql('category')}=%s" if category_key else ""
+        category_values = (category_key,) if category_key else ()
         rows = pg_fetchall(
             f"""
             SELECT NULLIF(TRIM(COALESCE(comment,'')), ''), COALESCE(SUM(amount),0), COUNT(*)
@@ -2141,10 +2246,11 @@ class MiniAppAPI:
                AND type=%s
                AND COALESCE(currency, %s)=%s
                AND {merchant_key_sql('comment')}=%s
+               {category_filter}
              GROUP BY NULLIF(TRIM(COALESCE(comment,'')), '')
              ORDER BY COUNT(*) DESC, COALESCE(SUM(amount),0) DESC, NULLIF(TRIM(COALESCE(comment,'')), '')
             """,
-            (*tx.params, op_type, get_user_currency(req.user_id), currency, normalized_merchant),
+            (*tx.params, op_type, get_user_currency(req.user_id), currency, normalized_merchant, *category_values),
         )
         grouped = fold_merchant_rows((str(row[0] or ""), currency, to_decimal_money(row[1]), int(row[2] or 0)) for row in rows)
         bucket = grouped.get(currency, {}).get(normalized_merchant)
@@ -2152,7 +2258,7 @@ class MiniAppAPI:
             return {"merchant_key": normalized_merchant, "display_name": normalized_merchant, "raw_aliases": []}
         return {"merchant_key": normalized_merchant, "display_name": bucket["name"], "raw_aliases": raw_aliases_for_bucket(bucket)}
 
-    def _merchant_baseline(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str) -> dict[str, Any]:
+    def _merchant_baseline(self, req: MiniAppRequest, tx: TransactionFilters, op_type: str, currency: str, merchant_key: str, *, category_key: str | None = None) -> dict[str, Any]:
         normalized_merchant = normalize_merchant_key(merchant_key)
         periods = comparable_baseline_periods(tx.start, tx.end, tx.period_key)
         if not periods:
@@ -2164,6 +2270,8 @@ class MiniAppAPI:
             for idx, (_start, _end) in enumerate(periods)
         )
         date_values = [value for period in periods for value in period]
+        category_filter = f"AND {self._category_key_sql('category')}=%s" if category_key else ""
+        category_values = (category_key,) if category_key else ()
         rows = pg_fetchall(
             f"""
             SELECT bucket, COALESCE(SUM(amount),0), COUNT(*)
@@ -2174,12 +2282,21 @@ class MiniAppAPI:
                        AND type=%s
                        AND COALESCE(currency, %s)=%s
                        AND {merchant_key_sql('comment')}=%s
+                       {category_filter}
                    ) scoped
              WHERE bucket IS NOT NULL
              GROUP BY bucket
              ORDER BY bucket
             """,
-            (*date_values, *self._replace_tx_period(tx, earliest, latest), op_type, get_user_currency(req.user_id), currency, normalized_merchant),
+            (
+                *date_values,
+                *self._replace_tx_period(tx, earliest, latest),
+                op_type,
+                get_user_currency(req.user_id),
+                currency,
+                normalized_merchant,
+                *category_values,
+            ),
         )
         by_bucket = {int(row[0]): (to_decimal_money(row[1]), int(row[2] or 0)) for row in rows}
         period_rows = []
@@ -2235,12 +2352,29 @@ class MiniAppAPI:
         merchant_key = normalize_merchant_key(value)
         if not merchant_key or merchant_key == EMPTY_MERCHANT_KEY:
             raise MiniAppError(400, "bad_merchant", "Invalid merchant.")
-        operation_items = self._detail_operation_rows(req, tx, op_type, currency, merchant_key=merchant_key)
-        current_summary = self._detail_summary(req, tx, op_type, currency, merchant_key=merchant_key)
-        previous_summary = self._detail_summary(req, prev_tx, op_type, currency, merchant_key=merchant_key)
+        raw_detail_category_key = str(params.get("detail_category_key") or "").strip()
+        try:
+            detail_category_key = normalized_category_key(raw_detail_category_key) if raw_detail_category_key else None
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_category", "Invalid category.") from exc
+        operation_items = self._detail_operation_rows(
+            req, tx, op_type, currency,
+            category_key=detail_category_key,
+            merchant_key=merchant_key,
+        )
+        current_summary = self._detail_summary(
+            req, tx, op_type, currency,
+            category_key=detail_category_key,
+            merchant_key=merchant_key,
+        )
+        previous_summary = self._detail_summary(
+            req, prev_tx, op_type, currency,
+            category_key=detail_category_key,
+            merchant_key=merchant_key,
+        )
         comparison = self._metric_comparison(current_summary["total"], previous_summary["total"])
-        context = self._merchant_context(req, tx, op_type, currency, merchant_key)
-        identity = self._merchant_identity_snapshot(req, tx, op_type, currency, merchant_key)
+        context = self._merchant_context(req, tx, op_type, currency, merchant_key, category_key=detail_category_key)
+        identity = self._merchant_identity_snapshot(req, tx, op_type, currency, merchant_key, category_key=detail_category_key)
         primary_category = context["primary_category"]
         feature_set = merchant_features(
             current_total=current_summary["total"],
@@ -2250,13 +2384,14 @@ class MiniAppAPI:
             category_total=primary_category["category_total"] if primary_category else None,
             scope_total=context["scope_total"],
         )
-        baseline = self._merchant_baseline(req, tx, op_type, currency, merchant_key)
+        baseline = self._merchant_baseline(req, tx, op_type, currency, merchant_key, category_key=detail_category_key)
         return {
             "kind": "merchant",
             "title": identity["display_name"],
             "currency": currency,
             "operation_type": "income" if op_type == "Доходы" else "expense",
             "merchant_key": merchant_key,
+            "category_key": detail_category_key,
             "total": current_summary["total"],
             "previous_total": previous_summary["total"],
             "delta": comparison["delta"],
@@ -2276,7 +2411,13 @@ class MiniAppAPI:
             "baseline": baseline,
             "raw_aliases": identity["raw_aliases"],
             "operations": operation_items,
-            "operation_scope": self._analytics_operations_scope(tx, op_type, currency, merchant_key=merchant_key),
+            "operation_scope": self._analytics_operations_scope(
+                tx,
+                op_type,
+                currency,
+                category_key=detail_category_key,
+                merchant_key=merchant_key,
+            ),
         }
 
     def _analytics_search(self, req: MiniAppRequest, tx: TransactionFilters, params: dict[str, Any], op_type: str, *, currencies: list[str] | None = None) -> dict:
@@ -3556,6 +3697,8 @@ class MiniAppAPI:
             "mini_app_home_challenge_opened",
             "mini_app_home_focus_opened",
             "mini_app_home_insight_opened",
+            "insight_opened",
+            "insight_action_clicked",
             "mini_app_profile_section_opened",
             "mini_app_profile_setting_changed",
             "mini_app_challenge_carousel_changed",
@@ -3567,7 +3710,7 @@ class MiniAppAPI:
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "kind", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total"}
+            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total"}
         }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)

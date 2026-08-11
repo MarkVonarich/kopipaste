@@ -41,6 +41,8 @@ Authorization: tma <initData>
 - `PATCH /miniapp/api/categories/{token}`
 - `DELETE /miniapp/api/categories/{token}`
 - `GET /miniapp/api/overview`
+- `POST /miniapp/api/insights/{id}/impression`
+- `POST /miniapp/api/insights/{id}/feedback`
 - `GET /miniapp/api/operations`
 - `POST /miniapp/api/operations`
 - `GET /miniapp/api/operations/{id}`
@@ -128,6 +130,14 @@ Categories are managed from Plans in the Mini App. Profile no longer shows categ
 
 Reference counts for the management screen are batched per category list. The API must not open one connection or run all reference-table queries per category.
 
+## Insights
+
+`GET /miniapp/api/overview` includes `insights`, containing zero to three deterministic structured insights for one concrete authorized workspace and one currency. Each item carries a hashed `id`, stable detector type, period and comparison dates, structured evidence, and a bounded list of validated action types. `insight` remains the primary-item alias for Home compatibility.
+
+The aggregate `workspace_id=all` scope intentionally returns no Insight Engine items in V1. Existing overview and Analytics totals remain available for that scope.
+
+`POST /miniapp/api/insights/{id}/impression` records that an already-issued insight was displayed. `POST /miniapp/api/insights/{id}/feedback` accepts `feedback_type=useful|not_useful`. Both require the same concrete workspace scope and update only a pre-existing fingerprint owned by the authenticated user/workspace. The client cannot create arbitrary insight state through these endpoints.
+
 ## Analytics
 
 `GET /miniapp/api/analytics` returns:
@@ -188,6 +198,10 @@ Allowed client events:
 - `mini_app_home_challenge_opened`
 - `mini_app_home_focus_opened`
 - `mini_app_home_insight_opened`
+- `insight_impression`
+- `insight_opened`
+- `insight_action_clicked`
+- `insight_feedback`
 - `mini_app_home_reminder_opened`
 - `mini_app_challenge_carousel_changed`
 - `mini_app_focus_carousel_changed`

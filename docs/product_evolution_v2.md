@@ -265,17 +265,96 @@ Reusable for PR 4:
 
 Goal: surface useful deterministic insights from the user's own data after analytics and merchant foundations are in place.
 
-Scope:
+Implemented architecture:
 
-- Generate insights from existing calculations, budgets, limits, goals, reminders, merchant groups, and notification preferences.
-- Avoid raw financial text in logs or analytics events.
-- Respect quiet hours and notification preferences for any insight delivery.
+- `services.insights` is the reusable deterministic service boundary. It contains the typed snapshot/candidate model, independent detectors, hierarchy and ranking, presentation, fingerprints, and the small state-store interface.
+- Mini App Home performs two bounded grouped operation queries: one for the selected period and one for the exact Analytics 2.0 comparable period. Rows are grouped by raw category, raw merchant description, and currency, then folded through the existing category and Merchant Intelligence normalization contracts.
+- The API supplies one `insights` payload inside `/miniapp/api/overview`; it does not call detector-specific endpoints and Analytics requests explicitly skip Home insight generation.
+- A candidate remains structured through ranking. Russian presentation is produced only after selection; titles are not identifiers.
+- The final list contains at most one primary and two secondary insights. No eligible result means no Home insight card.
 
-Acceptance criteria:
+Candidate model:
 
-- Insights are explainable, deterministic, and scoped by workspace and currency.
-- No insight combines currencies without explicit conversion.
-- Users can understand the source period and scope of each insight.
+- Stable detector/type, workspace, currency, period, comparison period, and operation type.
+- Safe entity type/key references, current and baseline values, absolute and relative deltas, normalized impact, confidence, severity, actionability, and active-control state.
+- Structured content data, evidence rows, validated actions, hierarchy/group key, deterministic score, hashed fingerprint, and validity metadata.
+- Frontend actions are restricted to `OPEN_ANALYTICS`, `OPEN_CATEGORY`, `OPEN_MERCHANT`, `OPEN_OPERATIONS`, `OPEN_LIMIT`, and `CREATE_LIMIT`. Arbitrary executable commands are never persisted or accepted from the client.
+
+V1 detectors:
+
+- `spending_change`: total expense change against the Analytics 2.0 comparable period. When Home has a selected category, the detector names that category and treats it as the source scope.
+- `category_contribution`: a canonical category that materially explains positive total growth. It is omitted when the source is already filtered to one category, where a 100% contribution would be redundant.
+- `merchant_contribution`: a Merchant Key V1 identity that materially explains category growth.
+- `merchant_frequency`: a meaningful increase in operation count for a canonical merchant.
+- `average_check_change`: a meaningful merchant average-check increase using `merchant_features()`.
+- `limit_pace`: an existing current weekly/monthly limit whose used percentage is materially ahead of factual elapsed-period percentage. It does not claim a forecast.
+
+Significance thresholds:
+
+- Overall relative change: at least 15% and at least 3 operations in both periods.
+- Category relative growth: at least 20%, at least 3 operations in both periods, and at least 35% of the positive total delta.
+- Merchant contribution: at least 35% of category growth and at least 3 current operations.
+- Frequency: current count at least 5, previous count at least 3, increase at least 3 operations and 30%.
+- Average check: at least 3 operations in both periods, increase at least 20%, and an absolute average-check increase at least 20% of the currency significance floor.
+- Limit pace: at least 70% used, at least 20% of the period elapsed, and used percentage at least 15 percentage points ahead of elapsed percentage.
+- Monetary changes must also meet the currency floor: RUB 500; KZT 2,500; UZS 50,000; TMT 20; USD/EUR/GBP 10; UAH 200; TRY 300; CNY 75; BYN/GEL 25; RSD 1,000; AED 40; THB 350; VND 250,000; KRW 15,000; AMD 4,000; AZN 20; EGP 500. Unknown supported future codes use 10 units. These are noise floors, not FX rates.
+
+Ranking and hierarchy:
+
+- Score is deterministic: capped normalized impact (40) + relative significance (22) + severity (0/8/18/30) + confidence (5/10) + actionability + active-control boost (20) - repeat penalty (up to 24).
+- Limit impact is the positive amount ahead of linear period pace: `max(spent - limit_amount * elapsed_percent / 100, 0)`. Relative significance is the percentage-point pace lead, so a more exhausted equivalent limit cannot rank lower merely because less remains.
+- Tie-breaking is detector, entity type/key, then fingerprint.
+- Category contribution absorbs related overall growth, merchant contribution, frequency, and average-check evidence.
+- A category limit-pace risk absorbs related category-growth evidence and ranks as the active financial control.
+- Merchant frequency and average-check narratives for the same merchant collapse into one visible candidate with additional evidence.
+- Active severe limit risk generally outranks minor novelty; 10 to 50 RUB is rejected before ranking while 20,000 to 27,000 RUB is eligible.
+
+Baseline and cold start:
+
+- Period comparisons use the exact Analytics 2.0 previous-period semantics: month-to-date to previous month-to-date, full month to full prior month, and equal preceding windows for week/custom periods.
+- Zero previous amounts never produce a misleading relative claim.
+- V1 does not say "обычно" and does not label an anomaly from sparse observations. PR 3's three-period Merchant baseline remains authoritative for future baseline-specific detectors, but V1 comparative detectors intentionally use the explicit single comparable period shown in evidence.
+- With no valid comparison, insufficient operation counts, or only tiny changes, Home remains clean. Existing Analytics remains available for current facts.
+
+Multi-currency and authorization:
+
+- Monetary candidates use one currency only. Home uses the user's preferred currency when present in scope, or the sole current currency; it does not rank raw currency amounts against each other and performs no FX conversion.
+- Insights are generated only for one concrete workspace selected through existing authenticated membership scope. Non-personal workspaces are supported; cross-workspace `all` insight generation is deferred rather than risking mixed lifecycle/action scope.
+- Feedback and impression writes revalidate the concrete workspace through the existing Mini App workspace authorization and update only an already-issued hashed fingerprint owned by that user/workspace.
+
+Home and detail UX:
+
+- Home keeps its existing hero, activity, income/expense, challenge, focus, reminder, and recent-operation structure.
+- Up to three compact insight cards occupy the existing intelligence surface. No filler or permanent empty card is rendered.
+- The existing bottom-sheet pattern shows conclusion, explicit current/comparison dates, structured evidence, contextual actions, and feedback. Telegram BackButton closes it predictably.
+- Category and merchant actions preserve workspace, period, operation type, currency, the exact selected source category when present, and the canonical target key. Merchant detail accepts `detail_category_key`, so canonical variants reconcile without narrowing to one display string. Operations applies the same source scope plus canonical key.
+- Category growth opens an existing enabled limit with the same canonical category, currency, and current week/month period. `CREATE_LIMIT` is offered only when no matching control exists; read-only workspaces receive neither mutation action.
+- Insights never create/edit limits, operations, goals, categories, or reminders automatically.
+
+Feedback, repeat suppression, and lifecycle:
+
+- Migration `20260811_021_insight_engine_state.sql` adds one `insight_states` table. It stores user/workspace scope, SHA-256 fingerprint, detector and entity type, currency, periods, shown timestamps/count, feedback, temporary suppression, and validity timestamps. It does not store raw operation comments, merchant display text, transaction properties, or rendered prose.
+- The unique user/workspace/fingerprint index makes candidate refresh idempotent.
+- A fingerprint includes detector, safe entity key, currency, periods, and currency-floor material buckets. Materially changed values can become a new eligible instance; tiny changes retain the same lifecycle.
+- Each Mini App session records an impression once per workspace/fingerprint pair. The database counter is a real rolling window anchored by `first_shown_at`: after 24 hours the next impression starts at 1. Repeats receive an 8-point penalty per impression in the current window, capped at 24; after 3 impressions in that window the exact instance is temporarily omitted.
+- `useful` is recorded. `not_useful` suppresses only the same detector family for that user and workspace for 30 days; unrelated detector families and other users/workspaces are unaffected.
+- State is valid for seven days from generation and state reads are bounded to 120 days. Old-period rows are not served as payloads; candidates are always recomputed from the currently selected scope.
+
+Performance and privacy:
+
+- The detector source reads only the selected and comparable bounded periods. It does not scan lifetime history, query once per merchant, or call another endpoint over HTTP.
+- Category and merchant calculations share each period's grouped rows. Merchant identity and feature math reuse `services.merchant_intelligence`.
+- Limit pace reuses the limit values already calculated for the Home focus surface instead of triggering another per-limit pass.
+- Product events are limited to `insight_impression`, `insight_opened`, `insight_action_clicked`, and `insight_feedback`. Properties contain detector/action/feedback/surface machine metadata only; no raw description, merchant display text, amount, or identifiers are exported.
+- Insight Engine is Mini App/Home only. It adds no Telegram push, scheduler, quiet-hours path, notification preference, or PostHog configuration.
+
+Explicitly deferred:
+
+- Goal pace detector: the existing goal model can support planning, but Home already owns goal urgency and duplicating it in V1 would create competing narratives; a later detector should first define reconciliation with that surface.
+- Combined category-budget pace: deferred until its multi-category contribution evidence can be shared without another Home query pass.
+- Recurring/subscription change: existing stored pattern signals are not yet reliable enough for a change claim in this scope.
+- Personal-baseline anomaly labels, weekday behavior, and time-of-day behavior.
+- Cross-workspace `all` insights, automatic FX, LLM/ML detection or ranking, fuzzy merchant aliases, investment advice, conversational analysis, automatic product changes, and new Telegram insight campaigns.
 
 ## Shared architecture decisions
 

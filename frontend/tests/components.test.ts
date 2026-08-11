@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { HomeScreen } from '../src/components/HomeScreen';
+import { HomeScreen, InsightDetail } from '../src/components/HomeScreen';
+import type { Insight } from '../src/types';
 import { OperationsScreen } from '../src/components/OperationsScreen';
 import { TransactionForm } from '../src/components/TransactionForm';
 import { ConfirmDialog } from '../src/components/ConfirmDialog';
@@ -16,6 +17,25 @@ const overview = {
   totals_by_currency: { RUB: { income: '1000.00', expense: '350.25', count: 2 } },
   recent_operations: [],
 };
+
+function insight(overrides: Partial<Insight> = {}): Insight {
+  return {
+    id: 'a'.repeat(64),
+    type: 'category_contribution',
+    detector: 'category_contribution',
+    tone: 'warning',
+    severity: 'high',
+    title: 'Расходы на Продукты выросли на 4 100 ₽',
+    summary: '+29% к сопоставимому периоду',
+    currency: 'RUB',
+    period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-10' },
+    comparison_period: { key: 'previous_month_to_date', start_date: '2026-07-01', end_date: '2026-07-10' },
+    evidence: [{ kind: 'amount_comparison', label: 'Продукты', current_amount: '18400.00', previous_amount: '14300.00', delta_amount: '4100.00', currency: 'RUB' }],
+    actions: [{ type: 'OPEN_CATEGORY', label: 'Посмотреть категорию', params: { category_key: 'продукты', currency: 'RUB' } }],
+    feedback: null,
+    ...overrides,
+  };
+}
 
 describe('acceptance components', () => {
   it('renders Home result card and recent operations controls', () => {
@@ -64,7 +84,7 @@ describe('acceptance components', () => {
       ...overview,
       challenge: { key: 'daily', title: 'Две записи за день', description: 'Запишите две реальные операции за сегодня.', progress: 1, target: 2, completed: false, cta_label: 'Добавить', period_key: '2026-08-04' },
       focus: { kind: 'limit', title: 'Food', description: 'Лимит почти исчерпан', target_mode: 'limits', percent: 90 },
-      insight: { kind: 'expense_down', tone: 'positive', title: 'Расходы ниже', text: 'На 10% меньше' },
+      insight: insight({ tone: 'positive', title: 'Расходы ниже', summary: 'На 10% меньше' }),
     }, recent, 'RUB', true);
     const incomeColumn = html.slice(html.indexOf('data-testid="income-column"'), html.indexOf('data-testid="expense-column"'));
     const expenseColumn = html.slice(html.indexOf('data-testid="expense-column"'), html.indexOf('data-testid="smart-home-grid"'));
@@ -97,7 +117,7 @@ describe('acceptance components', () => {
         { state: 'upcoming', id: 1, title: 'Internet', event_date: '2026-08-10', status_text: 'Скоро', overdue_days: 0 },
         { state: 'empty', title: 'Нет событий', status_text: 'Добавьте напоминание', overdue_days: 0 },
       ],
-      insight: { kind: 'period', tone: 'neutral', title: 'Период', text: 'Есть данные' },
+      insight: insight({ tone: 'neutral', title: 'Период', summary: 'Есть данные' }),
     }, [], 'RUB', true);
 
     expect(html).toContain('class="smart-card home-carousel"');
@@ -170,11 +190,47 @@ describe('acceptance components', () => {
   it('uses compact Financial Result comparison text on Home', () => {
     const html = HomeScreen({
       ...overview,
-      insight: { kind: 'expense_up', tone: 'warning', title: 'Расходы выше', text: 'На 564% больше, чем в прошлом сопоставимом периоде.' },
+      insight: insight({ title: 'Расходы выше', summary: 'На 564% больше, чем в прошлом сопоставимом периоде.' }),
     }, [], 'RUB', true);
 
     expect(html).toContain('На 564% больше прошлого периода');
     expect(html).not.toContain('в прошлом сопоставимом периоде');
+  });
+
+  it('renders up to three structured insights and keeps Home clean without them', () => {
+    const clean = HomeScreen(overview, [], 'RUB', true);
+    const populated = HomeScreen({
+      ...overview,
+      insights: [insight(), insight({ id: 'b'.repeat(64), type: 'limit_pace', detector: 'limit_pace', title: 'Рестораны близки к лимиту', summary: 'Использовано 82%' }), insight({ id: 'c'.repeat(64), type: 'merchant_frequency', detector: 'merchant_frequency', title: 'В Лавке стало больше покупок', summary: '12 вместо 7' })],
+    }, [], 'RUB', true);
+
+    expect(clean).not.toContain('Инсайт периода');
+    expect(populated.match(/data-action="home-insight"/g)).toHaveLength(3);
+    expect(populated).toContain('Продукты выросли');
+    expect(populated).toContain('Рестораны близки');
+    expect(populated).toContain('12 вместо 7');
+  });
+
+  it('renders insight evidence, contextual actions, and feedback controls', () => {
+    const html = InsightDetail(insight({
+      evidence: [
+        { kind: 'amount_comparison', label: 'Продукты', current_amount: '18400.00', previous_amount: '14300.00', currency: 'RUB' },
+        { kind: 'merchant_contribution', label: 'Яндекс Лавка', delta_amount: '2800.00', currency: 'RUB', share_pct: 63, current_count: 12, previous_count: 7 },
+      ],
+      actions: [
+        { type: 'OPEN_MERCHANT', label: 'Посмотреть Лавку', params: { merchant_key: 'яндекс лавка' } },
+        { type: 'OPEN_OPERATIONS', label: 'Посмотреть операции', params: { merchant_key: 'яндекс лавка' } },
+        { type: 'CREATE_LIMIT', label: 'Установить лимит', params: { category: 'Продукты' } },
+      ],
+    }));
+
+    expect(html).toContain('18 400 ₽');
+    expect(html).toContain('14 300 ₽');
+    expect(html).toContain('Яндекс Лавка');
+    expect(html).toContain('12 покупок вместо 7');
+    expect(html).toContain('data-action="insight-action"');
+    expect(html).toContain('data-feedback="useful"');
+    expect(html).toContain('data-feedback="not_useful"');
   });
 
   it('formats signed analytics deltas without adding a false percentage sign', () => {

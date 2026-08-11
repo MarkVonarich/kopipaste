@@ -781,7 +781,7 @@ def test_overview_recent_operations_are_limited_to_three(monkeypatch):
     monkeypatch.setattr(api, "operations", lambda _req, _params: {"data": {"items": [{"id": i} for i in range(5)]}})
     monkeypatch.setattr(api, "_home_challenge", lambda _req: None)
     monkeypatch.setattr(api, "_home_focus", lambda *_args: None)
-    monkeypatch.setattr(api, "_home_insight", lambda *_args: {"kind": "fallback", "tone": "neutral", "title": "x", "text": "x"})
+    monkeypatch.setattr(api, "_home_insights", lambda *_args: [])
     monkeypatch.setattr(api, "_home_reminder", lambda _req: {"state": "empty"})
 
     data = api.overview(api.request(42), {"workspace_id": 10})["data"]
@@ -974,19 +974,112 @@ def test_global_category_focus_relevance_does_not_recompute_limit_spent(monkeypa
     assert calls[0]["period"] == "current_week"
 
 
-def test_home_insight_does_not_mix_currencies():
-    api = MiniAppAPI()
+def test_global_category_focus_matches_existing_limit_by_canonical_key(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 8, 7))
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": []}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": [{
+        "id": "category:month:food",
+        "title": "Food",
+        "category": " FOOD ",
+        "percent": 40,
+        "spent": "4000.00",
+        "amount": "10000.00",
+        "currency": "RUB",
+        "period": "month",
+    }]}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10, "category": "Food"}, _focus_tx("Food"))
+
+    assert item["id"] == "category:month:food"
+
+
+def test_home_insights_select_default_currency_without_combining(monkeypatch):
+    api = _api(monkeypatch)
     tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "all", None, "", ())
-    data = api._home_insight(
+    captured = {}
+    monkeypatch.setattr(api, "_tx_for_period", lambda *_args: tx)
+    monkeypatch.setattr(api, "_insight_rows", lambda *_args: [("Food", "Shop", "RUB", Decimal("1000"), 4)])
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [{"workspace_id": 10, "role": "member"}])
+
+    def _generate(snapshot, **_kwargs):
+        captured["snapshot"] = snapshot
+        return []
+
+    monkeypatch.setattr("miniapp.api.insight_engine.generate", _generate)
+
+    data = api._home_insights(
         api.request(42),
         tx,
         {
             "RUB": {"income": Decimal("0.00"), "expense": Decimal("100.00"), "count": 1},
             "USD": {"income": Decimal("0.00"), "expense": Decimal("10.00"), "count": 1},
         },
+        [],
     )
 
-    assert data["kind"] == "currency_mix"
+    assert data == []
+    assert captured["snapshot"].currency == "RUB"
+
+
+def test_home_insights_preserve_selected_category_scope(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters(
+        [10], False, date(2026, 8, 1), date(2026, 8, 5),
+        "current_month", "expense", "Рестораны", "category=%s", ("Рестораны",),
+    )
+    captured = {}
+    monkeypatch.setattr(api, "_tx_for_period", lambda *_args: tx)
+    monkeypatch.setattr(api, "_insight_rows", lambda *_args: [("Рестораны", "Bistro", "RUB", Decimal("8400"), 8)])
+    monkeypatch.setattr(api, "_workspace_rows", lambda _user_id: [{"workspace_id": 10, "role": "member"}])
+    monkeypatch.setattr(
+        "miniapp.api.insight_engine.generate",
+        lambda snapshot, **_kwargs: captured.setdefault("snapshot", snapshot) and [],
+    )
+
+    api._home_insights(
+        api.request(42),
+        tx,
+        {"RUB": {"income": Decimal("0.00"), "expense": Decimal("8400.00"), "count": 8}},
+        [],
+    )
+
+    assert captured["snapshot"].scope_category == "Рестораны"
+    assert captured["snapshot"].scope_category_key == "рестораны"
+
+
+def test_insight_feedback_requires_authorized_concrete_workspace(monkeypatch):
+    api = _api(monkeypatch)
+    fingerprint = "a" * 64
+    monkeypatch.setattr(api, "_check_write_rate", lambda _req: None)
+
+    def _scope(_req, workspace_id):
+        if workspace_id != 10:
+            raise MiniAppError(403, "workspace_access_denied", "Denied")
+        return [10], False
+
+    monkeypatch.setattr(api, "_read_scope", _scope)
+    monkeypatch.setattr("miniapp.api.insight_engine.feedback", lambda *_args: pytest.fail("feedback must not be called"))
+
+    with pytest.raises(MiniAppError) as exc:
+        api.insight_feedback(api.request(42), fingerprint, {"workspace_id": 11, "feedback_type": "useful"})
+
+    assert exc.value.code == "workspace_access_denied"
+
+
+def test_insight_feedback_records_only_safe_machine_metadata(monkeypatch):
+    api = _api(monkeypatch)
+    fingerprint = "b" * 64
+    captured = []
+    monkeypatch.setattr(api, "_read_scope", lambda _req, workspace_id: ([10], False) if workspace_id == 10 else pytest.fail("bad scope"))
+    monkeypatch.setattr("miniapp.api.insight_engine.feedback", lambda *_args: type("State", (), {"detector_type": "limit_pace", "suppression_until": None})())
+    monkeypatch.setattr(api, "_track", lambda _req, event, **kwargs: captured.append((event, kwargs)))
+
+    data = api.insight_feedback(api.request(42), fingerprint, {"workspace_id": 10, "feedback_type": "useful", "raw_text": "secret purchase"})["data"]
+
+    assert data["recorded"] is True
+    assert captured == [("insight_feedback", {"workspace_id": 10, "properties": {"detector_type": "limit_pace", "feedback_type": "useful", "surface": "detail"}})]
+    assert "secret purchase" not in str(captured)
 
 
 def test_profile_setters_and_quiet_hours_update(monkeypatch):

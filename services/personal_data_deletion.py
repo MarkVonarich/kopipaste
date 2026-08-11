@@ -27,6 +27,7 @@ PERSONAL_TABLES = {
     "custom_categories": "user_id=%s OR workspace_id = ANY(%s)",
     "user_aliases": "user_id=%s",
     "ml_observations": "user_id=%s",
+    "insight_states": "user_id=%s OR workspace_id = ANY(%s)",
     "action_tokens": "user_id=%s",
     "user_workspace_settings": "user_id=%s",
     "workspace_members": "user_id=%s",

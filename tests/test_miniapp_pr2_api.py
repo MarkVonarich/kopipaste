@@ -726,6 +726,41 @@ def test_merchant_detail_uses_key_preserves_raw_comments_and_features(monkeypatc
     assert detail["baseline"]["sufficient_data"] is True
 
 
+def test_merchant_detail_preserves_canonical_category_key_across_drilldown(monkeypatch):
+    api = _api(monkeypatch)
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "expense", None, "workspace_id=ANY(%s)", ([10],))
+    prev_tx = TransactionFilters([10], False, date(2026, 7, 1), date(2026, 7, 5), "previous_month_to_date", "expense", None, "workspace_id=ANY(%s)", ([10],))
+    seen = {"operations": [], "summaries": [], "context": [], "identity": [], "baseline": []}
+
+    monkeypatch.setattr(api, "_detail_operation_rows", lambda *_args, **kwargs: seen["operations"].append(kwargs) or [])
+
+    def _summary(_req, _tx, _op_type, _currency, **kwargs):
+        seen["summaries"].append(kwargs)
+        return {"total": Decimal("6000.00"), "operation_count": 6, "average_check": Decimal("1000.00")}
+
+    monkeypatch.setattr(api, "_detail_summary", _summary)
+    monkeypatch.setattr(api, "_merchant_context", lambda *_args, **kwargs: seen["context"].append(kwargs) or {"scope_total": Decimal("6000.00"), "primary_category": None, "categories": []})
+    monkeypatch.setattr(api, "_merchant_identity_snapshot", lambda *_args, **kwargs: seen["identity"].append(kwargs) or {"display_name": "Shop", "raw_aliases": ["Shop"]})
+    monkeypatch.setattr(api, "_merchant_baseline", lambda *_args, **kwargs: seen["baseline"].append(kwargs) or {"method": "trailing_median", "periods_used": 0, "amount": Decimal("0.00"), "count": 0, "average_check": Decimal("0.00"), "sufficient_data": False})
+
+    detail = api._analytics_detail(
+        api.request(42),
+        tx,
+        prev_tx,
+        {
+            "detail_kind": "merchant",
+            "detail_value": "Shop",
+            "detail_currency": "RUB",
+            "detail_category_key": " ПРОЧЕЕ ",
+        },
+        "Расходы",
+    )
+
+    assert detail["category_key"] == "прочее"
+    assert detail["operation_scope"]["category_key"] == "прочее"
+    assert all(item["category_key"] == "прочее" for values in seen.values() for item in values)
+
+
 def test_category_merchant_breakdown_folds_alias_share_against_full_denominator(monkeypatch):
     api = _api(monkeypatch)
     tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 5), "current_month", "expense", None, "workspace_id=ANY(%s)", ([10],))
