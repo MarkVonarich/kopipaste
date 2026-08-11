@@ -130,6 +130,7 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
       }
     })),
     recordReminder: vi.fn(async () => ({ result: 'recorded', reminder: null, operation: { id: 9 } })),
+    createLimit: vi.fn(async () => ({ limit: plansData.limits[0] })),
     updateLimit: vi.fn(async () => ({ limit: plansData.general_limits[0] })),
     deleteLimit: vi.fn(),
     insightImpression: vi.fn(async () => ({ recorded: true })),
@@ -239,6 +240,22 @@ describe('main plan handlers', () => {
     const backHandler = (window.Telegram?.WebApp?.BackButton?.onClick as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     backHandler?.();
     expect(document.querySelector('[data-sheet]')).toBeNull();
+  });
+
+  it('removes a not-useful insight after persistence even when overview is stale', async () => {
+    const api = installAppMocks([homeInsight()]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.click();
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-feedback="not_useful"]')?.click();
+    await flush(12);
+
+    expect(api.insightFeedback).toHaveBeenCalledWith('a'.repeat(64), 10, 'not_useful');
+    expect(api.overview).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[data-sheet]')).toBeNull();
+    expect(document.querySelector('[data-action="home-insight"]')).toBeNull();
   });
 
   it('opens merchant Analytics detail with the stable merchant key', async () => {
@@ -383,6 +400,46 @@ describe('main plan handlers', () => {
 
     expect(document.querySelector('form[data-action="create-limit"]')).not.toBeNull();
     expect(document.querySelector<HTMLSelectElement>('select[name="category"]')?.value).toBe('Food');
+  });
+
+  it.each(['USD', 'EUR', 'RUB'])('submits %s from an insight-created limit', async (currency) => {
+    const createLimitAction = { type: 'CREATE_LIMIT', label: 'Установить лимит', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'all', target_category: 'Food', category_key: 'food', currency } };
+    const api = installAppMocks([homeInsight([createLimitAction])]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="insight-action"]')?.click();
+    await flush(8);
+
+    const currencyInput = document.querySelector<HTMLInputElement>('form[data-action="create-limit"] input[name="currency"]');
+    expect(currencyInput?.value).toBe(currency);
+    expect(currencyInput?.readOnly).toBe(true);
+    const amount = document.querySelector<HTMLInputElement>('form[data-action="create-limit"] input[name="amount"]');
+    if (amount) amount.value = '100';
+    document.querySelector<HTMLFormElement>('form[data-action="create-limit"]')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush(12);
+
+    expect(api.createLimit).toHaveBeenCalledWith(expect.objectContaining({ currency, amount: '100.00' }));
+  });
+
+  it('clears insight currency before ordinary limit creation', async () => {
+    const createLimitAction = { type: 'CREATE_LIMIT', label: 'Установить лимит', params: { workspace_id: 10, period: 'current_month', operation_type: 'expense', category: 'all', target_category: 'Food', category_key: 'food', currency: 'USD' } };
+    installAppMocks([homeInsight([createLimitAction])]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="insight-action"]')?.click();
+    await flush(8);
+    expect(document.querySelector<HTMLInputElement>('input[name="currency"]')?.value).toBe('USD');
+
+    document.querySelector<HTMLButtonElement>('[data-action="close-sheet"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="limit-create"][data-scope="category"]')?.click();
+    await flush();
+
+    expect(document.querySelector('form[data-action="create-limit"] input[name="currency"]')).toBeNull();
   });
 
   it('records identical insight fingerprints once per workspace', async () => {

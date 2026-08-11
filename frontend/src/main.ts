@@ -42,6 +42,7 @@ let chartInstances: Chart[] = [];
 let homeScreenEventsRegistered = false;
 let homeScreenCheckSeq = 0;
 const impressedInsightIds = new Set<string>();
+const rejectedInsightIds = new Set<string>();
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -286,7 +287,7 @@ function renderSheet(): string {
     return BottomSheet('Пополнить цель', GoalContributionForm(selectedGoal, state.goalIdempotencyKey || requestId(), state.saving, state.saveError));
   }
   if (state.sheet === 'limit-create') {
-    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError, state.limitCreateScope || 'category', state.insightLimitCategory || ''));
+    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError, state.limitCreateScope || 'category', state.insightLimitCategory || '', state.insightLimitCurrency || ''));
   }
   if (state.sheet === 'limit-edit' && selectedLimit) {
     return BottomSheet('Изменить лимит', LimitForm(selectedLimit, categoryOptions, state.saving, state.saveError));
@@ -477,7 +478,10 @@ async function loadScreen(): Promise<void> {
     const filters = activeFilters();
     if (state.tab === 'home') {
       overview = await api.overview(state.workspaceId, filters);
-      for (const insight of overview.insights || []) {
+      const insightValues = overview.insights?.length ? overview.insights : overview.insight ? [overview.insight] : [];
+      const visibleInsights = insightValues.filter((insight) => !rejectedInsightIds.has(`${state.workspaceId ?? 'personal'}:${insight.id}`));
+      overview = { ...overview, insights: visibleInsights, insight: visibleInsights[0] || null };
+      for (const insight of visibleInsights) {
         const impressionKey = `${state.workspaceId ?? 'personal'}:${insight.id}`;
         if (impressedInsightIds.has(impressionKey)) continue;
         impressedInsightIds.add(impressionKey);
@@ -617,6 +621,7 @@ async function openInsightAction(type: InsightActionType, params: Record<string,
     state.insightLimitCategory = params.target_category
       ? String(params.target_category)
       : params.category && params.category !== 'all' ? String(params.category) : undefined;
+    state.insightLimitCurrency = params.currency ? String(params.currency) : undefined;
     state.limitCreateIdempotencyKey = requestId();
     state.sheet = 'limit-create';
   }
@@ -675,6 +680,7 @@ function closeSheet(): void {
   state.goalCreateIdempotencyKey = undefined;
   state.limitCreateIdempotencyKey = undefined;
   state.insightLimitCategory = undefined;
+  state.insightLimitCurrency = undefined;
   state.goalPlanPreview = undefined;
   state.goalPreviewPayloadHash = undefined;
   state.goalDraft = undefined;
@@ -1146,7 +1152,17 @@ function wireEvents(): void {
       state.saveError = undefined;
       render();
       try {
-        await api.insightFeedback(selectedInsight.id, state.workspaceId, feedback);
+        const insightId = selectedInsight.id;
+        await api.insightFeedback(insightId, state.workspaceId, feedback);
+        if (feedback === 'not_useful') {
+          rejectedInsightIds.add(`${state.workspaceId ?? 'personal'}:${insightId}`);
+          state.sheet = null;
+          selectedInsight = null;
+          state.saving = false;
+          showToast('Спасибо, учтём этот выбор.');
+          await loadScreen();
+          return;
+        }
         selectedInsight.feedback = feedback;
         showToast('Спасибо, учтём этот выбор.');
       } catch (error) {
@@ -1229,6 +1245,8 @@ function wireEvents(): void {
     button.addEventListener('click', async () => {
       const scope = button.dataset.scope === 'all_expenses' ? 'all_expenses' : 'category';
       state.limitCreateScope = scope;
+      state.insightLimitCategory = undefined;
+      state.insightLimitCurrency = undefined;
       selectedLimit = null;
       if (scope === 'category') await loadCategoriesFor('expense');
       else categoryOptions = [];

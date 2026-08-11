@@ -438,6 +438,7 @@ export type AppState = {
   reminderIdempotencyKey?: string;
   limitCreateScope?: 'all_expenses' | 'category';
   insightLimitCategory?: string;
+  insightLimitCurrency?: string;
   reminderDraft?: Partial<ReminderPayload>;
   homeChallengeIndex?: number;
   homeFocusIndex?: number;
