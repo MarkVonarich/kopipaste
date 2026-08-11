@@ -2,6 +2,8 @@ import asyncio
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from services.categories import CategoryReferenceCounts, ManagedCategory
 
 
@@ -27,10 +29,10 @@ def test_custom_category_owner_filter_is_personal_only_and_workspace_shared(monk
 
     personal_sql, personal_params = personal.calls[0]
     workspace_sql, workspace_params = workspace.calls[0]
-    assert "(user_id=%s OR %s::bigint IS NOT NULL)" in personal_sql
-    assert personal_params[-2:] == (55, None)
-    assert "(user_id=%s OR %s::bigint IS NOT NULL)" in workspace_sql
-    assert workspace_params[-2:] == (55, 10)
+    assert "(user_id=%s OR %s::boolean)" in personal_sql
+    assert personal_params[-2:] == (55, False)
+    assert "(user_id=%s OR %s::boolean)" in workspace_sql
+    assert workspace_params[-2:] == (55, True)
 
 
 def _category_scope_rows():
@@ -81,56 +83,97 @@ class _CategoryCursor:
     def execute(self, sql, params=()):
         compact = " ".join(sql.split())
         self.rowcount = 0
-        if compact.startswith("SELECT lower(category), COUNT(*)::int FROM public.operations"):
+        if "COUNT(*)::int FROM public.operations" in compact:
             workspace_id, op_type, keys = params
             self._result = self._group_count("operations", workspace_id, op_type, keys)
             return
-        if compact.startswith("SELECT lower(category), COUNT(*)::int FROM public.user_reminders"):
-            user_id, workspace_id, op_type, keys = params
-            self._result = self._group_count("user_reminders", workspace_id, op_type, keys, user_id=user_id)
+        if "COUNT(*)::int FROM public.user_reminders" in compact:
+            workspace_id, op_type, keys = params
+            self._result = self._group_count("user_reminders", workspace_id, op_type, keys)
             return
-        if compact.startswith("SELECT lower(category), COUNT(*)::int FROM public.category_limits"):
-            user_id, workspace_id, keys = params
-            self._result = self._group_count("category_limits", workspace_id, "Расходы", keys, user_id=user_id)
+        if "COUNT(*)::int FROM public.category_limits" in compact:
+            workspace_id, keys = params
+            self._result = self._group_count("category_limits", workspace_id, "Расходы", keys)
             return
-        if compact.startswith("SELECT m.normalized_category_name, COUNT(*)::int"):
-            user_id, workspace_id, _workspace_id_again, keys = params
+        if "COUNT(*)::int FROM public.category_budget_group_members m" in compact:
+            workspace_id, keys = params
             counts = {}
             group_ids = {
                 row["id"] for row in self.rows["category_budget_groups"]
-                if row["owner_user_id"] == user_id and row["workspace_id"] == workspace_id
+                if row["workspace_id"] == workspace_id
             }
             for key in keys:
                 counts[key] = len([
                     row for row in self.rows["category_budget_group_members"]
-                    if row["group_id"] in group_ids and row["normalized_category_name"] == key
+                    if row["group_id"] in group_ids and self._key(row["category_name"]) == key
                 ])
             self._result = [(key, count) for key, count in counts.items() if count]
             return
+        if "COUNT(*)::int FROM public.operation_drafts" in compact:
+            workspace_id, op_type, _op_type_again, keys = params
+            counts = {
+                key: len([
+                    row for row in self.rows.get("operation_drafts", [])
+                    if row["workspace_id"] == workspace_id
+                    and row["payload"].get("type", row["payload"].get("op_type", op_type)) == op_type
+                    and self._key(row["payload"].get("category", row["payload"].get("merchant", ""))) == key
+                ])
+                for key in keys
+            }
+            self._result = [(key, count) for key, count in counts.items() if count]
+            return
+        if "COUNT(*)::int FROM public.user_aliases" in compact:
+            workspace_id, op_type, keys = params
+            self._result = self._group_count("user_aliases", workspace_id, op_type, keys)
+            return
+        for table in ("category_limit_state", "subscription_patterns", "recurring_spend_patterns"):
+            if f"COUNT(*)::int FROM public.{table}" in compact:
+                workspace_id, keys = params
+                self._result = self._group_count(table, workspace_id, "Расходы", keys)
+                return
         if compact.startswith("SELECT COUNT(*) FROM public.operations"):
             workspace_id, op_type, key = params
             self._result = [(len(self._matching("operations", workspace_id, op_type, key)),)]
             return
         if compact.startswith("SELECT COUNT(*) FROM public.user_reminders"):
-            user_id, workspace_id, op_type, key = params
-            self._result = [(len(self._matching("user_reminders", workspace_id, op_type, key, user_id=user_id)),)]
+            workspace_id, op_type, key = params
+            self._result = [(len(self._matching("user_reminders", workspace_id, op_type, key)),)]
             return
         if compact.startswith("SELECT COUNT(*) FROM public.category_limits"):
-            user_id, workspace_id, key = params
-            self._result = [(len(self._matching("category_limits", workspace_id, "Расходы", key, user_id=user_id)),)]
+            workspace_id, key = params
+            self._result = [(len(self._matching("category_limits", workspace_id, "Расходы", key)),)]
             return
         if compact.startswith("SELECT COUNT(*) FROM category_budget_group_members"):
-            user_id, workspace_id, _workspace_id_again, key = params
+            workspace_id, key = params
             group_ids = {
                 row["id"] for row in self.rows["category_budget_groups"]
-                if row["owner_user_id"] == user_id and row["workspace_id"] == workspace_id
+                if row["workspace_id"] == workspace_id
             }
             count = len([
                 row for row in self.rows["category_budget_group_members"]
-                if row["group_id"] in group_ids and row["normalized_category_name"] == key
+                if row["group_id"] in group_ids and self._key(row["category_name"]) == key
             ])
             self._result = [(count,)]
             return
+        if compact.startswith("SELECT COUNT(*) FROM public.operation_drafts"):
+            workspace_id, op_type, _op_type_again, key = params
+            count = len([
+                row for row in self.rows.get("operation_drafts", [])
+                if row["workspace_id"] == workspace_id
+                and row["payload"].get("type", row["payload"].get("op_type", op_type)) == op_type
+                and self._key(row["payload"].get("category", row["payload"].get("merchant", ""))) == key
+            ])
+            self._result = [(count,)]
+            return
+        if compact.startswith("SELECT COUNT(*) FROM public.user_aliases"):
+            workspace_id, op_type, key = params
+            self._result = [(len(self._matching("user_aliases", workspace_id, op_type, key)),)]
+            return
+        for table in ("category_limit_state", "subscription_patterns", "recurring_spend_patterns"):
+            if compact.startswith(f"SELECT COUNT(*) FROM public.{table}"):
+                workspace_id, key = params
+                self._result = [(len(self._matching(table, workspace_id, "Расходы", key)),)]
+                return
         if compact.startswith("UPDATE public.operations SET category=%s"):
             destination, workspace_id, op_type, key = params
             changed = 0
@@ -140,47 +183,95 @@ class _CategoryCursor:
             self.rowcount = changed
             self._result = []
             return
-        if compact.startswith("UPDATE public.user_reminders SET category=%s"):
-            destination, user_id, workspace_id, op_type, key = params
+        if compact.startswith("UPDATE public.operation_drafts SET payload=jsonb_set"):
+            destination, workspace_id, op_type, _op_type_again, key = params
             changed = 0
-            for row in self._matching("user_reminders", workspace_id, op_type, key, user_id=user_id):
+            for row in self.rows.get("operation_drafts", []):
+                payload = row["payload"]
+                if (
+                    row["workspace_id"] == workspace_id
+                    and payload.get("type", payload.get("op_type", op_type)) == op_type
+                    and self._key(payload.get("category", payload.get("merchant", ""))) == key
+                ):
+                    payload["category"] = destination
+                    changed += 1
+            self.rowcount = changed
+            self._result = []
+            return
+        if compact.startswith("UPDATE public.user_reminders SET category=%s"):
+            destination, workspace_id, op_type, key = params
+            changed = 0
+            for row in self._matching("user_reminders", workspace_id, op_type, key):
                 row["category"] = destination
                 changed += 1
             self.rowcount = changed
             self._result = []
             return
-        if compact.startswith("UPDATE public.category_limits SET category=%s"):
-            destination, user_id, workspace_id, key = params
+        if compact.startswith("UPDATE public.user_aliases SET category=%s"):
+            destination, workspace_id, op_type, key = params
             changed = 0
-            for row in self._matching("category_limits", workspace_id, "Расходы", key, user_id=user_id):
+            for row in self._matching("user_aliases", workspace_id, op_type, key):
+                row["category"] = destination
+                changed += 1
+            self.rowcount = changed
+            self._result = []
+            return
+        for table in ("category_limit_state", "subscription_patterns", "recurring_spend_patterns"):
+            if compact.startswith(f"UPDATE public.{table} SET category=%s"):
+                destination, workspace_id, key = params
+                matching = self._matching(table, workspace_id, "Расходы", key)
+                for row in matching:
+                    row["category"] = destination
+                self.rowcount = len(matching)
+                self._result = []
+                return
+        if compact.startswith("UPDATE public.category_limits SET category=%s"):
+            if "WHERE id=%s" in compact:
+                destination, limit_id = params
+                matching = [row for row in self.rows["category_limits"] if row["id"] == limit_id]
+            else:
+                destination, workspace_id, key = params
+                matching = self._matching("category_limits", workspace_id, "Расходы", key)
+            changed = 0
+            for row in matching:
                 row["category"] = destination
                 changed += 1
             self.rowcount = changed
             self._result = []
             return
         if compact.startswith("UPDATE public.category_budget_group_members SET category_name=%s"):
-            if len(params) == 4:
+            if "group_id IN" not in compact:
                 destination, destination_key, group_id, source_key = params
                 group_ids = {group_id}
             else:
-                destination, destination_key, source_key, user_id, workspace_id, _workspace_id_again = params
+                destination, destination_key, source_key, workspace_id = params
                 group_ids = {
                     row["id"] for row in self.rows["category_budget_groups"]
-                    if row["owner_user_id"] == user_id and row["workspace_id"] == workspace_id
+                    if row["workspace_id"] == workspace_id
                 }
             changed = 0
             for row in self.rows["category_budget_group_members"]:
-                if row["group_id"] in group_ids and row["normalized_category_name"] == source_key:
+                if row["group_id"] in group_ids and self._key(row["category_name"]) == source_key:
                     row["category_name"] = destination
                     row["normalized_category_name"] = destination_key
                     changed += 1
             self.rowcount = changed
             self._result = []
             return
+        if compact.startswith("SELECT 1 FROM public.category_limits"):
+            workspace_id, owner_user_id, period, key = params
+            self._result = [(1,)] if any(
+                row["workspace_id"] == workspace_id
+                and row["user_id"] == owner_user_id
+                and row["period"] == period
+                and self._key(row["category"]) == key
+                for row in self.rows["category_limits"]
+            ) else []
+            return
         if compact.startswith("UPDATE public.custom_categories SET name=%s"):
             destination, destination_key, workspace_id, op_type, source_key, user_id, _workspace_id_again = params
             for row in self.rows["custom_categories"]:
-                if row["workspace_id"] == workspace_id and row["type"] == op_type and row["normalized_name"] == source_key and row["archived_at"] is None and row["user_id"] == user_id:
+                if row["workspace_id"] == workspace_id and row["type"] == op_type and row["normalized_name"] == source_key and row["archived_at"] is None:
                     row["name"] = destination
                     row["normalized_name"] = destination_key
                     self.rowcount = 1
@@ -188,28 +279,38 @@ class _CategoryCursor:
                     return
             self._result = []
             return
-        if compact.startswith("SELECT period, amount, currency FROM public.category_limits"):
-            user_id, workspace_id, key = params
+        if compact.startswith("SELECT id, user_id, period, amount, currency FROM public.category_limits"):
+            workspace_id, key = params
             self._result = [
-                (row["period"], row["amount"], row["currency"])
-                for row in self._matching("category_limits", workspace_id, "Расходы", key, user_id=user_id)
+                (row["id"], row["user_id"], row["period"], row["amount"], row["currency"])
+                for row in self._matching("category_limits", workspace_id, "Расходы", key)
             ]
             return
         if compact.startswith("SELECT m.group_id FROM public.category_budget_group_members"):
-            user_id, workspace_id, _workspace_id_again, key = params
+            workspace_id, key = params
             group_ids = {
                 row["id"] for row in self.rows["category_budget_groups"]
-                if row["owner_user_id"] == user_id and row["workspace_id"] == workspace_id
+                if row["workspace_id"] == workspace_id
             }
             self._result = [
                 (row["group_id"],)
                 for row in self.rows["category_budget_group_members"]
-                if row["group_id"] in group_ids and row["normalized_category_name"] == key
+                if row["group_id"] in group_ids and self._key(row["category_name"]) == key
             ]
             return
         if compact.startswith("SELECT 1 FROM public.category_budget_group_members"):
             group_id, key = params
-            self._result = [(1,)] if any(row["group_id"] == group_id and row["normalized_category_name"] == key for row in self.rows["category_budget_group_members"]) else []
+            self._result = [(1,)] if any(row["group_id"] == group_id and self._key(row["category_name"]) == key for row in self.rows["category_budget_group_members"]) else []
+            return
+        if compact.startswith("DELETE FROM public.category_budget_group_members WHERE"):
+            group_id, key = params
+            before = len(self.rows["category_budget_group_members"])
+            self.rows["category_budget_group_members"] = [
+                row for row in self.rows["category_budget_group_members"]
+                if not (row["group_id"] == group_id and self._key(row["category_name"]) == key)
+            ]
+            self.rowcount = before - len(self.rows["category_budget_group_members"])
+            self._result = []
             return
         if compact.startswith("SELECT id FROM public.operations"):
             workspace_id, op_type, key = params
@@ -223,8 +324,18 @@ class _CategoryCursor:
             self._result = []
             return
         if compact.startswith("DELETE FROM public.category_limits"):
+            if "WHERE id=%s" in compact:
+                limit_id = params[0]
+                before = len(self.rows["category_limits"])
+                self.rows["category_limits"] = [row for row in self.rows["category_limits"] if row["id"] != limit_id]
+                self.rowcount = before - len(self.rows["category_limits"])
+                self._result = []
+                return
             if len(params) == 4:
                 user_id, workspace_id, _period, key = params
+            elif len(params) == 2:
+                workspace_id, key = params
+                user_id = None
             else:
                 user_id, workspace_id, key = params
             before = len(self.rows["category_limits"])
@@ -236,25 +347,25 @@ class _CategoryCursor:
             self._result = []
             return
         if compact.startswith("DELETE FROM public.category_budget_group_members m"):
-            user_id, workspace_id, _workspace_id_again, key = params
+            workspace_id, key = params
             group_ids = {
                 row["id"] for row in self.rows["category_budget_groups"]
-                if row["owner_user_id"] == user_id and row["workspace_id"] == workspace_id
+                if row["workspace_id"] == workspace_id
             }
             before = len(self.rows["category_budget_group_members"])
             self.rows["category_budget_group_members"] = [
                 row for row in self.rows["category_budget_group_members"]
-                if not (row["group_id"] in group_ids and row["normalized_category_name"] == key)
+                if not (row["group_id"] in group_ids and self._key(row["category_name"]) == key)
             ]
             self.rowcount = before - len(self.rows["category_budget_group_members"])
             self._result = []
             return
         if compact.startswith("DELETE FROM public.user_reminders"):
-            user_id, workspace_id, op_type, key = params
+            workspace_id, op_type, key = params
             before = len(self.rows["user_reminders"])
             self.rows["user_reminders"] = [
                 row for row in self.rows["user_reminders"]
-                if row not in self._matching("user_reminders", workspace_id, op_type, key, user_id=user_id)
+                if row not in self._matching("user_reminders", workspace_id, op_type, key)
             ]
             self.rowcount = before - len(self.rows["user_reminders"])
             self._result = []
@@ -262,7 +373,7 @@ class _CategoryCursor:
         if compact.startswith("UPDATE public.custom_categories SET archived_at"):
             workspace_id, op_type, key, user_id, _workspace_id_again = params
             for row in self.rows["custom_categories"]:
-                if row["workspace_id"] == workspace_id and row["type"] == op_type and row["normalized_name"] == key and row["archived_at"] is None and row["user_id"] == user_id:
+                if row["workspace_id"] == workspace_id and row["type"] == op_type and row["normalized_name"] == key and row["archived_at"] is None:
                     row["archived_at"] = "now"
                     self.rowcount = 1
                     self._result = [(row["id"],)]
@@ -271,23 +382,27 @@ class _CategoryCursor:
             return
         self._result = []
 
-    def _group_count(self, table, workspace_id, op_type, keys, *, user_id=55):
+    @staticmethod
+    def _key(value):
+        return " ".join(str(value or "").split()).casefold().replace("ё", "е")
+
+    def _group_count(self, table, workspace_id, op_type, keys, *, user_id=None):
         counts = {}
         for key in keys:
             counts[key] = len(self._matching(table, workspace_id, op_type, key, user_id=user_id))
         return [(key, count) for key, count in counts.items() if count]
 
-    def _matching(self, table, workspace_id, op_type, key, *, user_id=55):
-        if table == "category_limits":
+    def _matching(self, table, workspace_id, op_type, key, *, user_id=None):
+        if table in {"category_limits", "category_limit_state", "subscription_patterns", "recurring_spend_patterns"}:
             type_field = None
         else:
-            type_field = "type" if table == "operations" else "rem_type"
+            type_field = "type" if table in {"operations", "user_aliases"} else "rem_type"
         return [
             row for row in self.rows[table]
-            if row.get("user_id") == user_id
-            and row.get("workspace_id") == workspace_id
+            if row.get("workspace_id") == workspace_id
+            and (user_id is None or row.get("user_id") == user_id)
             and (type_field is None or row.get(type_field) == op_type)
-            and str(row.get("category") or "").casefold() == key
+            and self._key(row.get("category")) == key
         ]
 
 
@@ -319,10 +434,20 @@ def _patch_category_scope(monkeypatch, rows):
         "category_budget_group_members": {"group_id", "category_name", "normalized_category_name"},
         "custom_categories": {"id", "workspace_id", "user_id", "type", "name", "normalized_name", "archived_at", "updated_at"},
     }
+    if "operation_drafts" in rows:
+        schemas["operation_drafts"] = {"draft_id", "workspace_id", "actor_user_id", "payload", "updated_at"}
+    if "user_aliases" in rows:
+        schemas["user_aliases"] = {"user_id", "workspace_id", "type", "category", "updated_at"}
+    if "ml_observations" in rows:
+        schemas["ml_observations"] = {"user_id", "chosen_category", "chosen_type"}
+    for table in ("category_limit_state", "subscription_patterns", "recurring_spend_patterns"):
+        if table in rows:
+            schemas[table] = {"id", "workspace_id", "user_id", "category", "updated_at"}
     monkeypatch.setattr(categories, "get_conn", lambda: _CategoryConn(rows))
     monkeypatch.setattr(categories, "_table_columns", lambda _cur, table: schemas.get(table, set()))
     monkeypatch.setattr(categories, "_ensure_category_exists", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(categories, "_update_draft_category", lambda *_args, **_kwargs: 0)
+    if "operation_drafts" not in rows:
+        monkeypatch.setattr(categories, "_update_draft_category", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(categories, "track_product_event", lambda _event: None)
 
 
@@ -842,11 +967,38 @@ def test_transfer_category_isolates_operations_and_reminders_by_op_type(monkeypa
     assert rows["category_budget_group_members"] == [{"group_id": 31, "category_name": "Отдых", "normalized_category_name": "отдых"}]
 
 
-def test_delete_income_category_preserves_expense_spending_configuration(monkeypatch):
+def test_direct_delete_rejects_a_non_operation_reference(monkeypatch):
     from services import categories
 
     rows = _category_scope_rows()
     rows["operations"] = [row for row in rows["operations"] if row["type"] == "Расходы"]
+    _patch_category_scope(monkeypatch, rows)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="category_has_references"):
+        categories.delete_category_without_operations(
+            user_id=55,
+            workspace_id=10,
+            op_type="Доходы",
+            category="Прочее",
+        )
+
+    assert rows["operations"] == [
+        {"id": 1, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
+        {"id": 2, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
+    ]
+    assert rows["category_limits"] == [{"id": 21, "workspace_id": 10, "user_id": 55, "period": "month", "category": "Прочее", "amount": 20000, "currency": "RUB"}]
+    assert rows["category_budget_group_members"] == [{"group_id": 31, "category_name": "Прочее", "normalized_category_name": "прочее"}]
+    assert rows["custom_categories"][1]["archived_at"] is None
+
+
+def test_direct_delete_archives_a_truly_empty_custom_category(monkeypatch):
+    from services import categories
+
+    rows = _category_scope_rows()
+    rows["operations"] = [row for row in rows["operations"] if row["type"] == "Расходы"]
+    rows["user_reminders"] = [row for row in rows["user_reminders"] if row["rem_type"] == "Расходы"]
     _patch_category_scope(monkeypatch, rows)
 
     result = categories.delete_category_without_operations(
@@ -856,17 +1008,167 @@ def test_delete_income_category_preserves_expense_spending_configuration(monkeyp
         category="Прочее",
     )
 
-    assert result.counts.operations == 0
-    assert result.counts.reminders == 1
-    assert result.counts.category_limits == 0
-    assert result.counts.category_budget_groups == 0
-    assert rows["operations"] == [
-        {"id": 1, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
-        {"id": 2, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
-    ]
-    assert rows["category_limits"] == [{"id": 21, "workspace_id": 10, "user_id": 55, "period": "month", "category": "Прочее", "amount": 20000, "currency": "RUB"}]
-    assert rows["category_budget_group_members"] == [{"group_id": 31, "category_name": "Прочее", "normalized_category_name": "прочее"}]
+    assert result.counts.total == 0
+    assert result.changed is True
     assert rows["custom_categories"][1]["archived_at"] == "now"
+
+
+@pytest.mark.parametrize("reference", ["category_limit", "reminder", "grouped_budget"])
+def test_direct_delete_requires_transfer_for_every_known_reference(monkeypatch, reference):
+    from services import categories
+
+    rows = _category_scope_rows()
+    rows["operations"] = []
+    rows["category_limits"] = rows["category_limits"] if reference == "category_limit" else []
+    rows["user_reminders"] = rows["user_reminders"][:1] if reference == "reminder" else []
+    rows["category_budget_group_members"] = rows["category_budget_group_members"] if reference == "grouped_budget" else []
+    _patch_category_scope(monkeypatch, rows)
+
+    before = {name: [dict(row) for row in rows[name]] for name in ("category_limits", "user_reminders", "category_budget_group_members")}
+    with pytest.raises(ValueError, match="category_has_references"):
+        categories.delete_category_without_operations(
+            user_id=55,
+            workspace_id=10,
+            op_type="Расходы",
+            category="Прочее",
+        )
+
+    assert rows["category_limits"] == before["category_limits"]
+    assert rows["user_reminders"] == before["user_reminders"]
+    assert rows["category_budget_group_members"] == before["category_budget_group_members"]
+    assert rows["custom_categories"][0]["archived_at"] is None
+
+
+def test_workspace_transfer_migrates_all_members_and_isolates_other_scopes(monkeypatch):
+    from services import categories
+
+    rows = {
+        "operations": [
+            {"id": 1, "workspace_id": 10, "user_id": 55, "type": "Расходы", "category": "Прочее"},
+            {"id": 2, "workspace_id": 10, "user_id": 66, "type": "Расходы", "category": "  ПРОЧЕЕ  "},
+            {"id": 3, "workspace_id": 20, "user_id": 66, "type": "Расходы", "category": "Прочее"},
+            {"id": 4, "workspace_id": None, "user_id": 66, "type": "Расходы", "category": "Прочее"},
+        ],
+        "category_limits": [
+            {"id": 11, "workspace_id": 10, "user_id": 55, "period": "month", "category": "Прочее", "amount": 100, "currency": "RUB"},
+            {"id": 12, "workspace_id": 10, "user_id": 66, "period": "month", "category": " прочее ", "amount": 200, "currency": "RUB"},
+            {"id": 13, "workspace_id": 20, "user_id": 66, "period": "month", "category": "Прочее", "amount": 300, "currency": "RUB"},
+            {"id": 14, "workspace_id": None, "user_id": 66, "period": "month", "category": "Прочее", "amount": 400, "currency": "RUB"},
+        ],
+        "category_limit_state": [
+            {"id": 15, "workspace_id": 10, "user_id": 55, "category": "Прочее"},
+            {"id": 16, "workspace_id": 10, "user_id": 66, "category": " ПРОЧЕЕ "},
+            {"id": 17, "workspace_id": 20, "user_id": 66, "category": "Прочее"},
+        ],
+        "subscription_patterns": [
+            {"id": 18, "workspace_id": 10, "user_id": 55, "category": "Прочее"},
+            {"id": 19, "workspace_id": 10, "user_id": 66, "category": "ПРОЧЕЕ"},
+            {"id": 20, "workspace_id": 20, "user_id": 66, "category": "Прочее"},
+        ],
+        "recurring_spend_patterns": [
+            {"id": 24, "workspace_id": 10, "user_id": 55, "category": "Прочее"},
+            {"id": 25, "workspace_id": 10, "user_id": 66, "category": "Прочее   "},
+            {"id": 26, "workspace_id": None, "user_id": 66, "category": "Прочее"},
+        ],
+        "user_reminders": [
+            {"id": 21, "workspace_id": 10, "user_id": 55, "rem_type": "Расходы", "category": "Прочее"},
+            {"id": 22, "workspace_id": 10, "user_id": 66, "rem_type": "Расходы", "category": "Прочее   "},
+            {"id": 23, "workspace_id": 20, "user_id": 66, "rem_type": "Расходы", "category": "Прочее"},
+        ],
+        "category_budget_groups": [
+            {"id": 31, "workspace_id": 10, "owner_user_id": 55},
+            {"id": 32, "workspace_id": 10, "owner_user_id": 66},
+            {"id": 33, "workspace_id": 20, "owner_user_id": 66},
+        ],
+        "category_budget_group_members": [
+            {"group_id": 31, "category_name": "Прочее", "normalized_category_name": "прочее"},
+            {"group_id": 32, "category_name": " ПРОЧЕЕ ", "normalized_category_name": " прочее "},
+            {"group_id": 33, "category_name": "Прочее", "normalized_category_name": "прочее"},
+        ],
+        "operation_drafts": [
+            {"draft_id": "a", "workspace_id": 10, "actor_user_id": 55, "payload": {"type": "Расходы", "category": "Прочее"}},
+            {"draft_id": "b", "workspace_id": 10, "actor_user_id": 66, "payload": {"type": "Расходы", "category": " ПРОЧЕЕ "}},
+            {"draft_id": "c", "workspace_id": 20, "actor_user_id": 66, "payload": {"type": "Расходы", "category": "Прочее"}},
+        ],
+        "user_aliases": [
+            {"user_id": 55, "workspace_id": 10, "type": "Расходы", "category": "Прочее"},
+            {"user_id": 66, "workspace_id": 10, "type": "Расходы", "category": "ПРОЧЕЕ"},
+            {"user_id": 66, "workspace_id": 20, "type": "Расходы", "category": "Прочее"},
+        ],
+        "ml_observations": [
+            {"user_id": 55, "chosen_type": "Расходы", "chosen_category": "Прочее"},
+            {"user_id": 66, "chosen_type": "Расходы", "chosen_category": "Прочее"},
+        ],
+        "custom_categories": [
+            {"id": 41, "workspace_id": 10, "user_id": 55, "type": "Расходы", "name": "Прочее", "normalized_name": "прочее", "archived_at": None},
+            {"id": 42, "workspace_id": 10, "user_id": 55, "type": "Расходы", "name": "Другое", "normalized_name": "другое", "archived_at": None},
+        ],
+    }
+    _patch_category_scope(monkeypatch, rows)
+    monkeypatch.setattr(categories, "_category_exists", lambda *_args, **_kwargs: True)
+
+    result = categories.transfer_category(
+        user_id=55,
+        workspace_id=10,
+        op_type="Расходы",
+        source="Прочее",
+        destination="Другое",
+        archive_source=True,
+        budget_resolution="transfer_source",
+    )
+
+    key = categories.normalized_category_key
+    assert result.counts.category_limits == 2
+    assert all(key(row["category"]) == "другое" for row in rows["operations"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "другое" for row in rows["category_limits"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "другое" for row in rows["category_limit_state"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "другое" for row in rows["subscription_patterns"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "другое" for row in rows["recurring_spend_patterns"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "другое" for row in rows["user_reminders"] if row["workspace_id"] == 10)
+    assert all(key(row["category_name"]) == "другое" for row in rows["category_budget_group_members"] if row["group_id"] in {31, 32})
+    assert all(key(row["payload"]["category"]) == "другое" for row in rows["operation_drafts"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "другое" for row in rows["user_aliases"] if row["workspace_id"] == 10)
+    assert all(key(row["category"]) == "прочее" for row in rows["operations"] if row["workspace_id"] != 10)
+    assert all(key(row["category"]) == "прочее" for row in rows["category_limits"] if row["workspace_id"] != 10)
+    assert all(key(row["category"]) == "прочее" for row in rows["category_limit_state"] if row["workspace_id"] != 10)
+    assert all(key(row["category"]) == "прочее" for row in rows["subscription_patterns"] if row["workspace_id"] != 10)
+    assert all(key(row["category"]) == "прочее" for row in rows["recurring_spend_patterns"] if row["workspace_id"] != 10)
+    assert rows["ml_observations"] == [
+        {"user_id": 55, "chosen_type": "Расходы", "chosen_category": "Прочее"},
+        {"user_id": 66, "chosen_type": "Расходы", "chosen_category": "Прочее"},
+    ]
+    assert rows["custom_categories"][0]["archived_at"] == "now"
+
+
+def test_category_key_sql_matches_whitespace_case_and_yo_contract():
+    from services.categories import category_key_sql, normalized_category_key
+
+    sql = category_key_sql("category")
+
+    assert "btrim" in sql
+    assert "regexp_replace" in sql
+    assert "lower" in sql
+    assert "'ё', 'е'" in sql
+    assert {normalized_category_key(value) for value in ("Прочее", " ПРОЧЕЕ ", "Прочее   ")} == {"прочее"}
+    assert normalized_category_key("Ёлка") == normalized_category_key("елка") == "елка"
+
+
+def test_personal_reference_scope_keeps_another_user_isolated():
+    from services.categories import _owned_reference_scope
+
+    columns = {"workspace_id", "user_id", "category"}
+
+    assert _owned_reference_scope(columns, 55, None, owner_column="user_id") == (
+        ["workspace_id IS NULL", "user_id=%s"],
+        [55],
+    )
+    assert _owned_reference_scope(
+        columns,
+        55,
+        10,
+        owner_column="user_id",
+        shared_workspace=False,
+    ) == (["workspace_id=%s", "user_id=%s"], [10, 55])
 
 
 def test_hard_delete_category_keeps_same_name_income_category_usable(monkeypatch):

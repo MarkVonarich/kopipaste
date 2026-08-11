@@ -469,7 +469,14 @@ class MiniAppAPI:
         if current.get("protected"):
             raise MiniAppError(400, "category_protected", "Protected categories cannot be renamed.")
         try:
-            result = rename_category(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, source=current["name"], destination=str(body.get("name") or ""))
+            result = rename_category(
+                user_id=req.user_id,
+                workspace_id=ctx.workspace_id,
+                op_type=op_type,
+                source=current["name"],
+                destination=str(body.get("name") or ""),
+                shared_workspace=ctx.kind not in {"personal", "legacy_personal"},
+            )
         except ValueError as exc:
             raise MiniAppError(400, "category_rename_failed", "Category could not be renamed.") from exc
         self._track(req, "mini_app_category_renamed", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense"})
@@ -492,11 +499,26 @@ class MiniAppAPI:
                 if destination_key not in available:
                     raise ValueError("destination_not_found")
                 destination = available[destination_key]
-                result = transfer_category(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, source=current["name"], destination=destination, archive_source=True)
+                result = transfer_category(
+                    user_id=req.user_id,
+                    workspace_id=ctx.workspace_id,
+                    op_type=op_type,
+                    source=current["name"],
+                    destination=destination,
+                    archive_source=True,
+                    budget_resolution="transfer_source",
+                    shared_workspace=ctx.kind not in {"personal", "legacy_personal"},
+                )
                 deleted = True
                 counts = result.counts.as_dict()
             else:
-                result = delete_category_without_operations(user_id=req.user_id, workspace_id=ctx.workspace_id, op_type=op_type, category=current["name"])
+                result = delete_category_without_operations(
+                    user_id=req.user_id,
+                    workspace_id=ctx.workspace_id,
+                    op_type=op_type,
+                    category=current["name"],
+                    shared_workspace=ctx.kind not in {"personal", "legacy_personal"},
+                )
                 deleted = bool(result.changed)
                 counts = result.counts.as_dict()
         except ValueError as exc:
@@ -504,6 +526,7 @@ class MiniAppAPI:
             code, message = {
                 "protected_category": ("category_protected", "Protected categories cannot be deleted."),
                 "category_has_operations": ("category_transfer_required", "Choose a replacement category before deleting this category."),
+                "category_has_references": ("category_transfer_required", "Choose a replacement category before deleting this category."),
                 "destination_not_found": ("category_destination_not_found", "Choose an available replacement category."),
                 "same_category": ("category_same_destination", "Choose a different replacement category."),
             }.get(reason, ("category_delete_failed", "Category could not be deleted safely."))

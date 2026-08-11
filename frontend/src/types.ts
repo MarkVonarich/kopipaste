@@ -368,10 +368,13 @@ export type CategoryOption = {
     operations: number;
     drafts: number;
     category_limits: number;
+    category_limit_states?: number;
     category_budget_groups: number;
     reminders: number;
     aliases: number;
     ml_observations: number;
+    subscription_patterns?: number;
+    recurring_spend_patterns?: number;
     total: number;
   };
 };

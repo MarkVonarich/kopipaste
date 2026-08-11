@@ -38,10 +38,13 @@ class CategoryReferenceCounts:
     operations: int = 0
     drafts: int = 0
     category_limits: int = 0
+    category_limit_states: int = 0
     category_budget_groups: int = 0
     reminders: int = 0
     aliases: int = 0
     ml_observations: int = 0
+    subscription_patterns: int = 0
+    recurring_spend_patterns: int = 0
 
     @property
     def total(self) -> int:
@@ -95,6 +98,14 @@ def normalized_category_key(value: str) -> str:
     return norm_text(normalize_category_name(value)).casefold()
 
 
+def category_key_sql(value_sql: str) -> str:
+    """Return the PostgreSQL equivalent of normalized_category_key()."""
+    return (
+        "replace(lower(regexp_replace(btrim(COALESCE("
+        f"{value_sql}, '')), '[[:space:]]+', ' ', 'g')), 'ё', 'е')"
+    )
+
+
 def is_protected_category(name: str) -> bool:
     if not (name or "").strip():
         return True
@@ -112,10 +123,22 @@ def _scope_clause(workspace_id: int | None, *, alias: str = "") -> tuple[str, tu
     return f"{prefix}workspace_id=%s", (workspace_id,)
 
 
-def _legacy_personal_clause(user_id: int, workspace_id: int | None, *, alias: str = "") -> tuple[str, tuple]:
+def _is_shared_scope(workspace_id: int | None, shared_workspace: bool | None) -> bool:
+    return workspace_id is not None if shared_workspace is None else bool(shared_workspace and workspace_id is not None)
+
+
+def _legacy_personal_clause(
+    user_id: int,
+    workspace_id: int | None,
+    *,
+    alias: str = "",
+    shared_workspace: bool | None = None,
+) -> tuple[str, tuple]:
     prefix = f"{alias}." if alias else ""
     if workspace_id is None:
         return f"({prefix}workspace_id IS NULL AND ({prefix}user_id=%s OR {prefix}chat_id=%s))", (user_id, user_id)
+    if not _is_shared_scope(workspace_id, shared_workspace):
+        return f"({prefix}workspace_id=%s AND ({prefix}user_id=%s OR {prefix}chat_id=%s))", (workspace_id, user_id, user_id)
     return f"{prefix}workspace_id=%s", (workspace_id,)
 
 
@@ -143,29 +166,83 @@ def _type_filter(columns: set[str], op_type: str, candidates: tuple[str, ...], *
     return f"AND {prefix}{column}=%s", [op_type]
 
 
-def _category_limit_scope(columns: set[str], user_id: int, workspace_id: int | None, op_type: str) -> tuple[list[str], list] | None:
+def _owned_reference_scope(
+    columns: set[str],
+    user_id: int,
+    workspace_id: int | None,
+    *,
+    owner_column: str,
+    alias: str = "",
+    shared_workspace: bool | None = None,
+) -> tuple[list[str], list]:
+    prefix = f"{alias}." if alias else ""
+    if "workspace_id" in columns:
+        if workspace_id is None:
+            return [f"{prefix}workspace_id IS NULL", f"{prefix}{owner_column}=%s"], [user_id]
+        if _is_shared_scope(workspace_id, shared_workspace):
+            return [f"{prefix}workspace_id=%s"], [workspace_id]
+        return [f"{prefix}workspace_id=%s", f"{prefix}{owner_column}=%s"], [workspace_id, user_id]
+    return [f"{prefix}{owner_column}=%s"], [user_id]
+
+
+def _personalization_scope(
+    columns: set[str],
+    user_id: int,
+    workspace_id: int | None,
+    *,
+    owner_column: str = "user_id",
+    shared_workspace: bool | None = None,
+) -> tuple[list[str], list] | None:
+    if workspace_id is not None and "workspace_id" not in columns:
+        return None
+    return _owned_reference_scope(
+        columns,
+        user_id,
+        workspace_id,
+        owner_column=owner_column,
+        shared_workspace=shared_workspace,
+    )
+
+
+def _category_limit_scope(
+    columns: set[str],
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    *,
+    shared_workspace: bool | None = None,
+) -> tuple[list[str], list] | None:
     type_sql, type_params = _type_filter(columns, op_type, ("type", "op_type"))
     if not type_sql and not _is_expense_category_type(op_type):
         return None
-    filters = ["user_id=%s"]
-    params: list = [user_id]
-    workspace_sql, workspace_params = _workspace_filter(columns, workspace_id)
-    if workspace_sql:
-        filters.append(workspace_sql.removeprefix("AND "))
-        params.extend(workspace_params)
+    filters, params = _owned_reference_scope(
+        columns,
+        user_id,
+        workspace_id,
+        owner_column="user_id",
+        shared_workspace=shared_workspace,
+    )
     if type_sql:
         filters.append(type_sql.removeprefix("AND "))
         params.extend(type_params)
     return filters, params
 
 
-def _reminder_scope(columns: set[str], user_id: int, workspace_id: int | None, op_type: str) -> tuple[list[str], list]:
-    filters = ["user_id=%s"]
-    params: list = [user_id]
-    workspace_sql, workspace_params = _workspace_filter(columns, workspace_id)
-    if workspace_sql:
-        filters.append(workspace_sql.removeprefix("AND "))
-        params.extend(workspace_params)
+def _reminder_scope(
+    columns: set[str],
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    *,
+    shared_workspace: bool | None = None,
+) -> tuple[list[str], list]:
+    filters, params = _owned_reference_scope(
+        columns,
+        user_id,
+        workspace_id,
+        owner_column="user_id",
+        shared_workspace=shared_workspace,
+    )
     type_sql, type_params = _type_filter(columns, op_type, ("rem_type", "type", "op_type"))
     if type_sql:
         filters.append(type_sql.removeprefix("AND "))
@@ -194,12 +271,20 @@ def _count_rows(cur, table: str, where: str, params: tuple) -> int:
     return int(cur.fetchone()[0] or 0)
 
 
-def _category_exists(cur, *, user_id: int, workspace_id: int | None, op_type: str, name: str) -> bool:
+def _category_exists(
+    cur,
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    name: str,
+    shared_workspace: bool | None = None,
+) -> bool:
     key = normalized_category_key(name)
     columns = _table_columns(cur, "custom_categories")
     if columns:
         scope, scope_params = _scope_clause(workspace_id)
-        user_filter = "AND (user_id=%s OR %s::bigint IS NOT NULL)"
+        user_filter = "AND (user_id=%s OR %s::boolean)"
         cur.execute(
             f"""
             SELECT 1
@@ -211,20 +296,21 @@ def _category_exists(cur, *, user_id: int, workspace_id: int | None, op_type: st
                {user_filter}
              LIMIT 1
             """,
-            (*scope_params, op_type, key, user_id, workspace_id),
+            (*scope_params, op_type, key, user_id, _is_shared_scope(workspace_id, shared_workspace)),
         )
         if cur.fetchone():
             return True
     op_columns = _table_columns(cur, "operations")
     if {"category", "type"} <= op_columns:
-        scope, params = _legacy_personal_clause(user_id, workspace_id)
+        scope, params = _legacy_personal_clause(user_id, workspace_id, shared_workspace=shared_workspace)
+        category_key = category_key_sql("category")
         cur.execute(
             f"""
             SELECT 1
               FROM public.operations
              WHERE {scope}
                AND type=%s
-               AND lower(category)=%s
+               AND {category_key}=%s
                AND COALESCE(category,'') NOT IN ('', 'Без операций')
              LIMIT 1
             """,
@@ -234,33 +320,56 @@ def _category_exists(cur, *, user_id: int, workspace_id: int | None, op_type: st
     return False
 
 
-def _ensure_category_exists(cur, *, user_id: int, workspace_id: int | None, op_type: str, name: str) -> None:
-    if not _category_exists(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, name=name):
+def _ensure_category_exists(
+    cur,
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    name: str,
+    shared_workspace: bool | None = None,
+) -> None:
+    if not _category_exists(
+        cur,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        op_type=op_type,
+        name=name,
+        shared_workspace=shared_workspace,
+    ):
         raise ValueError("category_not_found")
 
 
-def _update_draft_category(cur, *, user_id: int, workspace_id: int | None, op_type: str, source_key: str, destination_name: str | None) -> int:
+def _update_draft_category(
+    cur,
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    source_key: str,
+    destination_name: str | None,
+    shared_workspace: bool | None = None,
+) -> int:
     draft_columns = _table_columns(cur, "operation_drafts")
     if not {"payload", "actor_user_id"} <= draft_columns:
         return 0
-    scope = ""
-    params: list = [user_id]
-    if "workspace_id" in draft_columns:
-        if workspace_id is None:
-            scope = "AND workspace_id IS NULL"
-        else:
-            scope = "AND workspace_id=%s"
-            params.append(workspace_id)
+    filters, params = _owned_reference_scope(
+        draft_columns,
+        user_id,
+        workspace_id,
+        owner_column="actor_user_id",
+        shared_workspace=shared_workspace,
+    )
     op_type_filter = "AND COALESCE(payload->>'type', payload->>'op_type', %s)=%s"
     params.extend([op_type, op_type, source_key])
+    category_key = category_key_sql("COALESCE(payload->>'category', payload->>'merchant', '')")
     if destination_name is None:
         cur.execute(
             f"""
             DELETE FROM public.operation_drafts
-             WHERE actor_user_id=%s
-               {scope}
+             WHERE {' AND '.join(filters)}
                {op_type_filter}
-               AND lower(COALESCE(payload->>'category',''))=%s
+               AND {category_key}=%s
             """,
             tuple(params),
         )
@@ -268,12 +377,11 @@ def _update_draft_category(cur, *, user_id: int, workspace_id: int | None, op_ty
         cur.execute(
             f"""
             UPDATE public.operation_drafts
-               SET payload=jsonb_set(payload, '{{category}}', to_jsonb(%s::text), true),
+                   SET payload=jsonb_set(payload, '{{category}}', to_jsonb(%s::text), true),
                    updated_at=now()
-             WHERE actor_user_id=%s
-               {scope}
+             WHERE {' AND '.join(filters)}
                {op_type_filter}
-               AND lower(COALESCE(payload->>'category',''))=%s
+               AND {category_key}=%s
             """,
             (destination_name, *params),
         )
@@ -313,15 +421,16 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
             op_columns = _table_columns(cur, "operations")
             if {"category", "type"} <= op_columns:
                 scope, params = _legacy_personal_clause(user_id, workspace_id)
+                category_key = category_key_sql("category")
                 cur.execute(
                     f"""
-                    SELECT category, lower(category), COUNT(*)::int
+                    SELECT MIN(category), {category_key}, COUNT(*)::int
                       FROM public.operations
                      WHERE {scope}
                        AND type=%s
                        AND COALESCE(category,'') NOT IN ('', 'Без операций')
-                     GROUP BY category
-                     ORDER BY COUNT(*) DESC, category ASC
+                     GROUP BY {category_key}
+                     ORDER BY COUNT(*) DESC, MIN(category) ASC
                      LIMIT %s
                     """,
                     (*params, op_type, int(limit)),
@@ -345,12 +454,13 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
                     conn.rollback()
                     return sorted(found.values(), key=lambda item: (item.name.casefold(), item.source))
                 filters, params = scope
+                category_key = category_key_sql("category")
                 cur.execute(
                     f"""
-                    SELECT lower(category), COUNT(*)::int
+                    SELECT {category_key}, COUNT(*)::int
                       FROM public.category_limits
                      WHERE {' AND '.join(filters)}
-                     GROUP BY lower(category)
+                     GROUP BY {category_key}
                     """,
                     tuple(params),
                 )
@@ -409,14 +519,15 @@ def category_reference_counts_many(*, user_id: int, workspace_id: int | None, op
             op_columns = _table_columns(cur, "operations")
             if {"category", "type"} <= op_columns:
                 scope, params = _legacy_personal_clause(user_id, workspace_id)
+                category_key = category_key_sql("category")
                 cur.execute(
                     f"""
-                    SELECT lower(category), COUNT(*)::int
+                    SELECT {category_key}, COUNT(*)::int
                       FROM public.operations
                      WHERE {scope}
                        AND type=%s
-                       AND lower(category)=ANY(%s)
-                     GROUP BY lower(category)
+                       AND {category_key}=ANY(%s)
+                     GROUP BY {category_key}
                     """,
                     (*params, op_type, keys),
                 )
@@ -424,23 +535,21 @@ def category_reference_counts_many(*, user_id: int, workspace_id: int | None, op
 
             draft_columns = _table_columns(cur, "operation_drafts")
             if {"payload", "actor_user_id"} <= draft_columns:
-                scope = ""
-                params = [user_id]
-                if "workspace_id" in draft_columns:
-                    if workspace_id is None:
-                        scope = "AND workspace_id IS NULL"
-                    else:
-                        scope = "AND workspace_id=%s"
-                        params.append(workspace_id)
+                filters, params = _owned_reference_scope(
+                    draft_columns,
+                    user_id,
+                    workspace_id,
+                    owner_column="actor_user_id",
+                )
+                category_key = category_key_sql("COALESCE(payload->>'category', payload->>'merchant', '')")
                 cur.execute(
                     f"""
-                    SELECT lower(COALESCE(payload->>'category', payload->>'merchant', '')), COUNT(*)::int
+                    SELECT {category_key}, COUNT(*)::int
                       FROM public.operation_drafts
-                     WHERE actor_user_id=%s
-                       {scope}
+                     WHERE {' AND '.join(filters)}
                        AND COALESCE(payload->>'type', payload->>'op_type', %s)=%s
-                       AND lower(COALESCE(payload->>'category', payload->>'merchant', ''))=ANY(%s)
-                     GROUP BY lower(COALESCE(payload->>'category', payload->>'merchant', ''))
+                       AND {category_key}=ANY(%s)
+                     GROUP BY {category_key}
                     """,
                     tuple(params + [op_type, op_type, keys]),
                 )
@@ -451,46 +560,85 @@ def category_reference_counts_many(*, user_id: int, workspace_id: int | None, op
                 scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
                 if scope:
                     filters, params = scope
-                    filters.append("lower(category)=ANY(%s)")
+                    category_key = category_key_sql("category")
+                    filters.append(f"{category_key}=ANY(%s)")
                     params.append(keys)
                     cur.execute(
                         f"""
-                        SELECT lower(category), COUNT(*)::int
+                        SELECT {category_key}, COUNT(*)::int
                           FROM public.category_limits
                          WHERE {' AND '.join(filters)}
-                         GROUP BY lower(category)
+                         GROUP BY {category_key}
                         """,
                         tuple(params),
                     )
                     _merge_count_rows(values, "category_limits", cur.fetchall())
 
+            if _is_expense_category_type(op_type):
+                for table, field in (
+                    ("category_limit_state", "category_limit_states"),
+                    ("subscription_patterns", "subscription_patterns"),
+                    ("recurring_spend_patterns", "recurring_spend_patterns"),
+                ):
+                    columns = _table_columns(cur, table)
+                    if not {"category", "user_id"} <= columns:
+                        continue
+                    filters, params = _owned_reference_scope(
+                        columns,
+                        user_id,
+                        workspace_id,
+                        owner_column="user_id",
+                    )
+                    category_key = category_key_sql("category")
+                    filters.append(f"{category_key}=ANY(%s)")
+                    params.append(keys)
+                    cur.execute(
+                        f"""
+                        SELECT {category_key}, COUNT(*)::int
+                          FROM public.{table}
+                         WHERE {' AND '.join(filters)}
+                         GROUP BY {category_key}
+                        """,
+                        tuple(params),
+                    )
+                    _merge_count_rows(values, field, cur.fetchall())
+
             cbg_columns = _table_columns(cur, "category_budget_group_members")
             if cbg_columns and _is_expense_category_type(op_type):
+                group_columns = _table_columns(cur, "category_budget_groups")
+                group_filters, group_params = _owned_reference_scope(
+                    group_columns,
+                    user_id,
+                    workspace_id,
+                    owner_column="owner_user_id",
+                    alias="g",
+                )
+                category_key = category_key_sql("m.category_name")
                 cur.execute(
-                    """
-                    SELECT m.normalized_category_name, COUNT(*)::int
+                    f"""
+                    SELECT {category_key}, COUNT(*)::int
                       FROM public.category_budget_group_members m
                       JOIN public.category_budget_groups g ON g.id=m.group_id
-                     WHERE g.owner_user_id=%s
-                       AND (%s::bigint IS NULL OR g.workspace_id=%s)
-                       AND m.normalized_category_name=ANY(%s)
-                     GROUP BY m.normalized_category_name
+                     WHERE {' AND '.join(group_filters)}
+                       AND {category_key}=ANY(%s)
+                     GROUP BY {category_key}
                     """,
-                    (user_id, workspace_id, workspace_id, keys),
+                    (*group_params, keys),
                 )
                 _merge_count_rows(values, "category_budget_groups", cur.fetchall())
 
             reminder_columns = _table_columns(cur, "user_reminders")
             if {"category", "user_id"} <= reminder_columns:
                 filters, params = _reminder_scope(reminder_columns, user_id, workspace_id, op_type)
-                filters.append("lower(category)=ANY(%s)")
+                category_key = category_key_sql("category")
+                filters.append(f"{category_key}=ANY(%s)")
                 params.append(keys)
                 cur.execute(
                     f"""
-                    SELECT lower(category), COUNT(*)::int
+                    SELECT {category_key}, COUNT(*)::int
                       FROM public.user_reminders
                      WHERE {' AND '.join(filters)}
-                     GROUP BY lower(category)
+                     GROUP BY {category_key}
                     """,
                     tuple(params),
                 )
@@ -498,99 +646,230 @@ def category_reference_counts_many(*, user_id: int, workspace_id: int | None, op
 
             alias_columns = _table_columns(cur, "user_aliases")
             if {"category", "user_id"} <= alias_columns:
-                type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
-                cur.execute(
-                    f"""
-                    SELECT lower(category), COUNT(*)::int
-                      FROM public.user_aliases
-                     WHERE user_id=%s
-                       {type_sql}
-                       AND lower(category)=ANY(%s)
-                     GROUP BY lower(category)
-                    """,
-                    (user_id, *type_params, keys),
-                )
-                _merge_count_rows(values, "aliases", cur.fetchall())
+                scope = _personalization_scope(alias_columns, user_id, workspace_id)
+                if scope:
+                    filters, params = scope
+                    type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
+                    if type_sql:
+                        filters.append(type_sql.removeprefix("AND "))
+                        params.extend(type_params)
+                    category_key = category_key_sql("category")
+                    cur.execute(
+                        f"""
+                        SELECT {category_key}, COUNT(*)::int
+                          FROM public.user_aliases
+                         WHERE {' AND '.join(filters)}
+                           AND {category_key}=ANY(%s)
+                         GROUP BY {category_key}
+                        """,
+                        (*params, keys),
+                    )
+                    _merge_count_rows(values, "aliases", cur.fetchall())
 
             ml_columns = _table_columns(cur, "ml_observations")
             if {"chosen_category", "user_id"} <= ml_columns:
-                type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
-                cur.execute(
-                    f"""
-                    SELECT lower(chosen_category), COUNT(*)::int
-                      FROM public.ml_observations
-                     WHERE user_id=%s
-                       {type_sql}
-                       AND lower(chosen_category)=ANY(%s)
-                     GROUP BY lower(chosen_category)
-                    """,
-                    (user_id, *type_params, keys),
-                )
-                _merge_count_rows(values, "ml_observations", cur.fetchall())
+                scope = _personalization_scope(ml_columns, user_id, workspace_id)
+                if scope:
+                    filters, params = scope
+                    type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
+                    if type_sql:
+                        filters.append(type_sql.removeprefix("AND "))
+                        params.extend(type_params)
+                    category_key = category_key_sql("chosen_category")
+                    cur.execute(
+                        f"""
+                        SELECT {category_key}, COUNT(*)::int
+                          FROM public.ml_observations
+                         WHERE {' AND '.join(filters)}
+                           AND {category_key}=ANY(%s)
+                         GROUP BY {category_key}
+                        """,
+                        (*params, keys),
+                    )
+                    _merge_count_rows(values, "ml_observations", cur.fetchall())
         conn.rollback()
     finally:
         conn.close()
     return {key: CategoryReferenceCounts(**values.get(key, {})) for key in keys}
 
 
-def _category_reference_counts_cur(cur, *, user_id: int, workspace_id: int | None, op_type: str, category_key: str) -> CategoryReferenceCounts:
+def _category_reference_counts_cur(
+    cur,
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    category_key: str,
+    shared_workspace: bool | None = None,
+) -> CategoryReferenceCounts:
     values: dict[str, int] = {}
     op_columns = _table_columns(cur, "operations")
     if {"category", "type"} <= op_columns:
-        scope, params = _legacy_personal_clause(user_id, workspace_id)
-        values["operations"] = _count_rows(cur, "operations", f"{scope} AND type=%s AND lower(category)=%s", (*params, op_type, category_key))
+        scope, params = _legacy_personal_clause(user_id, workspace_id, shared_workspace=shared_workspace)
+        values["operations"] = _count_rows(
+            cur,
+            "operations",
+            f"{scope} AND type=%s AND {category_key_sql('category')}=%s",
+            (*params, op_type, category_key),
+        )
     draft_columns = _table_columns(cur, "operation_drafts")
     if {"payload", "actor_user_id"} <= draft_columns:
-        scope = ""
-        params = [user_id]
-        if "workspace_id" in draft_columns:
-            if workspace_id is None:
-                scope = "AND workspace_id IS NULL"
-            else:
-                scope = "AND workspace_id=%s"
-                params.append(workspace_id)
+        filters, params = _owned_reference_scope(
+            draft_columns,
+            user_id,
+            workspace_id,
+            owner_column="actor_user_id",
+            shared_workspace=shared_workspace,
+        )
+        draft_category_key = category_key_sql("COALESCE(payload->>'category', payload->>'merchant', '')")
         values["drafts"] = _count_rows(
             cur,
             "operation_drafts",
-            f"actor_user_id=%s {scope} AND COALESCE(payload->>'type', payload->>'op_type', %s)=%s AND lower(COALESCE(payload->>'category', payload->>'merchant', ''))=%s",
+            f"{' AND '.join(filters)} AND COALESCE(payload->>'type', payload->>'op_type', %s)=%s AND {draft_category_key}=%s",
             tuple(params + [op_type, op_type, category_key]),
         )
     limit_columns = _table_columns(cur, "category_limits")
     if {"category", "user_id"} <= limit_columns:
-        scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+        scope = _category_limit_scope(
+            limit_columns,
+            user_id,
+            workspace_id,
+            op_type,
+            shared_workspace=shared_workspace,
+        )
         if scope:
             filters, params = scope
-            filters.append("lower(category)=%s")
+            filters.append(f"{category_key_sql('category')}=%s")
             params.append(category_key)
             values["category_limits"] = _count_rows(cur, "category_limits", " AND ".join(filters), tuple(params))
+    if _is_expense_category_type(op_type):
+        for table, field in (
+            ("category_limit_state", "category_limit_states"),
+            ("subscription_patterns", "subscription_patterns"),
+            ("recurring_spend_patterns", "recurring_spend_patterns"),
+        ):
+            columns = _table_columns(cur, table)
+            if not {"category", "user_id"} <= columns:
+                continue
+            filters, params = _owned_reference_scope(
+                columns,
+                user_id,
+                workspace_id,
+                owner_column="user_id",
+                shared_workspace=shared_workspace,
+            )
+            filters.append(f"{category_key_sql('category')}=%s")
+            params.append(category_key)
+            values[field] = _count_rows(cur, table, " AND ".join(filters), tuple(params))
     cbg_columns = _table_columns(cur, "category_budget_group_members")
     if cbg_columns and _is_expense_category_type(op_type):
+        group_columns = _table_columns(cur, "category_budget_groups")
+        group_filters, group_params = _owned_reference_scope(
+            group_columns,
+            user_id,
+            workspace_id,
+            owner_column="owner_user_id",
+            alias="g",
+            shared_workspace=shared_workspace,
+        )
         values["category_budget_groups"] = _count_rows(
             cur,
             "category_budget_group_members m JOIN public.category_budget_groups g ON g.id=m.group_id",
-            "g.owner_user_id=%s AND (%s::bigint IS NULL OR g.workspace_id=%s) AND m.normalized_category_name=%s",
-            (user_id, workspace_id, workspace_id, category_key),
+            f"{' AND '.join(group_filters)} AND {category_key_sql('m.category_name')}=%s",
+            (*group_params, category_key),
         )
     reminder_columns = _table_columns(cur, "user_reminders")
     if {"category", "user_id"} <= reminder_columns:
-        filters, params = _reminder_scope(reminder_columns, user_id, workspace_id, op_type)
-        filters.append("lower(category)=%s")
+        filters, params = _reminder_scope(
+            reminder_columns,
+            user_id,
+            workspace_id,
+            op_type,
+            shared_workspace=shared_workspace,
+        )
+        filters.append(f"{category_key_sql('category')}=%s")
         params.append(category_key)
         values["reminders"] = _count_rows(cur, "user_reminders", " AND ".join(filters), tuple(params))
     alias_columns = _table_columns(cur, "user_aliases")
     if {"category", "user_id"} <= alias_columns:
-        type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
-        values["aliases"] = _count_rows(cur, "user_aliases", f"user_id=%s {type_sql} AND lower(category)=%s", (user_id, *type_params, category_key))
+        scope = _personalization_scope(
+            alias_columns,
+            user_id,
+            workspace_id,
+            shared_workspace=shared_workspace,
+        )
+        if scope:
+            filters, params = scope
+            type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
+            if type_sql:
+                filters.append(type_sql.removeprefix("AND "))
+                params.extend(type_params)
+            filters.append(f"{category_key_sql('category')}=%s")
+            params.append(category_key)
+            values["aliases"] = _count_rows(cur, "user_aliases", " AND ".join(filters), tuple(params))
     ml_columns = _table_columns(cur, "ml_observations")
     if {"chosen_category", "user_id"} <= ml_columns:
-        type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
-        values["ml_observations"] = _count_rows(cur, "ml_observations", f"user_id=%s {type_sql} AND lower(chosen_category)=%s", (user_id, *type_params, category_key))
+        scope = _personalization_scope(
+            ml_columns,
+            user_id,
+            workspace_id,
+            shared_workspace=shared_workspace,
+        )
+        if scope:
+            filters, params = scope
+            type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
+            if type_sql:
+                filters.append(type_sql.removeprefix("AND "))
+                params.extend(type_params)
+            filters.append(f"{category_key_sql('chosen_category')}=%s")
+            params.append(category_key)
+            values["ml_observations"] = _count_rows(cur, "ml_observations", " AND ".join(filters), tuple(params))
     return CategoryReferenceCounts(**values)
 
 
 def _update_rows(cur, table: str, set_sql: str, where: str, params: tuple) -> int:
     cur.execute(f"UPDATE public.{table} SET {set_sql} WHERE {where}", params)
     return int(cur.rowcount or 0)
+
+
+def _update_derived_expense_categories(
+    cur,
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    source_key: str,
+    destination_name: str,
+    shared_workspace: bool | None,
+) -> dict[str, int]:
+    changed: dict[str, int] = {}
+    for table, field in (
+        ("category_limit_state", "category_limit_states"),
+        ("subscription_patterns", "subscription_patterns"),
+        ("recurring_spend_patterns", "recurring_spend_patterns"),
+    ):
+        columns = _table_columns(cur, table)
+        if not {"category", "user_id"} <= columns:
+            continue
+        filters, params = _owned_reference_scope(
+            columns,
+            user_id,
+            workspace_id,
+            owner_column="user_id",
+            shared_workspace=shared_workspace,
+        )
+        filters.append(f"{category_key_sql('category')}=%s")
+        params.append(source_key)
+        set_sql = "category=%s"
+        if "updated_at" in columns:
+            set_sql += ", updated_at=now()"
+        changed[field] = _update_rows(
+            cur,
+            table,
+            set_sql,
+            " AND ".join(filters),
+            (destination_name, *params),
+        )
+    return changed
 
 
 def transfer_category(
@@ -602,6 +881,7 @@ def transfer_category(
     destination: str,
     archive_source: bool = False,
     budget_resolution: str = "delete_source",
+    shared_workspace: bool | None = None,
 ) -> CategoryTransferResult:
     source_name = normalize_category_name(source)
     destination_name = normalize_category_name(destination)
@@ -615,21 +895,42 @@ def transfer_category(
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _ensure_category_exists(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, name=source_name)
-            if not _category_exists(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, name=destination_name):
+            _ensure_category_exists(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                name=source_name,
+                shared_workspace=shared_workspace,
+            )
+            if not _category_exists(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                name=destination_name,
+                shared_workspace=shared_workspace,
+            ):
                 raise ValueError("destination_not_found")
 
-            before = _category_reference_counts_cur(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, category_key=source_key)
+            before = _category_reference_counts_cur(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                category_key=source_key,
+                shared_workspace=shared_workspace,
+            )
             changed: dict[str, int] = {}
 
             op_columns = _table_columns(cur, "operations")
             if {"category", "type"} <= op_columns:
-                scope, params = _legacy_personal_clause(user_id, workspace_id)
+                scope, params = _legacy_personal_clause(user_id, workspace_id, shared_workspace=shared_workspace)
                 changed["operations"] = _update_rows(
                     cur,
                     "operations",
                     "category=%s, updated_at=COALESCE(updated_at, now())",
-                    f"{scope} AND type=%s AND lower(category)=%s",
+                    f"{scope} AND type=%s AND {category_key_sql('category')}=%s",
                     (destination_name, *params, op_type, source_key),
                 )
 
@@ -638,76 +939,103 @@ def transfer_category(
             transferred_budget_count = 0
             skipped_destination_budget_count = 0
             if {"category", "user_id"} <= limit_columns:
-                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                scope = _category_limit_scope(
+                    limit_columns,
+                    user_id,
+                    workspace_id,
+                    op_type,
+                    shared_workspace=shared_workspace,
+                )
                 if scope:
                     limit_filters, limit_params = scope
                     cur.execute(
-                        f"SELECT period, amount, currency FROM public.category_limits WHERE {' AND '.join(limit_filters)} AND lower(category)=%s",
+                        f"SELECT id, user_id, period, amount, currency FROM public.category_limits WHERE {' AND '.join(limit_filters)} AND {category_key_sql('category')}=%s",
                         (*limit_params, source_key),
                     )
                     source_limits = cur.fetchall()
                     source_budget_count = len(source_limits)
-                    for period, amount, currency in source_limits:
+                    for limit_id, owner_user_id, period, _amount, _currency in source_limits:
                         destination_filters = list(limit_filters)
                         destination_params = list(limit_params)
-                        destination_filters.extend(["period=%s", "lower(category)=%s"])
+                        if workspace_id is not None and "workspace_id" in limit_columns:
+                            destination_filters.append("user_id=%s")
+                            destination_params.append(owner_user_id)
+                        destination_filters.extend(["period=%s", f"{category_key_sql('category')}=%s"])
                         destination_params.extend([period, destination_key])
                         cur.execute(
                             f"SELECT 1 FROM public.category_limits WHERE {' AND '.join(destination_filters)} LIMIT 1",
                             tuple(destination_params),
                         )
                         destination_has_budget = cur.fetchone() is not None
-                        source_period_filters = list(limit_filters)
-                        source_period_params = list(limit_params)
-                        source_period_filters.extend(["period=%s", "lower(category)=%s"])
-                        source_period_params.extend([period, source_key])
                         if budget_resolution == "transfer_source" and not destination_has_budget:
                             cur.execute(
-                                f"""
+                                """
                                 UPDATE public.category_limits
                                    SET category=%s, updated_at=now()
-                                 WHERE {' AND '.join(source_period_filters)}
+                                 WHERE id=%s
                                 """,
-                                (destination_name, *source_period_params),
+                                (destination_name, limit_id),
                             )
                             transferred_budget_count += int(cur.rowcount or 0)
                         else:
                             if destination_has_budget:
                                 skipped_destination_budget_count += 1
                             cur.execute(
-                                f"DELETE FROM public.category_limits WHERE {' AND '.join(source_period_filters)}",
-                                tuple(source_period_params),
+                                "DELETE FROM public.category_limits WHERE id=%s",
+                                (limit_id,),
                             )
                     changed["category_limits"] = source_budget_count
 
+            if _is_expense_category_type(op_type):
+                changed.update(_update_derived_expense_categories(
+                    cur,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    source_key=source_key,
+                    destination_name=destination_name,
+                    shared_workspace=shared_workspace,
+                ))
+
             cbg_columns = _table_columns(cur, "category_budget_group_members")
             if cbg_columns and _is_expense_category_type(op_type):
+                group_columns = _table_columns(cur, "category_budget_groups")
+                group_filters, group_params = _owned_reference_scope(
+                    group_columns,
+                    user_id,
+                    workspace_id,
+                    owner_column="owner_user_id",
+                    alias="g",
+                    shared_workspace=shared_workspace,
+                )
+                member_key = category_key_sql("m.category_name")
                 cur.execute(
-                    """
+                    f"""
                     SELECT m.group_id
                       FROM public.category_budget_group_members m
                       JOIN public.category_budget_groups g ON g.id=m.group_id
-                     WHERE g.owner_user_id=%s
-                       AND (%s::bigint IS NULL OR g.workspace_id=%s)
-                       AND m.normalized_category_name=%s
+                     WHERE {' AND '.join(group_filters)}
+                       AND {member_key}=%s
                     """,
-                    (user_id, workspace_id, workspace_id, source_key),
+                    (*group_params, source_key),
                 )
                 group_ids = [int(r[0]) for r in cur.fetchall()]
                 updated = 0
                 for group_id in group_ids:
                     cur.execute(
-                        "SELECT 1 FROM public.category_budget_group_members WHERE group_id=%s AND normalized_category_name=%s LIMIT 1",
+                        f"SELECT 1 FROM public.category_budget_group_members WHERE group_id=%s AND {category_key_sql('category_name')}=%s LIMIT 1",
                         (group_id, destination_key),
                     )
                     if cur.fetchone():
-                        cur.execute("DELETE FROM public.category_budget_group_members WHERE group_id=%s AND normalized_category_name=%s", (group_id, source_key))
+                        cur.execute(
+                            f"DELETE FROM public.category_budget_group_members WHERE group_id=%s AND {category_key_sql('category_name')}=%s",
+                            (group_id, source_key),
+                        )
                     else:
                         cur.execute(
-                            """
+                            f"""
                             UPDATE public.category_budget_group_members
                                SET category_name=%s, normalized_category_name=%s
-                             WHERE group_id=%s AND normalized_category_name=%s
+                             WHERE group_id=%s AND {category_key_sql('category_name')}=%s
                             """,
                             (destination_name, destination_key, group_id, source_key),
                         )
@@ -716,8 +1044,14 @@ def transfer_category(
 
             reminder_columns = _table_columns(cur, "user_reminders")
             if {"category", "user_id"} <= reminder_columns:
-                reminder_filters, reminder_params = _reminder_scope(reminder_columns, user_id, workspace_id, op_type)
-                reminder_filters.append("lower(category)=%s")
+                reminder_filters, reminder_params = _reminder_scope(
+                    reminder_columns,
+                    user_id,
+                    workspace_id,
+                    op_type,
+                    shared_workspace=shared_workspace,
+                )
+                reminder_filters.append(f"{category_key_sql('category')}=%s")
                 reminder_params.append(source_key)
                 changed["reminders"] = _update_rows(
                     cur,
@@ -729,25 +1063,51 @@ def transfer_category(
 
             alias_columns = _table_columns(cur, "user_aliases")
             if {"category", "user_id"} <= alias_columns:
-                type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
-                changed["aliases"] = _update_rows(
-                    cur,
-                    "user_aliases",
-                    "category=%s, updated_at=now()",
-                    f"user_id=%s {type_sql} AND lower(category)=%s",
-                    (destination_name, user_id, *type_params, source_key),
+                scope = _personalization_scope(
+                    alias_columns,
+                    user_id,
+                    workspace_id,
+                    shared_workspace=shared_workspace,
                 )
+                if scope:
+                    alias_filters, alias_params = scope
+                    type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
+                    if type_sql:
+                        alias_filters.append(type_sql.removeprefix("AND "))
+                        alias_params.extend(type_params)
+                    alias_filters.append(f"{category_key_sql('category')}=%s")
+                    alias_params.append(source_key)
+                    changed["aliases"] = _update_rows(
+                        cur,
+                        "user_aliases",
+                        "category=%s, updated_at=now()",
+                        " AND ".join(alias_filters),
+                        (destination_name, *alias_params),
+                    )
 
             ml_columns = _table_columns(cur, "ml_observations")
             if {"chosen_category", "user_id"} <= ml_columns:
-                type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
-                changed["ml_observations"] = _update_rows(
-                    cur,
-                    "ml_observations",
-                    "chosen_category=%s",
-                    f"user_id=%s {type_sql} AND lower(chosen_category)=%s",
-                    (destination_name, user_id, *type_params, source_key),
+                scope = _personalization_scope(
+                    ml_columns,
+                    user_id,
+                    workspace_id,
+                    shared_workspace=shared_workspace,
                 )
+                if scope:
+                    ml_filters, ml_params = scope
+                    type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
+                    if type_sql:
+                        ml_filters.append(type_sql.removeprefix("AND "))
+                        ml_params.extend(type_params)
+                    ml_filters.append(f"{category_key_sql('chosen_category')}=%s")
+                    ml_params.append(source_key)
+                    changed["ml_observations"] = _update_rows(
+                        cur,
+                        "ml_observations",
+                        "chosen_category=%s",
+                        " AND ".join(ml_filters),
+                        (destination_name, *ml_params),
+                    )
 
             changed["drafts"] = _update_draft_category(
                 cur,
@@ -756,6 +1116,7 @@ def transfer_category(
                 op_type=op_type,
                 source_key=source_key,
                 destination_name=destination_name,
+                shared_workspace=shared_workspace,
             )
 
             archived_category_id = None
@@ -771,10 +1132,10 @@ def transfer_category(
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NOT NULL)
+                       AND (user_id=%s OR %s::boolean)
                      RETURNING id
                     """,
-                    (*params, op_type, source_key, user_id, workspace_id),
+                    (*params, op_type, source_key, user_id, _is_shared_scope(workspace_id, shared_workspace)),
                 )
                 row = cur.fetchone()
                 archived_category_id = int(row[0]) if row else None
@@ -806,6 +1167,7 @@ def rename_category(
     op_type: str,
     source: str,
     destination: str,
+    shared_workspace: bool | None = None,
 ) -> CategoryRenameResult:
     source_name = normalize_category_name(source)
     destination_name = normalize_category_name(destination)
@@ -817,30 +1179,57 @@ def rename_category(
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _ensure_category_exists(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, name=source_name)
-            if source_key != destination_key and _category_exists(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, name=destination_name):
+            _ensure_category_exists(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                name=source_name,
+                shared_workspace=shared_workspace,
+            )
+            if source_key != destination_key and _category_exists(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                name=destination_name,
+                shared_workspace=shared_workspace,
+            ):
                 raise ValueError("duplicate_category")
 
-            before = _category_reference_counts_cur(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, category_key=source_key)
+            before = _category_reference_counts_cur(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                category_key=source_key,
+                shared_workspace=shared_workspace,
+            )
             changed: dict[str, int] = {}
 
             op_columns = _table_columns(cur, "operations")
             if {"category", "type"} <= op_columns:
-                scope, params = _legacy_personal_clause(user_id, workspace_id)
+                scope, params = _legacy_personal_clause(user_id, workspace_id, shared_workspace=shared_workspace)
                 changed["operations"] = _update_rows(
                     cur,
                     "operations",
                     "category=%s, updated_at=COALESCE(updated_at, now())",
-                    f"{scope} AND type=%s AND lower(category)=%s",
+                    f"{scope} AND type=%s AND {category_key_sql('category')}=%s",
                     (destination_name, *params, op_type, source_key),
                 )
 
             limit_columns = _table_columns(cur, "category_limits")
             if {"category", "user_id"} <= limit_columns:
-                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
+                scope = _category_limit_scope(
+                    limit_columns,
+                    user_id,
+                    workspace_id,
+                    op_type,
+                    shared_workspace=shared_workspace,
+                )
                 if scope:
                     limit_filters, limit_params = scope
-                    limit_filters.append("lower(category)=%s")
+                    limit_filters.append(f"{category_key_sql('category')}=%s")
                     limit_params.append(source_key)
                     changed["category_limits"] = _update_rows(
                         cur,
@@ -850,20 +1239,44 @@ def rename_category(
                         (destination_name, *limit_params),
                     )
 
+            if _is_expense_category_type(op_type):
+                changed.update(_update_derived_expense_categories(
+                    cur,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    source_key=source_key,
+                    destination_name=destination_name,
+                    shared_workspace=shared_workspace,
+                ))
+
             cbg_columns = _table_columns(cur, "category_budget_group_members")
             if cbg_columns and _is_expense_category_type(op_type):
+                group_columns = _table_columns(cur, "category_budget_groups")
+                group_filters, group_params = _owned_reference_scope(
+                    group_columns,
+                    user_id,
+                    workspace_id,
+                    owner_column="owner_user_id",
+                    shared_workspace=shared_workspace,
+                )
                 changed["category_budget_groups"] = _update_rows(
                     cur,
                     "category_budget_group_members",
                     "category_name=%s, normalized_category_name=%s",
-                    "normalized_category_name=%s AND group_id IN (SELECT id FROM public.category_budget_groups WHERE owner_user_id=%s AND (%s::bigint IS NULL OR workspace_id=%s))",
-                    (destination_name, destination_key, source_key, user_id, workspace_id, workspace_id),
+                    f"{category_key_sql('category_name')}=%s AND group_id IN (SELECT id FROM public.category_budget_groups WHERE {' AND '.join(group_filters)})",
+                    (destination_name, destination_key, source_key, *group_params),
                 )
 
             reminder_columns = _table_columns(cur, "user_reminders")
             if {"category", "user_id"} <= reminder_columns:
-                reminder_filters, reminder_params = _reminder_scope(reminder_columns, user_id, workspace_id, op_type)
-                reminder_filters.append("lower(category)=%s")
+                reminder_filters, reminder_params = _reminder_scope(
+                    reminder_columns,
+                    user_id,
+                    workspace_id,
+                    op_type,
+                    shared_workspace=shared_workspace,
+                )
+                reminder_filters.append(f"{category_key_sql('category')}=%s")
                 reminder_params.append(source_key)
                 changed["reminders"] = _update_rows(
                     cur,
@@ -875,25 +1288,51 @@ def rename_category(
 
             alias_columns = _table_columns(cur, "user_aliases")
             if {"category", "user_id"} <= alias_columns:
-                type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
-                changed["aliases"] = _update_rows(
-                    cur,
-                    "user_aliases",
-                    "category=%s, updated_at=now()",
-                    f"user_id=%s {type_sql} AND lower(category)=%s",
-                    (destination_name, user_id, *type_params, source_key),
+                scope = _personalization_scope(
+                    alias_columns,
+                    user_id,
+                    workspace_id,
+                    shared_workspace=shared_workspace,
                 )
+                if scope:
+                    alias_filters, alias_params = scope
+                    type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
+                    if type_sql:
+                        alias_filters.append(type_sql.removeprefix("AND "))
+                        alias_params.extend(type_params)
+                    alias_filters.append(f"{category_key_sql('category')}=%s")
+                    alias_params.append(source_key)
+                    changed["aliases"] = _update_rows(
+                        cur,
+                        "user_aliases",
+                        "category=%s, updated_at=now()",
+                        " AND ".join(alias_filters),
+                        (destination_name, *alias_params),
+                    )
 
             ml_columns = _table_columns(cur, "ml_observations")
             if {"chosen_category", "user_id"} <= ml_columns:
-                type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
-                changed["ml_observations"] = _update_rows(
-                    cur,
-                    "ml_observations",
-                    "chosen_category=%s",
-                    f"user_id=%s {type_sql} AND lower(chosen_category)=%s",
-                    (destination_name, user_id, *type_params, source_key),
+                scope = _personalization_scope(
+                    ml_columns,
+                    user_id,
+                    workspace_id,
+                    shared_workspace=shared_workspace,
                 )
+                if scope:
+                    ml_filters, ml_params = scope
+                    type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
+                    if type_sql:
+                        ml_filters.append(type_sql.removeprefix("AND "))
+                        ml_params.extend(type_params)
+                    ml_filters.append(f"{category_key_sql('chosen_category')}=%s")
+                    ml_params.append(source_key)
+                    changed["ml_observations"] = _update_rows(
+                        cur,
+                        "ml_observations",
+                        "chosen_category=%s",
+                        " AND ".join(ml_filters),
+                        (destination_name, *ml_params),
+                    )
 
             changed["drafts"] = _update_draft_category(
                 cur,
@@ -902,6 +1341,7 @@ def rename_category(
                 op_type=op_type,
                 source_key=source_key,
                 destination_name=destination_name,
+                shared_workspace=shared_workspace,
             )
 
             category_id = None
@@ -918,10 +1358,18 @@ def rename_category(
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NOT NULL)
+                       AND (user_id=%s OR %s::boolean)
                      RETURNING id
                     """,
-                    (destination_name, destination_key, *params, op_type, source_key, user_id, workspace_id),
+                    (
+                        destination_name,
+                        destination_key,
+                        *params,
+                        op_type,
+                        source_key,
+                        user_id,
+                        _is_shared_scope(workspace_id, shared_workspace),
+                    ),
                 )
                 row = cur.fetchone()
                 category_id = int(row[0]) if row else None
@@ -977,10 +1425,10 @@ def hard_delete_category_with_operations(
                 cur.execute(
                     f"""
                     SELECT id
-                      FROM public.operations
+                     FROM public.operations
                      WHERE {scope}
                        AND type=%s
-                       AND lower(category)=%s
+                       AND {category_key_sql('category')}=%s
                     """,
                     (*params, op_type, key),
                 )
@@ -1003,35 +1451,58 @@ def hard_delete_category_with_operations(
                 scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
                 if scope:
                     limit_filters, limit_params = scope
-                    limit_filters.append("lower(category)=%s")
+                    limit_filters.append(f"{category_key_sql('category')}=%s")
                     limit_params.append(key)
                     cur.execute(f"DELETE FROM public.category_limits WHERE {' AND '.join(limit_filters)}", tuple(limit_params))
             if _table_columns(cur, "category_budget_group_members") and _is_expense_category_type(op_type):
+                group_columns = _table_columns(cur, "category_budget_groups")
+                group_filters, group_params = _owned_reference_scope(
+                    group_columns,
+                    user_id,
+                    workspace_id,
+                    owner_column="owner_user_id",
+                    alias="g",
+                )
                 cur.execute(
-                    """
+                    f"""
                     DELETE FROM public.category_budget_group_members m
                      USING public.category_budget_groups g
                      WHERE g.id=m.group_id
-                       AND g.owner_user_id=%s
-                       AND (%s::bigint IS NULL OR g.workspace_id=%s)
-                       AND m.normalized_category_name=%s
+                       AND {' AND '.join(group_filters)}
+                       AND {category_key_sql('m.category_name')}=%s
                     """,
-                    (user_id, workspace_id, workspace_id, key),
+                    (*group_params, key),
                 )
             reminder_columns = _table_columns(cur, "user_reminders")
             if reminder_columns:
                 reminder_filters, reminder_params = _reminder_scope(reminder_columns, user_id, workspace_id, op_type)
-                reminder_filters.append("lower(category)=%s")
+                reminder_filters.append(f"{category_key_sql('category')}=%s")
                 reminder_params.append(key)
                 cur.execute(f"DELETE FROM public.user_reminders WHERE {' AND '.join(reminder_filters)}", tuple(reminder_params))
             alias_columns = _table_columns(cur, "user_aliases")
             if alias_columns:
-                type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
-                cur.execute(f"DELETE FROM public.user_aliases WHERE user_id=%s {type_sql} AND lower(category)=%s", (user_id, *type_params, key))
+                scope = _personalization_scope(alias_columns, user_id, workspace_id)
+                if scope:
+                    alias_filters, alias_params = scope
+                    type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
+                    if type_sql:
+                        alias_filters.append(type_sql.removeprefix("AND "))
+                        alias_params.extend(type_params)
+                    alias_filters.append(f"{category_key_sql('category')}=%s")
+                    alias_params.append(key)
+                    cur.execute(f"DELETE FROM public.user_aliases WHERE {' AND '.join(alias_filters)}", tuple(alias_params))
             ml_columns = _table_columns(cur, "ml_observations")
             if ml_columns:
-                type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
-                cur.execute(f"UPDATE public.ml_observations SET chosen_category=NULL WHERE user_id=%s {type_sql} AND lower(chosen_category)=%s", (user_id, *type_params, key))
+                scope = _personalization_scope(ml_columns, user_id, workspace_id)
+                if scope:
+                    ml_filters, ml_params = scope
+                    type_sql, type_params = _type_filter(ml_columns, op_type, ("chosen_type", "detected_type", "op_type"))
+                    if type_sql:
+                        ml_filters.append(type_sql.removeprefix("AND "))
+                        ml_params.extend(type_params)
+                    ml_filters.append(f"{category_key_sql('chosen_category')}=%s")
+                    ml_params.append(key)
+                    cur.execute(f"UPDATE public.ml_observations SET chosen_category=NULL WHERE {' AND '.join(ml_filters)}", tuple(ml_params))
 
             _update_draft_category(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, source_key=key, destination_name=None)
 
@@ -1070,7 +1541,14 @@ def hard_delete_category_with_operations(
         conn.close()
 
 
-def archive_empty_category(*, user_id: int, workspace_id: int | None, op_type: str, category: str) -> CategoryTransferResult:
+def archive_empty_category(
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    category: str,
+    shared_workspace: bool | None = None,
+) -> CategoryTransferResult:
     name = normalize_category_name(category)
     if is_protected_category(name):
         raise ValueError("protected_category")
@@ -1078,7 +1556,22 @@ def archive_empty_category(*, user_id: int, workspace_id: int | None, op_type: s
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            counts = _category_reference_counts_cur(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, category_key=key)
+            _ensure_category_exists(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                name=name,
+                shared_workspace=shared_workspace,
+            )
+            counts = _category_reference_counts_cur(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                category_key=key,
+                shared_workspace=shared_workspace,
+            )
             if counts.total:
                 raise ValueError("category_has_references")
             archived_category_id = None
@@ -1093,10 +1586,10 @@ def archive_empty_category(*, user_id: int, workspace_id: int | None, op_type: s
                        AND type=%s
                        AND normalized_name=%s
                        AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NOT NULL)
+                       AND (user_id=%s OR %s::boolean)
                      RETURNING id
                     """,
-                    (*params, op_type, key, user_id, workspace_id),
+                    (*params, op_type, key, user_id, _is_shared_scope(workspace_id, shared_workspace)),
                 )
                 row = cur.fetchone()
                 archived_category_id = int(row[0]) if row else None
@@ -1116,84 +1609,21 @@ def archive_empty_category(*, user_id: int, workspace_id: int | None, op_type: s
         conn.close()
 
 
-def delete_category_without_operations(*, user_id: int, workspace_id: int | None, op_type: str, category: str) -> CategoryTransferResult:
-    name = normalize_category_name(category)
-    if is_protected_category(name):
-        raise ValueError("protected_category")
-    key = normalized_category_key(name)
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            _ensure_category_exists(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, name=name)
-            counts = _category_reference_counts_cur(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, category_key=key)
-            if counts.operations:
-                raise ValueError("category_has_operations")
-            deleted_budgets = 0
-            limit_columns = _table_columns(cur, "category_limits")
-            if limit_columns:
-                scope = _category_limit_scope(limit_columns, user_id, workspace_id, op_type)
-                if scope:
-                    limit_filters, limit_params = scope
-                    limit_filters.append("lower(category)=%s")
-                    limit_params.append(key)
-                    cur.execute(f"DELETE FROM public.category_limits WHERE {' AND '.join(limit_filters)}", tuple(limit_params))
-                    deleted_budgets = int(cur.rowcount or 0)
-            if _table_columns(cur, "category_budget_group_members") and _is_expense_category_type(op_type):
-                cur.execute(
-                    """
-                    DELETE FROM public.category_budget_group_members m
-                     USING public.category_budget_groups g
-                     WHERE g.id=m.group_id
-                       AND g.owner_user_id=%s
-                       AND (%s::bigint IS NULL OR g.workspace_id=%s)
-                       AND m.normalized_category_name=%s
-                    """,
-                    (user_id, workspace_id, workspace_id, key),
-                )
-            reminder_columns = _table_columns(cur, "user_reminders")
-            if reminder_columns:
-                reminder_filters, reminder_params = _reminder_scope(reminder_columns, user_id, workspace_id, op_type)
-                reminder_filters.append("lower(category)=%s")
-                reminder_params.append(key)
-                cur.execute(f"UPDATE public.user_reminders SET category='Прочее', updated_at=now() WHERE {' AND '.join(reminder_filters)}", tuple(reminder_params))
-            alias_columns = _table_columns(cur, "user_aliases")
-            if alias_columns:
-                type_sql, type_params = _type_filter(alias_columns, op_type, ("type", "op_type"))
-                cur.execute(f"DELETE FROM public.user_aliases WHERE user_id=%s {type_sql} AND lower(category)=%s", (user_id, *type_params, key))
-            archived_category_id = None
-            if _table_columns(cur, "custom_categories"):
-                scope, params = _scope_clause(workspace_id)
-                cur.execute(
-                    f"""
-                    UPDATE public.custom_categories
-                       SET archived_at=COALESCE(archived_at, now()),
-                           updated_at=now()
-                     WHERE {scope}
-                       AND type=%s
-                       AND normalized_name=%s
-                       AND archived_at IS NULL
-                       AND (user_id=%s OR %s::bigint IS NOT NULL)
-                     RETURNING id
-                    """,
-                    (*params, op_type, key, user_id, workspace_id),
-                )
-                row = cur.fetchone()
-                archived_category_id = int(row[0]) if row else None
-        conn.commit()
-        return CategoryTransferResult(
-            source=name,
-            destination="",
-            op_type=op_type,
-            counts=counts,
-            archived_category_id=archived_category_id,
-            deleted_budget_count=deleted_budgets,
-            changed=bool(counts.total or archived_category_id),
-        )
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+def delete_category_without_operations(
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    category: str,
+    shared_workspace: bool | None = None,
+) -> CategoryTransferResult:
+    return archive_empty_category(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        op_type=op_type,
+        category=category,
+        shared_workspace=shared_workspace,
+    )
 
 
 def get_or_create_custom_category(

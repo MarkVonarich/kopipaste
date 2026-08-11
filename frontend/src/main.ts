@@ -287,6 +287,7 @@ function renderSheet(): string {
       `Цель «${selectedGoal.title}» и её история пополнений будут удалены. Финансовые операции останутся без изменений.`,
       'Удалить цель навсегда?',
       'confirm-goal-delete',
+      state.saveError,
     );
   }
   if (state.sheet === 'insight-detail' && selectedInsight) {
@@ -1322,6 +1323,7 @@ function wireEvents(): void {
     button.addEventListener('click', () => {
       selectedGoal = allGoals().find((goal) => goal.id === Number(button.dataset.id)) || null;
       if (!selectedGoal || selectedGoal.status !== 'archived') return;
+      state.saveError = undefined;
       state.confirmGoalDeleteId = selectedGoal.id;
       render();
     });

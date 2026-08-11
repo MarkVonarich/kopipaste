@@ -331,6 +331,20 @@ describe('acceptance components', () => {
     expect(html).toContain('data-action="cancel-delete"');
   });
 
+  it('renders a permanent goal deletion failure inside the active confirmation', () => {
+    const html = ConfirmDialog(
+      7,
+      'Цель и история будут удалены.',
+      'Удалить цель навсегда?',
+      'confirm-goal-delete',
+      'Сначала переместите цель в архив.',
+    );
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('Сначала переместите цель в архив.');
+    expect(html).toContain('data-action="confirm-goal-delete"');
+  });
+
   it('renders read-only plans with actual goal and limit values', () => {
     const html = PlansScreen({
       goals: [{

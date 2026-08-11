@@ -38,13 +38,19 @@ Categories are addressed by their canonical normalized token. Successful mutatio
 
 Custom-category ownership follows scope: personal categories require the authenticated owner, while workspace categories are shared inside that workspace and mutations additionally require the existing workspace write role. Plans 2.0 corrects the previously inverted owner predicate that blocked write-authorized workspace members and exposed personal category rows too broadly.
 
+Category identity uses the existing Python `normalized_category_key()` contract: trim, collapse whitespace, lowercase/case-fold, and replace `ё` with `е`. Text-bearing PostgreSQL scans and mutations use one conservative equivalent expression built from `btrim`, `regexp_replace`, `lower`, and `replace`; tables with a canonical `normalized_category_name` are rewritten to the same destination key. No extension or database migration is required.
+
 ### Category deletion
 
 - Protected categories cannot be renamed or removed.
-- An unused custom category can be removed after explicit confirmation.
+- An unused custom category can be removed after explicit confirmation. "Unused" means zero known references in every audited table, not merely zero financial operations.
 - A category with operations or other references requires a replacement category.
-- Transfer updates operations, limits, grouped-budget membership, reminders, aliases, learning observations, and active drafts through the existing transactional category service, then archives the old custom category.
-- Financial operations are never deleted by the Mini App category removal path.
+- Direct removal calls the same strict empty-category archive service. It never deletes limits, grouped-budget membership, reminders, drafts, aliases, or learning state to make the category appear empty.
+- In a shared workspace, rename and transfer maintain textual references for every member in that workspace. This includes operations, category limits and their alert state, grouped-budget membership, reminders, operation drafts, workspace-attributed user aliases, subscription patterns, and recurring-spend patterns. The mutation changes only the category identity; it does not expose or edit another member's amounts, schedules, or rule values.
+- In a personal workspace, those same references remain owner-scoped even though the personal workspace has a numeric `workspace_id`. Other users' personal rows and every other workspace remain unchanged.
+- `user_aliases` rows are migrated across members only when their explicit `workspace_id` proves the scope. Legacy/global `user_aliases` rows are not attributed to a shared workspace by text alone.
+- `ml_observations`, legacy `category_aliases`, and `category_feedback` do not have a reliable shared-workspace identity contract. Shared category mutations intentionally leave those user-global learning/history rows untouched instead of rewriting another context by category text. They are not managed-category sources and cannot make an archived category reappear in the category list.
+- Transfer performs all reference maintenance and source archival in one database transaction. Financial operations are recategorized but never deleted by the Mini App category removal path.
 - If no replacement exists, the UI explains that another category must be created first.
 - API errors distinguish protected, referenced, missing-destination, and invalid replacement cases.
 

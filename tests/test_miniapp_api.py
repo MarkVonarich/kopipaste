@@ -563,6 +563,8 @@ def test_category_delete_uses_safe_direct_or_transfer_path(monkeypatch):
 
     assert [kind for kind, _kwargs in calls] == ["direct", "transfer"]
     assert calls[1][1]["archive_source"] is True
+    assert calls[1][1]["budget_resolution"] == "transfer_source"
+    assert calls[1][1]["shared_workspace"] is True
     assert calls[1][1]["destination"] == "Other"
 
 
@@ -581,6 +583,25 @@ def test_category_delete_rejects_protected_and_unavailable_destination(monkeypat
     with pytest.raises(MiniAppError) as missing:
         api.delete_category(api.request(42), "food", {"workspace_id": 10, "type": "expense", "transfer_to": "Gone"})
     assert missing.value.code == "category_destination_not_found"
+
+
+def test_category_delete_maps_any_reference_to_transfer_required(monkeypatch):
+    api = _api(monkeypatch)
+    ctx = WorkspaceContext(10, -100, 42, "group", "member", "Family", True)
+    monkeypatch.setattr(api, "_write_scope", lambda *_args: ctx)
+    monkeypatch.setattr(api, "_managed_categories", lambda *_args, **_kwargs: [
+        {"name": "Food", "normalized_name": "food", "token": "food", "protected": False},
+    ])
+
+    def reject(**_kwargs):
+        raise ValueError("category_has_references")
+
+    monkeypatch.setattr("miniapp.api.delete_category_without_operations", reject)
+
+    with pytest.raises(MiniAppError) as exc:
+        api.delete_category(api.request(42), "food", {"workspace_id": 10, "type": "expense"})
+
+    assert exc.value.code == "category_transfer_required"
 
 
 def test_profile_links_are_configured_not_repo_paths(monkeypatch):

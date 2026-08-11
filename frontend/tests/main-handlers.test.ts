@@ -340,6 +340,24 @@ describe('main plan handlers', () => {
     expect(api.deleteGoal).toHaveBeenCalledWith(7, 10);
   });
 
+  it('keeps a permanent goal deletion failure visible in the confirmation', async () => {
+    const api = installAppMocks();
+    api.plans.mockResolvedValue({ ...plansData, goals: [], archived_goals: [goalData('archived')] });
+    api.deleteGoal.mockRejectedValueOnce({ code: 'goal_not_archived' });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-archive-open"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-open"][data-id="7"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-delete"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="confirm-goal-delete"]')?.click();
+    await flush(8);
+
+    expect(document.body.textContent).toContain('Сначала переместите цель в архив.');
+    expect(document.querySelector('[data-action="confirm-goal-delete"]')).not.toBeNull();
+  });
+
   it('recalculates an edited goal after every plan change before saving', async () => {
     const api = installAppMocks();
     api.plans.mockResolvedValue({ ...plansData, goals: [goalData()], archived_goals: [] });
