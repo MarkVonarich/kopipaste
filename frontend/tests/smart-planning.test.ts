@@ -25,6 +25,12 @@ function estimate(overrides: Partial<PlanningEstimate> = {}): PlanningEstimate {
   };
 }
 
+function alertsChecked(html: string): boolean {
+  const root = document.createElement('div');
+  root.innerHTML = html;
+  return root.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked === true;
+}
+
 describe('Smart Planning Studio', () => {
   it('renders the history entry point, four periods, recommendation and conflict in the existing limit form', () => {
     const html = LimitForm(null, [{ name: 'Заведения' }], false, '', 'category', 'Заведения', 'RUB', estimate(), { amount: '', period: 'month', category: 'Заведения', scope: 'category' });
@@ -102,6 +108,31 @@ describe('Smart Planning Studio', () => {
 
     expect(html).toContain('Недостаточно истории');
     expect(html).not.toContain('data-action="planning-apply"');
+  });
+
+  it('distinguishes a proven zero baseline from insufficient history', () => {
+    const html = PlanningPanel(estimate({
+      baseline_average: '0.00',
+      recommendation: null,
+      history_confidence: 'good',
+      valid_periods: 4,
+      can_apply: false,
+    }));
+
+    expect(html).toContain('Среднее</span><strong>0 ₽');
+    expect(html).toContain('За выбранные периоды расходов не было.');
+    expect(html).not.toContain('Предложение КопиPaste</span><strong>Недостаточно истории');
+    expect(html).not.toContain('data-action="planning-apply"');
+  });
+
+  it('keeps explicit alert drafts authoritative for new and existing plans', () => {
+    const currentLimit = { alerts_enabled: true, scope: 'category', category: 'Заведения', period: 'month', amount: '500' } as any;
+    const currentBudget = { alerts_enabled: true, categories: ['Продукты'], currency: 'RUB', period: 'month', amount: '1000' } as any;
+
+    expect(alertsChecked(LimitForm(null, [{ name: 'Заведения' }], false, '', 'category', '', '', estimate(), { alerts_enabled: false }))).toBe(false);
+    expect(alertsChecked(LimitForm(currentLimit, [{ name: 'Заведения' }], false, '', 'category', '', '', estimate(), { alerts_enabled: false }))).toBe(false);
+    expect(alertsChecked(LimitForm(currentLimit, [{ name: 'Заведения' }], false, '', 'category', '', '', estimate(), { alerts_enabled: true }))).toBe(true);
+    expect(alertsChecked(CategoryBudgetForm(currentBudget, [{ name: 'Продукты' }], false, '', ['RUB'], 'RUB', estimate(), { categories: ['Продукты'], alerts_enabled: false }))).toBe(false);
   });
 
   it('wires Pointer Events, old save APIs, preview invalidation and BackButton architecture', async () => {

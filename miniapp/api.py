@@ -2928,7 +2928,8 @@ class MiniAppAPI:
         goal = get_goal(goal_id, req.user_id, workspace_id) if goal_id is not None else None
         if goal_id is not None and goal is None:
             raise MiniAppError(404, "goal_not_found", "Цель не найдена.")
-        currency = self._validated_currency(body.get("currency"), fallback=goal.currency if goal else get_user_currency(req.user_id))
+        default_currency = self._validated_currency(get_user_currency(req.user_id))
+        currency = self._validated_currency(body.get("currency"), fallback=goal.currency if goal else default_currency)
         categories: list[str] = []
         if kind in {"category_limit", "category_budget"}:
             raw_categories = body.get("categories") if kind == "category_budget" else [body.get("category") or body.get("category_key")]
@@ -2968,6 +2969,7 @@ class MiniAppAPI:
                 workspace_id=workspace_id,
                 kind=kind,
                 currency=currency,
+                default_currency=default_currency,
                 period=period,
                 categories=tuple(categories),
                 editing_entity_id=raw_editing_id,

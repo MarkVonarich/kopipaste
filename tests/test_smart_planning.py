@@ -25,6 +25,7 @@ def _request(kind="category_limit", **overrides):
         "workspace_id": 10,
         "kind": kind,
         "currency": "RUB",
+        "default_currency": "RUB",
         "period": "month",
         "categories": ("Заведения",),
     }
@@ -46,6 +47,7 @@ def test_monthly_history_excludes_current_incomplete_month():
         (date(2026, 7, 1), date(2026, 7, 31)),
         (date(2026, 8, 1), date(2026, 8, 31)),
     ]
+    assert [item.label for item in periods] == ["Май 2026", "Июнь 2026", "Июль 2026", "Август 2026"]
 
 
 def test_weekly_history_uses_previous_complete_monday_weeks():
@@ -56,7 +58,7 @@ def test_weekly_history_uses_previous_complete_monday_weeks():
     assert all(item.end < date(2026, 8, 10) for item in periods)
 
 
-def test_history_query_is_bounded_scoped_exact_currency_and_canonical(monkeypatch):
+def test_history_query_is_bounded_scoped_legacy_currency_compatible_and_canonical(monkeypatch):
     calls = []
 
     def fake_fetch(sql, params):
@@ -80,10 +82,81 @@ def test_history_query_is_bounded_scoped_exact_currency_and_canonical(monkeypatc
     assert result["scope"]["categories"] == ["заведения"]
     operations_sql, params = calls[0]
     assert "o.workspace_id=%s" in operations_sql
-    assert "o.currency=%s" in operations_sql
+    assert "COALESCE(o.currency, %s)=%s" in operations_sql
     assert "=ANY(%s)" in operations_sql
-    assert params.count("RUB") == 1
+    assert params[-3:-1] == ("RUB", "RUB")
     assert date(2026, 9, 1) not in params
+
+
+def test_legacy_currency_fallback_matches_analytics_for_requested_currency(monkeypatch):
+    calls = []
+
+    def fake_fetch(sql, params):
+        if "FROM public.operations" not in sql:
+            return []
+        normalized_sql = " ".join(sql.split())
+        calls.append((normalized_sql, params))
+        default_currency, requested_currency = params[-3:-1]
+        assert default_currency == "RUB"
+        totals = {
+            "RUB": Decimal("1500"),  # NULL 1000 + explicit RUB 500
+            "USD": Decimal("10"),
+            "EUR": Decimal("25"),
+        }
+        amount = totals[requested_currency]
+        return [(date(2026, month, 1), 3, amount, amount, Decimal("0")) for month in (5, 6, 7, 8)]
+
+    monkeypatch.setattr("services.planning.pg_fetchall", fake_fetch)
+
+    rub = calculate_planning_estimate(
+        _request(categories=("Продукты", " продукты ", "ПРОДУКТЫ")),
+        today=date(2026, 9, 12),
+    )
+    usd = calculate_planning_estimate(
+        _request(currency="USD", categories=("Продукты",)),
+        today=date(2026, 9, 12),
+    )
+    eur = calculate_planning_estimate(
+        _request(currency="EUR", categories=("Продукты",)),
+        today=date(2026, 9, 12),
+    )
+
+    assert rub["recommendation"] == Decimal("1500.00")
+    assert rub["scope"]["categories"] == ["продукты"]
+    assert usd["recommendation"] == Decimal("10.00")
+    assert eur["recommendation"] == Decimal("25.00")
+    assert all("COALESCE(o.currency, %s)=%s" in sql for sql, _params in calls)
+
+
+def test_goal_cash_flow_uses_same_legacy_currency_fallback(monkeypatch):
+    calls = []
+
+    def fake_fetch(sql, params):
+        if "FROM public.operations" in sql:
+            calls.append((" ".join(sql.split()), params))
+            default_currency, requested_currency = params[-3:-1]
+            assert (default_currency, requested_currency) == ("RUB", "RUB")
+            return [
+                (date(2026, month, 1), 2, Decimal("0"), Decimal("500"), Decimal("2000"))
+                for month in (5, 6, 7, 8)
+            ]
+        return []
+
+    monkeypatch.setattr("services.planning.pg_fetchall", fake_fetch)
+    result = calculate_planning_estimate(
+        _request(
+            "goal",
+            categories=(),
+            target_amount=Decimal("120000"),
+            deadline=date(2027, 2, 28),
+            frequency="monthly",
+            schedule_config={"day": 5},
+        ),
+        today=date(2026, 9, 1),
+    )
+
+    assert result["comfortable_pace"]["average_monthly_net"] == Decimal("1500.00")
+    assert "COALESCE(o.currency, %s)=%s" in calls[0][0]
 
 
 def test_missing_periods_are_not_fabricated_as_zero(monkeypatch):
@@ -292,15 +365,18 @@ def test_planning_api_marks_viewer_result_read_only(monkeypatch):
     monkeypatch.setattr(api, "_track", lambda _req, name, **kwargs: events.append((name, kwargs)))
     monkeypatch.setattr("miniapp.api.get_user_currency", lambda _user_id: "RUB")
     monkeypatch.setattr("miniapp.api.user_local_date", lambda *_args: date(2026, 9, 12))
+    captured = []
     monkeypatch.setattr(
         "miniapp.api.calculate_planning_estimate",
-        lambda *_args, **_kwargs: {"recommendation": Decimal("100"), "history_confidence": "good"},
+        lambda request, **_kwargs: captured.append(request) or {"recommendation": Decimal("100"), "history_confidence": "good"},
     )
 
-    data = api.planning_estimate(api.request(42), {"workspace_id": 10, "kind": "general_limit", "currency": "RUB", "period": "month"})["data"]["estimate"]
+    data = api.planning_estimate(api.request(42), {"workspace_id": 10, "kind": "general_limit", "currency": "USD", "period": "month"})["data"]["estimate"]
 
     assert data["read_only"] is True
     assert data["can_apply"] is False
+    assert captured[0].default_currency == "RUB"
+    assert captured[0].currency == "USD"
     assert events[0][0] == "smart_planning_calculated"
     assert set(events[0][1]["properties"]) == {"planning_kind", "period_kind", "history_confidence", "source", "workspace_type"}
 

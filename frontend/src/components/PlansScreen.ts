@@ -335,7 +335,17 @@ export function PlanningPanel(estimate?: PlanningEstimate, currentAmount = ''): 
   if (!estimate) return '';
   const currency = estimate.scope.currency;
   const isGoal = estimate.kind === 'goal';
-  const difference = !isGoal && estimate.baseline_average && currentAmount
+  const hasBaseline = estimate.baseline_average != null;
+  const zeroHistory = !isGoal
+    && estimate.history_confidence !== 'insufficient'
+    && hasBaseline
+    && Number(estimate.baseline_average) === 0;
+  const recommendationText = estimate.recommendation
+    ? formatMoneyString(estimate.recommendation, currency)
+    : zeroHistory
+      ? 'За выбранные периоды расходов не было.'
+      : 'Недостаточно истории';
+  const difference = !isGoal && hasBaseline && currentAmount
     ? Number(currentAmount.replace(',', '.')) - Number(estimate.baseline_average)
     : 0;
   return `
@@ -360,8 +370,8 @@ export function PlanningPanel(estimate?: PlanningEstimate, currentAmount = ''): 
         ${estimate.gap ? `<div class="detail-row light"><span>Разница темпа</span><strong>${formatMoneyString(estimate.gap, currency)}</strong></div>` : ''}
         ${estimate.comfortable_completion_date ? `<p class="caption">При комфортном темпе ориентировочная дата завершения: ${esc(estimate.comfortable_completion_date)}.</p>` : ''}
       ` : `
-        <div class="detail-row"><span>Среднее</span><strong>${estimate.baseline_average ? formatMoneyString(estimate.baseline_average, currency) : 'Недоступно'}</strong></div>
-        <div class="detail-row planning-recommendation"><span>Предложение КопиPaste</span><strong>${estimate.recommendation ? formatMoneyString(estimate.recommendation, currency) : 'Недостаточно истории'}</strong></div>
+        <div class="detail-row"><span>Среднее</span><strong>${hasBaseline ? formatMoneyString(estimate.baseline_average!, currency) : 'Недоступно'}</strong></div>
+        <div class="detail-row planning-recommendation"><span>Предложение КопиPaste</span><strong>${esc(recommendationText)}</strong></div>
         ${difference ? `<p class="caption">Введённая сумма на ${formatMoneyString(Math.abs(difference).toFixed(2), currency)} ${difference > 0 ? 'выше' : 'ниже'} среднего.</p>` : ''}
       `}
       ${estimate.conflicts.length ? `<div class="planning-conflicts"><strong>Проверка текущих планов</strong>${estimate.conflicts.map((conflict) => `<div class="planning-conflict ${esc(conflict.severity)}" data-warning-kind="${esc(conflict.kind)}"><span>${esc(conflict.title)}</span><p>${esc(conflict.description)}</p>${conflict.amount && conflict.currency ? `<p>Действующая сумма: <strong>${formatMoneyString(conflict.amount, conflict.currency)}</strong></p>` : ''}${conflict.entity_id ? `<button class="button text" type="button" data-action="planning-open-conflict" data-entity-id="${esc(conflict.entity_id)}">Открыть план</button>` : ''}</div>`).join('')}<p class="caption">Информационные предупреждения не меняют расчёт; сумму можно сохранить после проверки.</p></div>` : '<p class="caption">Пересечений с текущими планами не найдено.</p>'}
@@ -451,6 +461,9 @@ function currencyOptions(selected?: string | null, available: string[] = ['RUB',
 export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category', initialCategory = '', initialCurrency = '', planning?: PlanningEstimate, draft?: Record<string, unknown>): string {
   const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
   const scope = value('scope', limit?.scope || initialScope) as 'all_expenses' | 'category';
+  const alertsEnabled = draft && Object.prototype.hasOwnProperty.call(draft, 'alerts_enabled')
+    ? draft.alerts_enabled === true
+    : limit?.alerts_enabled !== false;
   return `
     <form class="form-grid" data-action="${limit ? 'save-limit' : 'create-limit'}" ${limit ? `data-id="${esc(limit.id)}"` : ''}>
       <label class="field">Название<input class="input" name="title" maxlength="80" placeholder="Например, Кафе" value="${esc(value('title', limit?.title || ''))}" /></label>
@@ -469,7 +482,7 @@ export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: s
         <option value="month" ${value('period', limit?.period || 'month') !== 'week' ? 'selected' : ''}>Месяц</option>
         <option value="week" ${value('period', limit?.period || 'month') === 'week' ? 'selected' : ''}>Неделя</option>
       </select></label>
-      <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${limit?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
+      <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${alertsEnabled ? 'checked' : ''} /> Оповещения</label>
       <button class="button secondary" type="button" data-action="planning-calculate" data-kind="${scope === 'all_expenses' ? 'general_limit' : 'category_limit'}" ${saving ? 'disabled' : ''}>Рассчитать по истории</button>
       ${PlanningPanel(planning, value('amount', limit?.amount || ''))}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
@@ -517,6 +530,9 @@ export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categorie
   const selectedNames = dedupePlanningCategories(Array.isArray(draft?.categories) ? draft.categories.map(String) : budget?.categories || []);
   const selectedKeys = new Set(selectedNames.map(canonicalCategoryKey));
   const selectedCurrency = value('currency', budget?.currency || defaultCurrency);
+  const alertsEnabled = draft && Object.prototype.hasOwnProperty.call(draft, 'alerts_enabled')
+    ? draft.alerts_enabled === true
+    : budget?.alerts_enabled !== false;
   return `
     <form class="form-grid" data-action="${budget ? 'save-category-budget' : 'create-category-budget'}" ${budget ? `data-id="${budget.id}"` : ''}>
       <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(value('title', budget?.title || ''))}" required /></label>
@@ -540,7 +556,7 @@ export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categorie
           <div>${selectedNames.map((name) => `<button class="planning-selected-chip" type="button" data-action="planning-category-toggle" data-category="${esc(name)}"><span>${esc(name)}</span><span aria-hidden="true">×</span></button><input type="hidden" name="categories" value="${esc(name)}" />`).join('') || '<p class="caption">Добавьте хотя бы одну категорию.</p>'}</div>
         </div>
       </fieldset>
-      <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${budget?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
+      <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${alertsEnabled ? 'checked' : ''} /> Оповещения</label>
       <button class="button secondary" type="button" data-action="planning-calculate" data-kind="category_budget" ${saving || !selectedNames.length ? 'disabled' : ''}>Рассчитать</button>
       ${PlanningPanel(planning, value('amount', budget?.amount || ''))}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}

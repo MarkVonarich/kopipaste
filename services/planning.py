@@ -86,6 +86,7 @@ class PlanningRequest:
     workspace_id: int | None
     kind: str
     currency: str
+    default_currency: str
     period: str = "month"
     categories: tuple[str, ...] = ()
     editing_entity_id: str | None = None
@@ -129,7 +130,7 @@ def complete_periods(period: str, today: date, count: int = 4) -> tuple[Planning
         for _ in range(count):
             cursor = _previous_month_start(cursor)
             end = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-            periods.append(PlanningPeriod(cursor, end, MONTH_LABELS[cursor.month]))
+            periods.append(PlanningPeriod(cursor, end, f"{MONTH_LABELS[cursor.month]} {cursor.year}"))
     else:
         cursor = today - timedelta(days=today.weekday())
         for _ in range(count):
@@ -192,7 +193,7 @@ def aggregate_history(request: PlanningRequest, *, today: date) -> list[Planning
           FROM public.operations o
          WHERE {scope_sql}
            AND o.op_date BETWEEN %s AND %s
-           AND o.currency=%s
+           AND COALESCE(o.currency, %s)=%s
            AND COALESCE(o.category, '')<>'Без операций'
          GROUP BY date_trunc(%s, o.op_date)::date
          ORDER BY period_start
@@ -206,6 +207,7 @@ def aggregate_history(request: PlanningRequest, *, today: date) -> list[Planning
             *scope_params,
             periods[0].start,
             periods[-1].end,
+            request.default_currency,
             request.currency,
             grouping,
         ),

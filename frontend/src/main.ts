@@ -53,8 +53,18 @@ let homeScreenCheckSeq = 0;
 const impressedInsightIds = new Set<string>();
 const impressedAnnouncementIds = new Set<string>();
 const rejectedInsightIds = new Set<string>();
-let draggedPlanningCategory = '';
 let suppressPlanningCategoryClick = '';
+let cancelPlanningDrag: (() => void) | null = null;
+
+function pointerIsOverElement(event: PointerEvent, element: HTMLElement): boolean {
+  const rect = element.getBoundingClientRect();
+  if (rect.width > 0 || rect.height > 0) {
+    return event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
+  }
+  const hit = document.elementFromPoint?.(event.clientX, event.clientY);
+  return hit === element || (hit instanceof Node && element.contains(hit));
+}
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -2255,7 +2265,11 @@ function wireEvents(): void {
     const estimate = state.planningEstimate;
     if (!estimate?.can_apply || !estimate.recommendation) return;
     if (estimate.kind === 'goal') {
-      state.goalDraft = { ...(state.goalDraft || {}), comfortable_amount: estimate.recommendation };
+      state.goalDraft = {
+        ...(state.goalDraft || {}),
+        strategy: 'contribution',
+        comfortable_amount: estimate.recommendation,
+      };
       state.goalPlanPreview = undefined;
       state.goalPreviewPayloadHash = undefined;
     } else {
@@ -2307,33 +2321,69 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLElement>('[data-planning-drag]').forEach((handle) => {
     handle.addEventListener('pointerdown', (event) => {
-      draggedPlanningCategory = handle.dataset.planningDrag || '';
-      handle.closest('.planning-category-chip')?.classList.add('dragging');
+      const category = handle.dataset.planningDrag || '';
+      const form = handle.closest<HTMLFormElement>('form');
+      const dropZone = form?.querySelector<HTMLElement>('[data-planning-drop-zone]');
+      const chip = handle.closest<HTMLElement>('.planning-category-chip');
+      if (!category || !form || !dropZone || !chip) return;
+      cancelPlanningDrag?.();
+      const pointerId = event.pointerId;
+      let cleaned = false;
+      const setDragOver = (over: boolean) => dropZone.classList.toggle('drag-over', over);
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', cancel);
+        chip.classList.remove('dragging');
+        setDragOver(false);
+        try {
+          if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+        } catch {
+          // The WebView may release capture before pointerup reaches this listener.
+        }
+        if (cancelPlanningDrag === cleanup) cancelPlanningDrag = null;
+      };
+      const move = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        setDragOver(pointerIsOverElement(moveEvent, dropZone));
+      };
+      const finish = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) return;
+        const accepted = pointerIsOverElement(upEvent, dropZone);
+        cleanup();
+        if (!accepted) return;
+        suppressPlanningCategoryClick = category;
+        window.setTimeout(() => {
+          if (suppressPlanningCategoryClick === category) suppressPlanningCategoryClick = '';
+        }, 0);
+        const draft = planningDraftFromForm(form);
+        const selected = (draft.categories as string[]) || [];
+        if (selected.some((item) => canonicalCategoryKey(item) === canonicalCategoryKey(category))) return;
+        draft.categories = [...selected, category];
+        state.planningDraft = draft;
+        state.planningEstimate = undefined;
+        state.dirty = true;
+        hapticSelection();
+        render();
+      };
+      const cancel = (cancelEvent: PointerEvent) => {
+        if (cancelEvent.pointerId === pointerId) cleanup();
+      };
+      cancelPlanningDrag = cleanup;
+      chip.classList.add('dragging');
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', cancel);
+      try {
+        handle.setPointerCapture?.(pointerId);
+      } catch {
+        // Window listeners still complete the gesture when capture is unavailable.
+      }
+      event.preventDefault();
       event.stopPropagation();
     });
-    handle.addEventListener('pointercancel', () => {
-      draggedPlanningCategory = '';
-      handle.closest('.planning-category-chip')?.classList.remove('dragging');
-    });
-  });
-  app.querySelector<HTMLElement>('[data-planning-drop-zone]')?.addEventListener('pointerup', (event) => {
-    const category = draggedPlanningCategory;
-    draggedPlanningCategory = '';
-    app.querySelectorAll('.planning-category-chip.dragging').forEach((node) => node.classList.remove('dragging'));
-    if (!category) return;
-    const form = (event.currentTarget as HTMLElement).closest<HTMLFormElement>('form');
-    if (!form) return;
-    const draft = planningDraftFromForm(form);
-    const selected = (draft.categories as string[]) || [];
-    if (!selected.some((item) => canonicalCategoryKey(item) === canonicalCategoryKey(category))) {
-      draft.categories = [...selected, category];
-      state.planningDraft = draft;
-      state.planningEstimate = undefined;
-      state.dirty = true;
-      suppressPlanningCategoryClick = category;
-      hapticSelection();
-      render();
-    }
   });
   app.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('form input, form textarea, form select').forEach((input) => {
     const invalidateGoalPreview = () => {

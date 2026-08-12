@@ -194,6 +194,11 @@
   border-color: var(--accent);
 }
 
+.planning-drop-zone.drag-over {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-secondary));
+}
+
 @media (prefers-reduced-motion: reduce) {
   .planning-category-chip {
     transition: none;
