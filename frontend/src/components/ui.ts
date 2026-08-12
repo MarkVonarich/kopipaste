@@ -8,7 +8,7 @@ export function esc(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
-export function icon(name: TabKey | 'plus' | 'search' | 'more' | 'chevron' | 'expense' | 'income' | 'empty'): string {
+export function icon(name: TabKey | 'plus' | 'search' | 'more' | 'chevron' | 'expense' | 'income' | 'empty' | 'grip'): string {
   const common = 'viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
   const paths: Record<string, string> = {
     operations: '<path d="M5 7h14M5 12h14M5 17h9" />',
@@ -23,6 +23,7 @@ export function icon(name: TabKey | 'plus' | 'search' | 'more' | 'chevron' | 'ex
     expense: '<path d="M5 12h14" />',
     income: '<path d="M12 5v14M5 12h14" />',
     empty: '<path d="M6 7h12v12H6z" /><path d="M9 4h6v3H9z" />',
+    grip: '<circle cx="9" cy="7" r="1" /><circle cx="15" cy="7" r="1" /><circle cx="9" cy="12" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="9" cy="17" r="1" /><circle cx="15" cy="17" r="1" />',
   };
   return `<svg class="ui-icon" ${common}>${paths[name] || paths.empty}</svg>`;
 }

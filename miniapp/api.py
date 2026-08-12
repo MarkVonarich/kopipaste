@@ -76,6 +76,7 @@ from services.operations import (
     update_financial_operation,
 )
 from services.product_events import ProductEvent, track_product_event
+from services.planning import PlanningError, PlanningRequest, calculate_planning_estimate
 from services.announcements import announcement_candidate, dismiss_announcement, resolve_announcements
 from services.home_preferences import get_home_preferences, home_widget_registry, reconcile_home_preferences, save_home_preferences
 from services.shopping import (
@@ -2915,6 +2916,92 @@ class MiniAppAPI:
             "all_scope_note": None,
         }, request_id=req.request_id)
 
+    def planning_estimate(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        workspace_ids, all_scope = self._read_scope(req, body.get("workspace_id"))
+        if all_scope:
+            raise MiniAppError(400, "concrete_workspace_required", "Выберите пространство для расчёта.")
+        workspace_id = workspace_ids[0]
+        ctx = self._workspace_detail(req, workspace_id)
+        kind = str(body.get("kind") or "")
+        period = str(body.get("period") or "month")
+        goal_id = int(body["editing_entity_id"]) if kind == "goal" and str(body.get("editing_entity_id") or "").isdigit() else None
+        goal = get_goal(goal_id, req.user_id, workspace_id) if goal_id is not None else None
+        if goal_id is not None and goal is None:
+            raise MiniAppError(404, "goal_not_found", "Цель не найдена.")
+        currency = self._validated_currency(body.get("currency"), fallback=goal.currency if goal else get_user_currency(req.user_id))
+        categories: list[str] = []
+        if kind in {"category_limit", "category_budget"}:
+            raw_categories = body.get("categories") if kind == "category_budget" else [body.get("category") or body.get("category_key")]
+            if not isinstance(raw_categories, list):
+                raise MiniAppError(400, "categories_required", "Выберите категории для расчёта.")
+            allowed = {item["normalized_name"]: item["name"] for item in self._managed_categories(req, workspace_id, "Расходы")}
+            for raw in raw_categories:
+                try:
+                    key = normalized_category_key(str(raw or ""))
+                except ValueError as exc:
+                    raise MiniAppError(400, "categories_required", "Выберите категории для расчёта.") from exc
+                if key not in allowed:
+                    raise MiniAppError(400, "category_not_available", "Выберите категорию из списка.")
+                if key not in {normalized_category_key(item) for item in categories}:
+                    categories.append(allowed[key])
+            if not categories:
+                raise MiniAppError(400, "categories_required", "Выберите категории для расчёта.")
+        try:
+            target = None
+            current = Decimal("0.00")
+            deadline = None
+            frequency = FREQUENCY_NONE
+            schedule: dict[str, Any] = {}
+            if kind == "goal":
+                target = to_decimal_money(body.get("target_amount") if body.get("target_amount") is not None else (goal.target_amount if goal else None), positive=True)
+                current = goal.current_balance if goal else to_decimal_money(body.get("current_amount") or 0)
+                deadline = self._goal_deadline_from_body(body, goal)
+                frequency = str(body.get("frequency") or (goal.frequency if goal else FREQUENCY_NONE))
+                if frequency not in GOAL_FREQUENCIES:
+                    raise PlanningError("bad_goal_schedule")
+                schedule = self._schedule_from_body(body, frequency)
+            raw_editing_id = str(body.get("editing_entity_id") or "") or None
+            if kind == "category_budget" and raw_editing_id and raw_editing_id.isdigit():
+                raw_editing_id = f"budget:{raw_editing_id}"
+            planning_request = PlanningRequest(
+                user_id=req.user_id,
+                workspace_id=workspace_id,
+                kind=kind,
+                currency=currency,
+                period=period,
+                categories=tuple(categories),
+                editing_entity_id=raw_editing_id,
+                target_amount=target,
+                current_amount=current,
+                deadline=deadline,
+                frequency=frequency,
+                schedule_config=schedule,
+                editing_goal_id=goal_id,
+            )
+            estimate = calculate_planning_estimate(
+                planning_request,
+                today=user_local_date(req.user_id, workspace_id),
+            )
+        except (PlanningError, MoneyParseError, ValueError, TypeError) as exc:
+            code = exc.code if isinstance(exc, PlanningError) else "bad_planning_request"
+            raise MiniAppError(400, code, "Проверьте параметры расчёта.") from exc
+        read_only = ctx.role not in WRITE_ROLES
+        estimate["read_only"] = read_only
+        estimate["can_apply"] = not read_only and estimate.get("recommendation") is not None
+        self._track(
+            req,
+            "smart_planning_calculated",
+            workspace_id=workspace_id,
+            properties={
+                "planning_kind": kind,
+                "period_kind": "month" if kind == "goal" else period,
+                "history_confidence": estimate["history_confidence"],
+                "source": "mini_app",
+                "workspace_type": ctx.kind,
+            },
+        )
+        return success({"estimate": estimate}, request_id=req.request_id)
+
     def _reminder_dict(self, item: dict[str, Any] | None) -> dict | None:
         if not item:
             return None
@@ -3945,13 +4032,16 @@ class MiniAppAPI:
             "mini_app_announcement_carousel_changed",
             "mini_app_home_customization_opened",
             "mini_app_announcement_impression",
+            "smart_planning_opened",
+            "smart_planning_applied",
+            "smart_planning_warning_seen",
         }
         if event not in allowed:
             raise MiniAppError(400, "bad_event", "Invalid analytics event.")
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total", "widget_key", "update_key", "update_kind", "workspace_type"}
+            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total", "widget_key", "update_key", "update_kind", "workspace_type", "planning_kind", "history_confidence", "warning_kind"}
         }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)

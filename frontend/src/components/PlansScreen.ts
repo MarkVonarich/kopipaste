@@ -1,5 +1,6 @@
 import { formatMoneyString } from '../money';
-import type { BudgetLimit, CategoryBudgetGroup, CategoryOption, GeneralSpendingLimit, Goal, GoalPlanPreview, Reminder } from '../types';
+import type { BudgetLimit, CategoryBudgetGroup, CategoryOption, GeneralSpendingLimit, Goal, GoalPlanPreview, PlanningEstimate, Reminder } from '../types';
+import { canonicalCategoryKey, dedupePlanningCategories } from '../planningSelection';
 import { EmptyPanel, ProgressBar, SectionHeader, esc, icon } from './ui';
 
 type PlansData = {
@@ -317,7 +318,60 @@ function GoalPreview(preview?: GoalPlanPreview): string {
   `;
 }
 
-export function GoalForm(goal: Goal | null, saving = false, error = '', preview?: GoalPlanPreview, draft?: Record<string, unknown>): string {
+function confidenceLabel(value: PlanningEstimate['history_confidence']): string {
+  if (value === 'good') return 'Хорошая: 4 полных периода';
+  if (value === 'limited') return 'Ограниченная: 2–3 полных периода';
+  return 'Недостаточно истории';
+}
+
+function feasibilityLabel(value: PlanningEstimate['feasibility']): string {
+  if (value === 'compatible') return 'Срок совместим с историческим денежным потоком.';
+  if (value === 'stretched') return 'Для срока нужен темп выше исторически комфортного.';
+  if (value === 'required_pace_unavailable') return 'Выберите срок и расписание для необходимого темпа.';
+  return 'Необходимый темп рассчитан, но истории для оценки комфортности недостаточно.';
+}
+
+export function PlanningPanel(estimate?: PlanningEstimate, currentAmount = ''): string {
+  if (!estimate) return '';
+  const currency = estimate.scope.currency;
+  const isGoal = estimate.kind === 'goal';
+  const difference = !isGoal && estimate.baseline_average && currentAmount
+    ? Number(currentAmount.replace(',', '.')) - Number(estimate.baseline_average)
+    : 0;
+  return `
+    <section class="planning-panel" data-testid="smart-planning-result">
+      <div class="planning-panel-head"><strong>Расчёт по истории</strong><span class="pill">${esc(confidenceLabel(estimate.history_confidence))}</span></div>
+      <details class="planning-history" open>
+        <summary>История за ${estimate.valid_periods} из ${estimate.periods_requested} периодов</summary>
+        <div class="planning-history-rows">
+          ${estimate.history.map((item) => `<div class="planning-history-period" data-testid="planning-history-row"><div class="detail-row light"><span>${esc(item.label)}</span><strong>${formatMoneyString(isGoal ? item.net : item.amount, currency)}</strong></div>${isGoal ? `<p class="caption">Доходы ${formatMoneyString(item.income, currency)} · расходы ${formatMoneyString(item.expense, currency)}</p>` : ''}</div>`).join('') || '<p class="caption">Нет надёжной истории в выбранной валюте.</p>'}
+        </div>
+      </details>
+      ${isGoal ? `
+        <div class="planning-result-grid">
+          <div><span>Необходимый темп</span><strong>${estimate.required_pace?.monthly_amount ? `${formatMoneyString(estimate.required_pace.monthly_amount, currency)} / месяц` : 'Недоступен'}</strong></div>
+          <div><span>Комфортный темп</span><strong>${estimate.comfortable_pace?.monthly_amount != null ? `${formatMoneyString(estimate.comfortable_pace.monthly_amount, currency)} / месяц` : 'Недоступен'}</strong></div>
+        </div>
+        ${estimate.required_pace?.amount ? `<div class="detail-row light"><span>Необходимо за пополнение</span><strong>${formatMoneyString(estimate.required_pace.amount, currency)}</strong></div>` : ''}
+        ${estimate.comfortable_pace?.amount != null ? `<div class="detail-row light"><span>Комфортно за пополнение</span><strong>${formatMoneyString(estimate.comfortable_pace.amount, currency)}</strong></div>` : ''}
+        ${estimate.comfortable_pace ? `<div class="detail-row light"><span>Средний денежный поток</span><strong>${estimate.comfortable_pace.average_monthly_net != null ? formatMoneyString(estimate.comfortable_pace.average_monthly_net, currency) : '—'}</strong></div>
+        <div class="detail-row light"><span>Другие активные цели</span><strong>${formatMoneyString(estimate.comfortable_pace.other_goal_commitments, currency)} / месяц</strong></div>` : ''}
+        <p class="planning-explanation ${estimate.feasibility === 'stretched' ? 'warning' : ''}">${esc(feasibilityLabel(estimate.feasibility))}</p>
+        ${estimate.gap ? `<div class="detail-row light"><span>Разница темпа</span><strong>${formatMoneyString(estimate.gap, currency)}</strong></div>` : ''}
+        ${estimate.comfortable_completion_date ? `<p class="caption">При комфортном темпе ориентировочная дата завершения: ${esc(estimate.comfortable_completion_date)}.</p>` : ''}
+      ` : `
+        <div class="detail-row"><span>Среднее</span><strong>${estimate.baseline_average ? formatMoneyString(estimate.baseline_average, currency) : 'Недоступно'}</strong></div>
+        <div class="detail-row planning-recommendation"><span>Предложение КопиPaste</span><strong>${estimate.recommendation ? formatMoneyString(estimate.recommendation, currency) : 'Недостаточно истории'}</strong></div>
+        ${difference ? `<p class="caption">Введённая сумма на ${formatMoneyString(Math.abs(difference).toFixed(2), currency)} ${difference > 0 ? 'выше' : 'ниже'} среднего.</p>` : ''}
+      `}
+      ${estimate.conflicts.length ? `<div class="planning-conflicts"><strong>Проверка текущих планов</strong>${estimate.conflicts.map((conflict) => `<div class="planning-conflict ${esc(conflict.severity)}" data-warning-kind="${esc(conflict.kind)}"><span>${esc(conflict.title)}</span><p>${esc(conflict.description)}</p>${conflict.amount && conflict.currency ? `<p>Действующая сумма: <strong>${formatMoneyString(conflict.amount, conflict.currency)}</strong></p>` : ''}${conflict.entity_id ? `<button class="button text" type="button" data-action="planning-open-conflict" data-entity-id="${esc(conflict.entity_id)}">Открыть план</button>` : ''}</div>`).join('')}<p class="caption">Информационные предупреждения не меняют расчёт; сумму можно сохранить после проверки.</p></div>` : '<p class="caption">Пересечений с текущими планами не найдено.</p>'}
+      ${estimate.recommendation ? `<button class="button secondary" type="button" data-action="planning-apply" ${estimate.can_apply ? '' : 'disabled'}>${isGoal ? 'Использовать комфортный темп' : `Использовать ${esc(formatMoneyString(estimate.recommendation, currency))}`}</button>` : ''}
+      ${estimate.read_only ? '<p class="caption">Пространство доступно только для чтения: расчёт можно посмотреть, но применить нельзя.</p>' : ''}
+    </section>
+  `;
+}
+
+export function GoalForm(goal: Goal | null, saving = false, error = '', preview?: GoalPlanPreview, draft?: Record<string, unknown>, planning?: PlanningEstimate): string {
   const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
   const monthlyDay = scheduleValue(goal, draft, 'day');
   const twiceDays = scheduleValue(goal, draft, 'days').split(',').filter(Boolean);
@@ -362,6 +416,8 @@ export function GoalForm(goal: Goal | null, saving = false, error = '', preview?
         </select></label>
       </div>
       <label class="toggle-row"><input type="checkbox" name="reminders_enabled" ${draft?.reminders_enabled === true || (!draft && goal?.reminders_enabled) ? 'checked' : ''} /> Напоминания</label>
+      <button class="button secondary" type="button" data-action="planning-calculate" data-kind="goal" ${saving ? 'disabled' : ''}>Рассчитать по истории</button>
+      ${PlanningPanel(planning, value('comfortable_amount', goal?.comfortable_amount || ''))}
       ${GoalPreview(preview)}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
       <button class="button secondary" type="submit" data-submit-mode="preview" ${saving ? 'disabled' : ''}>Предпросмотр</button>
@@ -392,27 +448,30 @@ function currencyOptions(selected?: string | null, available: string[] = ['RUB',
   return codes.map((code) => `<option value="${esc(code)}" ${code === selected ? 'selected' : ''}>${esc(code)}</option>`).join('');
 }
 
-export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category', initialCategory = '', initialCurrency = ''): string {
-  const scope = limit?.scope || initialScope;
+export function LimitForm(limit: BudgetLimit | null, categories: Array<{ name: string }>, saving = false, error = '', initialScope: 'all_expenses' | 'category' = 'category', initialCategory = '', initialCurrency = '', planning?: PlanningEstimate, draft?: Record<string, unknown>): string {
+  const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
+  const scope = value('scope', limit?.scope || initialScope) as 'all_expenses' | 'category';
   return `
     <form class="form-grid" data-action="${limit ? 'save-limit' : 'create-limit'}" ${limit ? `data-id="${esc(limit.id)}"` : ''}>
-      <label class="field">Название<input class="input" name="title" maxlength="80" placeholder="Например, Кафе" value="${esc(limit?.title || '')}" /></label>
+      <label class="field">Название<input class="input" name="title" maxlength="80" placeholder="Например, Кафе" value="${esc(value('title', limit?.title || ''))}" /></label>
       <label class="field">Что ограничиваем<select class="select" name="scope">
         <option value="category" ${scope !== 'all_expenses' ? 'selected' : ''}>Категория</option>
         <option value="all_expenses" ${scope === 'all_expenses' ? 'selected' : ''}>Все расходы</option>
       </select></label>
       <label class="field" data-field="limit-category" ${scope === 'all_expenses' ? 'hidden' : ''}>Категория<select class="select" name="category" ${scope === 'all_expenses' ? 'disabled' : ''}>
-        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${(limit?.category || initialCategory) === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
+        ${categories.map((cat) => `<option value="${esc(cat.name)}" ${value('category', limit?.category || initialCategory) === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
       </select></label>
-      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" placeholder="0,00" value="${esc(limit?.amount || '')}" required /></label>
+      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" placeholder="0,00" value="${esc(value('amount', limit?.amount || ''))}" required /></label>
       ${initialCurrency && !limit
         ? `<label class="field">Валюта<input class="input" name="currency" value="${esc(initialCurrency)}" readonly /></label>`
         : limit?.currency ? `<input type="hidden" name="currency" value="${esc(limit.currency)}" />` : ''}
       <label class="field">Период<select class="select" name="period">
-        <option value="month" ${limit?.period !== 'week' ? 'selected' : ''}>Месяц</option>
-        <option value="week" ${limit?.period === 'week' ? 'selected' : ''}>Неделя</option>
+        <option value="month" ${value('period', limit?.period || 'month') !== 'week' ? 'selected' : ''}>Месяц</option>
+        <option value="week" ${value('period', limit?.period || 'month') === 'week' ? 'selected' : ''}>Неделя</option>
       </select></label>
       <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${limit?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
+      <button class="button secondary" type="button" data-action="planning-calculate" data-kind="${scope === 'all_expenses' ? 'general_limit' : 'category_limit'}" ${saving ? 'disabled' : ''}>Рассчитать по истории</button>
+      ${PlanningPanel(planning, value('amount', limit?.amount || ''))}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
       <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
     </form>
@@ -453,23 +512,37 @@ export function ReminderForm(reminder: Reminder | null, categories: Array<{ name
   `;
 }
 
-export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categories: Array<{ name: string }>, saving = false, error = '', availableCurrencies: string[] = ['RUB', 'USD', 'EUR'], defaultCurrency = 'RUB'): string {
-  const selected = new Set(budget?.categories || []);
-  const selectedCurrency = budget?.currency || defaultCurrency;
+export function CategoryBudgetForm(budget: CategoryBudgetGroup | null, categories: Array<{ name: string; normalized_name?: string }>, saving = false, error = '', availableCurrencies: string[] = ['RUB', 'USD', 'EUR'], defaultCurrency = 'RUB', planning?: PlanningEstimate, draft?: Record<string, unknown>): string {
+  const value = (key: string, fallback: unknown = '') => String(draft?.[key] ?? fallback ?? '');
+  const selectedNames = dedupePlanningCategories(Array.isArray(draft?.categories) ? draft.categories.map(String) : budget?.categories || []);
+  const selectedKeys = new Set(selectedNames.map(canonicalCategoryKey));
+  const selectedCurrency = value('currency', budget?.currency || defaultCurrency);
   return `
     <form class="form-grid" data-action="${budget ? 'save-category-budget' : 'create-category-budget'}" ${budget ? `data-id="${budget.id}"` : ''}>
-      <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(budget?.title || '')}" required /></label>
-      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(budget?.amount || '')}" required /></label>
+      <label class="field">Название<input class="input" name="title" maxlength="120" value="${esc(value('title', budget?.title || ''))}" required /></label>
+      <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" value="${esc(value('amount', budget?.amount || ''))}" required /></label>
       <label class="field">Валюта<select class="select" name="currency">${currencyOptions(selectedCurrency, availableCurrencies)}</select></label>
       <label class="field">Период<select class="select" name="period">
-        <option value="month" ${budget?.period !== 'week' ? 'selected' : ''}>Месяц</option>
-        <option value="week" ${budget?.period === 'week' ? 'selected' : ''}>Неделя</option>
+        <option value="month" ${value('period', budget?.period || 'month') !== 'week' ? 'selected' : ''}>Месяц</option>
+        <option value="week" ${value('period', budget?.period || 'month') === 'week' ? 'selected' : ''}>Неделя</option>
       </select></label>
-      <fieldset class="chip-select">
-        <legend>Категории</legend>
-        ${categories.map((cat) => `<label class="chip"><input type="checkbox" name="categories" value="${esc(cat.name)}" ${selected.has(cat.name) ? 'checked' : ''} /> ${esc(cat.name)}</label>`).join('')}
+      <fieldset class="planning-category-picker">
+        <legend>Доступные категории</legend>
+        <p class="caption">Перетащите за ручку или нажмите, чтобы добавить.</p>
+        <div class="planning-category-source">
+          ${categories.map((cat) => {
+            const selected = selectedKeys.has(canonicalCategoryKey(cat.normalized_name || cat.name));
+            return `<button class="planning-category-chip ${selected ? 'selected' : ''}" type="button" data-action="planning-category-toggle" data-category="${esc(cat.name)}" aria-pressed="${selected}"><span class="planning-drag-handle" data-planning-drag="${esc(cat.name)}" title="Перетащить">${icon('grip')}</span><span>${esc(cat.name)}</span></button>`;
+          }).join('')}
+        </div>
+        <div class="planning-drop-zone ${selectedNames.length ? 'has-items' : ''}" data-planning-drop-zone>
+          <strong>В расчёте</strong>
+          <div>${selectedNames.map((name) => `<button class="planning-selected-chip" type="button" data-action="planning-category-toggle" data-category="${esc(name)}"><span>${esc(name)}</span><span aria-hidden="true">×</span></button><input type="hidden" name="categories" value="${esc(name)}" />`).join('') || '<p class="caption">Добавьте хотя бы одну категорию.</p>'}</div>
+        </div>
       </fieldset>
       <label class="toggle-row"><input type="checkbox" name="alerts_enabled" ${budget?.alerts_enabled !== false ? 'checked' : ''} /> Оповещения</label>
+      <button class="button secondary" type="button" data-action="planning-calculate" data-kind="category_budget" ${saving || !selectedNames.length ? 'disabled' : ''}>Рассчитать</button>
+      ${PlanningPanel(planning, value('amount', budget?.amount || ''))}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
       <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
     </form>

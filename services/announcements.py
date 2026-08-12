@@ -44,6 +44,7 @@ class Announcement:
 
 
 ANNOUNCEMENTS = (
+    Announcement("smart-planning-v1", "smart-planning", "feature", date(2026, 8, 13), "Планируйте суммы по своим данным", "КопиPaste анализирует прошлые расходы и помогает подобрать лимит, общий бюджет или темп для цели.", "OPEN_PLANS", "Открыть планы"),
     Announcement("custom-home-v1", "home", "feature", date(2026, 8, 11), "Настройте главную под себя", "Выберите нужные виджеты и расположите их в удобном порядке.", "OPEN_HOME_SETTINGS", "Настроить"),
     Announcement("shopping-list-v1", "shopping", "feature", date(2026, 8, 11), "Список покупок теперь под рукой", "Записывайте, что нужно купить, и отмечайте покупки прямо в КопиPaste.", "OPEN_SHOPPING_LIST", "Открыть список"),
     Announcement("plans-v2", "plans", "improvement", date(2026, 8, 10), "Планы стали удобнее", "Категории стали компактнее, а у целей появился полноценный архив.", "OPEN_PLANS", "Открыть планы"),

@@ -256,6 +256,46 @@ export type GoalPlanPreview = {
   preview_payload_hash: string;
 };
 
+export type PlanningHistoryPeriod = {
+  start_date: string;
+  end_date: string;
+  label: string;
+  amount: string;
+  income: string;
+  expense: string;
+  net: string;
+  operation_count: number;
+};
+
+export type PlanningConflict = {
+  kind: string;
+  severity: 'info' | 'warning' | 'blocking';
+  title: string;
+  description: string;
+  entity_id?: string | null;
+  amount?: string | null;
+  currency?: string | null;
+};
+
+export type PlanningEstimate = {
+  kind: 'category_limit' | 'general_limit' | 'category_budget' | 'goal';
+  scope: { workspace_id: number | null; currency: string; period: 'week' | 'month'; categories: string[] };
+  history: PlanningHistoryPeriod[];
+  periods_requested: number;
+  valid_periods: number;
+  history_confidence: 'good' | 'limited' | 'insufficient';
+  baseline_average?: string | null;
+  recommendation?: string | null;
+  required_pace?: { amount?: string | null; monthly_amount?: string | null; occurrence_count?: number; next_occurrence?: string | null; reason?: string | null } | null;
+  comfortable_pace?: { amount?: string | null; monthly_amount?: string | null; average_monthly_net?: string | null; other_goal_commitments: string; commitment_count: number } | null;
+  feasibility?: 'compatible' | 'stretched' | 'insufficient_history' | 'required_pace_unavailable' | null;
+  gap?: string | null;
+  comfortable_completion_date?: string | null;
+  conflicts: PlanningConflict[];
+  read_only: boolean;
+  can_apply: boolean;
+};
+
 export type BudgetLimit = {
   id: string;
   kind: string;
@@ -415,6 +455,8 @@ export type AppState = {
   goalPlanPreview?: GoalPlanPreview;
   goalPreviewPayloadHash?: string;
   goalDraft?: Record<string, unknown>;
+  planningEstimate?: PlanningEstimate;
+  planningDraft?: Record<string, unknown>;
   confirmLimitDeleteId?: string;
   confirmGoalDeleteId?: number;
   formDraft?: Partial<Operation>;

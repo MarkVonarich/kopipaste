@@ -88,7 +88,7 @@ def test_announcement_resolver_applies_ttl_family_and_dismissal(monkeypatch):
     visible = resolve_announcements(42, today=date(2026, 8, 11))
     assert [item["id"] for item in visible] == ["custom-home-v1", "plans-v2"]
     assert all(item["action"]["type"].startswith("OPEN_") for item in visible)
-    assert resolve_announcements(42, today=date(2026, 9, 1)) == []
+    assert resolve_announcements(42, today=date(2026, 9, 3)) == []
 
 
 def test_announcement_ttl_boundary_family_dedupe_and_top_five(monkeypatch):
