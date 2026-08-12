@@ -32,7 +32,9 @@ import type {
   Workspace,
   HomePreferences,
   ShoppingItem,
-  Announcement
+  Announcement,
+  FinancialReport,
+  ReportKind
 } from './types';
 
 type Envelope<T> = {
@@ -287,7 +289,7 @@ export const api = {
   updateShoppingItem: (id: number, workspace_id: number | 'all' | null, payload: { text?: string; completed?: boolean }) => apiFetch<{ item: ShoppingItem }>(`/miniapp/api/shopping/${id}`, { method: 'PATCH', body: JSON.stringify({ workspace_id, ...payload }) }),
   deleteShoppingItem: (id: number, workspace_id: number | 'all' | null) => apiFetch<{ deleted: boolean }>(`/miniapp/api/shopping/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),
   clearCompletedShoppingItems: (workspace_id: number | 'all' | null) => apiFetch<{ deleted: number }>('/miniapp/api/shopping/completed', { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),
-  dismissAnnouncement: (id: string) => apiFetch<{ dismissed: boolean }>(`/miniapp/api/announcements/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: '{}' }),
+  dismissAnnouncement: (id: string, workspaceId: number | 'all' | null) => apiFetch<{ dismissed: boolean }>(`/miniapp/api/announcements/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   insightImpression: (id: string, workspaceId: number | 'all' | null) =>
     apiFetch<{ recorded: boolean }>(`/miniapp/api/insights/${encodeURIComponent(id)}/impression`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   insightFeedback: (id: string, workspaceId: number | 'all' | null, feedbackType: 'useful' | 'not_useful') =>
@@ -316,6 +318,10 @@ export const api = {
   analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string; analytics_search?: string; detail_kind?: string; detail_value?: string; detail_currency?: string; detail_operation_type?: string; detail_category_key?: string }) =>
     apiFetch<AnalyticsResponse>(
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
+    ),
+  report: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { report_kind: ReportKind; currency?: string }) =>
+    apiFetch<{ report: FinancialReport }>(
+      `/miniapp/api/reports${query({ workspace_id: workspaceId, ...filters })}`
     ),
   plans: (workspaceId: number | 'all' | null) => apiFetch<PlansResponse>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
   planningEstimate: (payload: PlanningPayload) =>

@@ -118,7 +118,7 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_shopping_item(req, item_id, body))
         if method == "POST" and path.startswith("/miniapp/api/announcements/") and path.endswith("/dismiss"):
             candidate_id = path.strip("/").split("/")[3]
-            return _json_response(start_response, 200, api.dismiss_announcement(req, candidate_id))
+            return _json_response(start_response, 200, api.dismiss_announcement(req, candidate_id, body))
         if path.startswith("/miniapp/api/insights/"):
             parts = path.strip("/").split("/")
             if len(parts) == 5:
@@ -142,6 +142,8 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_operation(req, op_id, body))
         if method == "GET" and path == "/miniapp/api/analytics":
             return _json_response(start_response, 200, api.analytics(req, params))
+        if method == "GET" and path == "/miniapp/api/reports":
+            return _json_response(start_response, 200, api.report(req, params))
         if method == "GET" and path == "/miniapp/api/analytics/category-structure":
             return _json_response(start_response, 200, api.analytics(req, params))
         if method == "GET" and path == "/miniapp/api/analytics/time-dynamics":

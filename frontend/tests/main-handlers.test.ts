@@ -105,6 +105,41 @@ function analyticsData(currencies: string[], selectedCurrency: string | null = n
   };
 }
 
+function reportData(kind: 'selected' | 'completed_week' | 'completed_month' = 'selected', currency = 'RUB'): any {
+  const period = kind === 'completed_month'
+    ? { key: kind, start_date: '2026-07-01', end_date: '2026-07-31' }
+    : kind === 'completed_week'
+      ? { key: kind, start_date: '2026-08-03', end_date: '2026-08-09' }
+      : { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' };
+  return {
+    kind,
+    period,
+    comparison_period: { key: 'previous_equal_period', start_date: '2026-07-27', end_date: '2026-08-02' },
+    workspace: { scope: 10, name: 'Family', type: 'group', read_only: false },
+    filters: { operation_type: 'all', category: 'all' },
+    available_currencies: ['RUB', 'EUR'],
+    selected_currency: currency,
+    data_state: 'complete',
+    summary: { currency: 'RUB', income: '1000.00', expense: '400.00', result: '600.00', operation_count: 4 },
+    comparison: {
+      income: { current: '1000.00', previous: '800.00', delta: '200.00', pct: '25.00', state: 'ok' },
+      expense: { current: '400.00', previous: '300.00', delta: '100.00', pct: '33.33', state: 'ok' },
+      result: { current: '600.00', previous: '500.00', delta: '100.00', pct: '20.00', state: 'ok' },
+      count: 4,
+      previous_count: 3,
+    },
+    structure_type: 'expense',
+    categories: [{
+      key: 'food', category: 'Food', currency: 'RUB', total: '400.00', count: 4, share: 100, drillable: true,
+      operation_scope: { workspace_id: 10, period: 'custom', start_date: period.start_date, end_date: period.end_date, operation_type: 'expense', category: 'all', scope_category: null, currency: 'RUB', category_key: 'food', merchant_key: null },
+    }],
+    merchants: [],
+    observations: [],
+    export_available: false,
+    export_reason: 'Экспорт доступен для выбранного периода.',
+  };
+}
+
 function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ workspace_id: 10, name: 'Family', kind: 'group', role: 'member', active: true, read_only: false }], homeAnnouncements: any[] = []) {
   const api = {
     bootstrap: vi.fn(async () => ({
@@ -124,8 +159,9 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
       insight: homeInsights[0] || null,
       announcements: homeAnnouncements,
     })),
-    operations: vi.fn(),
+    operations: vi.fn(async (_workspaceId: any, _filters: any, _offset = 0, _search = '') => ({ items: [], has_more: false, limit: 20, offset: 0, period: { key: 'custom', start_date: '2026-08-03', end_date: '2026-08-09' } })),
     analytics: vi.fn(async (_workspaceId: any, _filters: any) => analyticsData(['RUB'], 'RUB')),
+    report: vi.fn(async (_workspaceId: any, filters: any) => ({ report: reportData(filters.report_kind, filters.currency || 'RUB') })),
     plans: vi.fn(async () => plansData),
     profile: vi.fn(),
     categories: vi.fn(async (_workspaceId, type) => ({
@@ -198,6 +234,7 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     insightImpression: vi.fn(async () => ({ recorded: true })),
     insightFeedback: vi.fn(async (_id, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
     track: vi.fn(async (_name: string, _properties: Record<string, any> = {}) => undefined),
+    exportInfo: vi.fn(async () => ({ available: true, status: 'ready', presets: [], privacy_note: '' })),
   };
   vi.doMock('../src/api', () => ({ api, requestId: () => 'request-id' }));
   return api;
@@ -348,6 +385,113 @@ describe('main plan handlers', () => {
     expect(document.querySelector(`[data-tab="${tab}"]`)?.getAttribute('aria-current')).toBe('page');
   });
 
+  it('opens Reports from Analytics and switches selected, weekly, monthly and currency modes', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-tab="analytics"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.click();
+    await flush(8);
+
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'selected', currency: 'RUB' }));
+    expect(document.querySelector('.reports-screen')).not.toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-action="report-kind"][data-kind="completed_week"]')?.click();
+    await flush(8);
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_week', currency: 'RUB' }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="report-kind"][data-kind="completed_month"]')?.click();
+    await flush(8);
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_month', currency: 'RUB' }));
+
+    const currency = document.querySelector<HTMLSelectElement>('[data-action="report-currency"]')!;
+    currency.value = 'EUR';
+    currency.dispatchEvent(new Event('change'));
+    await flush(8);
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_month', currency: 'EUR' }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="reports-close"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.click();
+    await flush(8);
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'selected', currency: 'EUR' }));
+  });
+
+  it.each([
+    ['OPEN_REPORTS', 'selected'],
+    ['OPEN_REPORT_WEEKLY', 'completed_week'],
+    ['OPEN_REPORT_MONTHLY', 'completed_month'],
+  ])('routes report-ready action %s through the typed Reports mode', async (target, reportKind) => {
+    const api = installAppMocks([], undefined, [announcement(`target-${target}`, target, null)]);
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.click();
+    await flush(8);
+
+    expect(document.querySelector('[data-tab="analytics"]')?.getAttribute('aria-current')).toBe('page');
+    expect(document.querySelector('.reports-screen')).not.toBeNull();
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: reportKind }));
+  });
+
+  it('preserves canonical report drill scope and returns with Telegram Back', async () => {
+    let backHandler: (() => void) | undefined;
+    window.Telegram!.WebApp!.BackButton!.onClick = vi.fn((callback: () => void) => {
+      backHandler = callback;
+    });
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="analytics"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="report-kind"][data-kind="completed_month"]')?.click();
+    await flush(8);
+
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({
+      period: 'current_month',
+      operation_type: 'all',
+      category: 'all',
+      report_kind: 'completed_month',
+      currency: 'RUB',
+    }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="report-drill"][data-kind="category"]')?.click();
+    await flush(8);
+
+    expect(document.querySelector('[data-tab="operations"]')?.getAttribute('aria-current')).toBe('page');
+    expect(api.operations).toHaveBeenLastCalledWith(10, expect.objectContaining({
+      period: 'custom',
+      start_date: '2026-07-01',
+      end_date: '2026-07-31',
+      operation_type: 'expense',
+      currency: 'RUB',
+      category_key: 'food',
+    }), 0, '');
+    expect(api.track).toHaveBeenCalledWith('report_drilldown_opened', expect.objectContaining({ report_kind: 'completed_month', kind: 'category', currency: 'RUB' }));
+
+    backHandler?.();
+    await flush(8);
+    expect(document.querySelector('.reports-screen')).not.toBeNull();
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({
+      period: 'current_month',
+      operation_type: 'all',
+      category: 'all',
+      report_kind: 'completed_month',
+      currency: 'RUB',
+    }));
+    expect(document.querySelector<HTMLSelectElement>('[data-action="period"]')?.value).toBe('current_month');
+    expect(document.querySelector<HTMLSelectElement>('[data-action="operation-type"]')?.value).toBe('all');
+    expect(document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')?.value).toBe('all');
+
+    backHandler?.();
+    await flush(8);
+    expect(document.querySelector('.analytics-screen')).not.toBeNull();
+  });
+
   it('keeps Home settings and Shopping List typed announcement targets working', async () => {
     const api = installAppMocks([], undefined, [announcement('settings', 'OPEN_HOME_SETTINGS', null)]);
     await import('../src/main');
@@ -427,7 +571,7 @@ describe('main plan handlers', () => {
 
     const impressions = api.track.mock.calls.filter(([name]) => name === 'mini_app_announcement_impression');
     expect(impressions.map(([, properties]) => properties?.update_key)).toEqual(['a', 'b']);
-    expect(api.dismissAnnouncement).toHaveBeenCalledWith('a');
+    expect(api.dismissAnnouncement).toHaveBeenCalledWith('a', 10);
   });
 
   it('edits a shopping item inline and cancel preserves the original text', async () => {

@@ -201,6 +201,7 @@ export function AnalyticsScreen(
         <h2>${mixedCurrency ? 'Смотрите каждую валюту отдельно' : 'Картина периода собрана'}</h2>
         <p>${mixedCurrency ? 'КопиPaste не смешивает валюты и не создаёт ложный общий итог.' : 'Доходы, расходы и результат ниже относятся к выбранному пространству и периоду.'}</p>
         ${mixedCurrency ? `<select class="select compact" data-action="chart-currency" data-chart="analytics" aria-label="Валюта аналитики">${currencyOptions(selectedCurrency)}</select>` : ''}
+        <button class="button secondary analytics-report-entry" data-action="reports-open" type="button">${icon('analytics')}<span>Открыть отчёты</span></button>
       </div>
       <div class="metrics-grid">${metricRows(analytics, selectedCurrency)}</div>
       ${note}

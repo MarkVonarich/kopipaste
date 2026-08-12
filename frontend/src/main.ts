@@ -5,7 +5,7 @@ import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { Announcement, AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, HomeWidgetKey, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ShoppingItem, ThemeMode, Workspace } from './types';
+import type { Announcement, AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, FinancialReport, GlobalFinancialFilters, Goal, HomeWidgetKey, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ReportKind, ReportOperationScope, ShoppingItem, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
@@ -13,6 +13,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { HomeScreen, InsightDetail } from './components/HomeScreen';
 import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
+import { ReportsScreen } from './components/ReportsScreen';
 import { CategoryBudgetForm, CategoryDeleteForm, CategoryDetail, CategoryForm, GoalContributionForm, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
 import { AdditionalMenu, CurrencyForm, ExportForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
 import { HomeSettingsForm } from './components/HomeSettings';
@@ -29,6 +30,7 @@ let state: AppState = initialState();
 let overview: Overview | null = null;
 let operations: OperationsResponse | null = null;
 let analytics: AnalyticsResponse | null = null;
+let report: FinancialReport | null = null;
 let plans: PlansResponse | null = null;
 let profile: Awaited<ReturnType<typeof api.profile>> | null = null;
 let shoppingItems: ShoppingItem[] = [];
@@ -304,7 +306,10 @@ function renderOperations(): string {
 }
 
 function renderAnalytics(): string {
-  return AnalyticsScreen(analytics, state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' }, activeFilters());
+  const filters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense' };
+  return filters.mode === 'reports'
+    ? ReportsScreen(report, filters.reportKind || 'selected')
+    : AnalyticsScreen(analytics, filters, activeFilters());
 }
 
 function renderPlans(): string {
@@ -449,6 +454,16 @@ async function openAnnouncementTarget(announcement: Announcement): Promise<void>
   state.sheet = null;
   if (target === 'OPEN_PROFILE') state.tab = 'profile';
   else if (target === 'OPEN_ANALYTICS') state.tab = 'analytics';
+  else if (target === 'OPEN_REPORTS' || target === 'OPEN_REPORT_WEEKLY' || target === 'OPEN_REPORT_MONTHLY') {
+    const currentFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+    state.tab = 'analytics';
+    state.analyticsFilters = {
+      ...currentFilters,
+      mode: 'reports',
+      reportKind: target === 'OPEN_REPORT_WEEKLY' ? 'completed_week' : target === 'OPEN_REPORT_MONTHLY' ? 'completed_month' : 'selected',
+      reportCurrency: currentFilters.reportCurrency || currentFilters.analyticsCurrency,
+    };
+  }
   else if (target === 'OPEN_PLANS') state.tab = 'plans';
   else return;
   await loadScreen();
@@ -662,7 +677,7 @@ function render(): void {
   if (!state.loading && !state.error && state.tab === 'home') trackVisibleAnnouncement();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
-    if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
+    if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || state.reportReturnContext || (state.tab === 'analytics' && state.analyticsFilters?.mode === 'reports') || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
     else tg.BackButton.hide();
   }
 }
@@ -743,51 +758,64 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
       const analyticsFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
-      let requestedCurrency = analyticsFilters.analyticsCurrency;
-      let response = await api.analytics(state.workspaceId, {
-        ...filters,
-        category_type: analyticsFilters.categoryType,
-        radar_type: analyticsFilters.radarType,
-        currency: requestedCurrency,
-        grouping: analyticsFilters.grouping || 'auto',
-        analytics_search: analyticsFilters.search,
-        detail_kind: analyticsFilters.detailKind,
-        detail_value: analyticsFilters.detailValue,
-        detail_currency: analyticsFilters.detailCurrency,
-        detail_operation_type: analyticsFilters.detailOperationType,
-        detail_category_key: analyticsFilters.detailCategoryKey
-      });
-      const fallbackCurrency = response.available_currencies.includes(requestedCurrency || '') ? requestedCurrency : response.available_currencies[0];
-      const shouldRetryCurrency = Boolean(fallbackCurrency) && (requestedCurrency !== fallbackCurrency) && (Boolean(requestedCurrency) || response.available_currencies.length > 1);
-      if (requestedCurrency !== fallbackCurrency || !state.analyticsFilters) {
+      if (analyticsFilters.mode === 'reports') {
+        const response = await api.report(state.workspaceId, {
+          ...filters,
+          report_kind: analyticsFilters.reportKind || 'selected',
+          currency: analyticsFilters.reportCurrency,
+        });
+        report = response.report;
         state.analyticsFilters = {
           ...analyticsFilters,
-          analyticsCurrency: fallbackCurrency,
-          detailKind: requestedCurrency === fallbackCurrency ? analyticsFilters.detailKind : undefined,
-          detailValue: requestedCurrency === fallbackCurrency ? analyticsFilters.detailValue : undefined,
-          detailCurrency: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCurrency : undefined,
-          detailOperationType: requestedCurrency === fallbackCurrency ? analyticsFilters.detailOperationType : undefined,
-          detailCategoryKey: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCategoryKey : undefined,
+          reportCurrency: response.report.selected_currency,
         };
-      }
-      if (shouldRetryCurrency) {
-        requestedCurrency = fallbackCurrency;
-        response = await api.analytics(state.workspaceId, {
+      } else {
+        let requestedCurrency = analyticsFilters.analyticsCurrency;
+        let response = await api.analytics(state.workspaceId, {
           ...filters,
           category_type: analyticsFilters.categoryType,
           radar_type: analyticsFilters.radarType,
           currency: requestedCurrency,
           grouping: analyticsFilters.grouping || 'auto',
           analytics_search: analyticsFilters.search,
-          detail_kind: undefined,
-          detail_value: undefined,
-          detail_currency: undefined,
-          detail_operation_type: undefined,
-          detail_category_key: undefined
+          detail_kind: analyticsFilters.detailKind,
+          detail_value: analyticsFilters.detailValue,
+          detail_currency: analyticsFilters.detailCurrency,
+          detail_operation_type: analyticsFilters.detailOperationType,
+          detail_category_key: analyticsFilters.detailCategoryKey
         });
+        const fallbackCurrency = response.available_currencies.includes(requestedCurrency || '') ? requestedCurrency : response.available_currencies[0];
+        const shouldRetryCurrency = Boolean(fallbackCurrency) && (requestedCurrency !== fallbackCurrency) && (Boolean(requestedCurrency) || response.available_currencies.length > 1);
+        if (requestedCurrency !== fallbackCurrency || !state.analyticsFilters) {
+          state.analyticsFilters = {
+            ...analyticsFilters,
+            analyticsCurrency: fallbackCurrency,
+            detailKind: requestedCurrency === fallbackCurrency ? analyticsFilters.detailKind : undefined,
+            detailValue: requestedCurrency === fallbackCurrency ? analyticsFilters.detailValue : undefined,
+            detailCurrency: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCurrency : undefined,
+            detailOperationType: requestedCurrency === fallbackCurrency ? analyticsFilters.detailOperationType : undefined,
+            detailCategoryKey: requestedCurrency === fallbackCurrency ? analyticsFilters.detailCategoryKey : undefined,
+          };
+        }
+        if (shouldRetryCurrency) {
+          requestedCurrency = fallbackCurrency;
+          response = await api.analytics(state.workspaceId, {
+            ...filters,
+            category_type: analyticsFilters.categoryType,
+            radar_type: analyticsFilters.radarType,
+            currency: requestedCurrency,
+            grouping: analyticsFilters.grouping || 'auto',
+            analytics_search: analyticsFilters.search,
+            detail_kind: undefined,
+            detail_value: undefined,
+            detail_currency: undefined,
+            detail_operation_type: undefined,
+            detail_category_key: undefined
+          });
+        }
+        overview = response.overview;
+        analytics = response;
       }
-      overview = response.overview;
-      analytics = response;
     }
     if (state.tab === 'plans') {
       plans = await api.plans(state.workspaceId);
@@ -964,6 +992,28 @@ function navigateBack(): void {
   if (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive') {
     state.plansGoalView = 'active';
     render();
+    return;
+  }
+  if (state.reportReturnContext) {
+    const context = state.reportReturnContext;
+    state.reportReturnContext = undefined;
+    state.operationScope = undefined;
+    state.workspaceId = context.workspaceId;
+    state.search = context.search;
+    setGlobalFilters({ ...context.globalFilters });
+    state.analyticsFilters = {
+      ...(state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }),
+      mode: context.mode,
+      reportKind: context.reportKind,
+      reportCurrency: context.reportCurrency,
+    };
+    state.tab = 'analytics';
+    void loadScreen();
+    return;
+  }
+  if (state.tab === 'analytics' && state.analyticsFilters?.mode === 'reports') {
+    state.analyticsFilters.mode = 'analytics';
+    void loadScreen();
   }
 }
 
@@ -1154,6 +1204,7 @@ function wireEvents(): void {
       const tab = button.dataset.tab as AppState['tab'];
       hapticSelection();
       state.tab = tab;
+      state.reportReturnContext = undefined;
       state.sheet = null;
       selectedOperation = null;
       await api.track('mini_app_tab_opened', { tab });
@@ -1166,6 +1217,97 @@ function wireEvents(): void {
     details.addEventListener('toggle', async () => {
       await api.track('mini_app_analytics_details_toggled', { action: details.open ? 'open' : 'close', chart_type: 'analytics', source: 'mini_app' });
     });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.addEventListener('click', async () => {
+    const currentFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
+    state.analyticsFilters = {
+      ...currentFilters,
+      mode: 'reports',
+      reportKind: 'selected',
+      reportCurrency: currentFilters.reportCurrency || currentFilters.analyticsCurrency,
+    };
+    hapticSelection();
+    await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="reports-close"]')?.addEventListener('click', async () => {
+    if (!state.analyticsFilters) return;
+    state.analyticsFilters.mode = 'analytics';
+    hapticSelection();
+    await loadScreen();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="report-kind"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!state.analyticsFilters) return;
+      state.analyticsFilters.reportKind = (button.dataset.kind || 'selected') as ReportKind;
+      hapticSelection();
+      await loadScreen();
+    });
+  });
+  app.querySelector<HTMLSelectElement>('[data-action="report-currency"]')?.addEventListener('change', async (event) => {
+    if (!state.analyticsFilters) return;
+    state.analyticsFilters.reportCurrency = (event.currentTarget as HTMLSelectElement).value;
+    hapticSelection();
+    await loadScreen();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="report-drill"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      let scope: ReportOperationScope;
+      try {
+        scope = JSON.parse(button.dataset.scope || '{}') as ReportOperationScope;
+      } catch {
+        return;
+      }
+      if (!scope.start_date || !scope.end_date || !scope.currency) return;
+      state.reportReturnContext = {
+        workspaceId: state.workspaceId,
+        globalFilters: { ...state.globalFilters },
+        mode: 'reports',
+        reportKind: state.analyticsFilters?.reportKind || report?.kind || 'selected',
+        reportCurrency: state.analyticsFilters?.reportCurrency || report?.selected_currency,
+        search: state.search,
+      };
+      if (scope.workspace_id === 'all' || scope.workspace_id === null || typeof scope.workspace_id === 'number') state.workspaceId = scope.workspace_id;
+      setGlobalFilters({
+        period: 'custom',
+        start_date: scope.start_date,
+        end_date: scope.end_date,
+        operation_type: scope.operation_type,
+        category: scope.scope_category || scope.category || 'all',
+      });
+      state.operationScope = {
+        currency: scope.currency,
+        category_key: scope.category_key || undefined,
+        merchant_key: scope.merchant_key || undefined,
+        scope_category: scope.scope_category || undefined,
+      };
+      state.search = '';
+      state.tab = 'operations';
+      await api.track('report_drilldown_opened', {
+        report_kind: report?.kind || 'selected',
+        kind: button.dataset.kind || 'unknown',
+        currency: scope.currency,
+        source: 'mini_app',
+      });
+      await loadScreen();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="report-export"]')?.addEventListener('click', async () => {
+    if (!report?.export_available) return;
+    await api.exportInfo();
+    await api.track('report_export_requested', { report_kind: report.kind, currency: report.selected_currency, source: 'mini_app' });
+    state.sheet = 'export';
+    state.exportDraft = {
+      workspace_id: report.workspace.scope,
+      operation_type: report.filters.operation_type,
+      category: report.filters.category,
+      preset: 'custom',
+      start_date: report.period.start_date,
+      end_date: report.period.end_date,
+    };
+    state.exportPreview = undefined;
+    state.exportSent = false;
+    state.saveError = undefined;
+    render();
   });
   app.querySelector<HTMLSelectElement>('[data-action="workspace"]')?.addEventListener('change', async (event) => {
     const value = (event.currentTarget as HTMLSelectElement).value;
@@ -1415,7 +1557,7 @@ function wireEvents(): void {
     const id = (event.currentTarget as HTMLButtonElement).dataset.id;
     if (!id) return;
     try {
-      await api.dismissAnnouncement(id);
+      await api.dismissAnnouncement(id, state.workspaceId);
       if (overview) overview = { ...overview, announcements: (overview.announcements || []).filter((item) => item.id !== id) };
       state.announcementIndex = Math.min(state.announcementIndex || 0, Math.max(0, (overview?.announcements?.length || 0) - 1));
       render();
