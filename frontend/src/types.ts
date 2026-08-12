@@ -9,8 +9,67 @@ export type HomeWidgetKey = 'financial_result' | 'activity' | 'income_expense' |
 export type HomeWidget = { key: HomeWidgetKey; title: string; description: string; layout: 'compact' | 'wide'; default_enabled: boolean; default_order: number };
 export type HomePreferences = { widgets: HomeWidget[]; order: HomeWidgetKey[]; enabled: HomeWidgetKey[] };
 export type ShoppingItem = { id: number; workspace_id: number; text: string; completed: boolean; completed_at?: string | null; created_at: string; updated_at: string };
-export type AnnouncementActionType = 'OPEN_HOME_SETTINGS' | 'OPEN_SHOPPING_LIST' | 'OPEN_PLANS' | 'OPEN_PROFILE' | 'OPEN_ANALYTICS' | 'OPEN_DETAIL';
+export type AnnouncementActionType = 'OPEN_HOME_SETTINGS' | 'OPEN_SHOPPING_LIST' | 'OPEN_PLANS' | 'OPEN_PROFILE' | 'OPEN_ANALYTICS' | 'OPEN_REPORTS' | 'OPEN_REPORT_WEEKLY' | 'OPEN_REPORT_MONTHLY' | 'OPEN_DETAIL';
 export type Announcement = { id: string; family: string; kind: 'feature' | 'improvement' | 'fix' | 'report'; released_on: string; title: string; description: string; detail?: string | null; action: { type: AnnouncementActionType; label: string } };
+
+export type ReportKind = 'selected' | 'completed_week' | 'completed_month';
+export type ReportDataState = 'no_data' | 'income_only' | 'expense_only' | 'complete';
+export type ReportOperationScope = {
+  workspace_id: number | 'all' | null;
+  period: string;
+  start_date: string;
+  end_date: string;
+  operation_type: 'expense' | 'income';
+  category: string;
+  scope_category?: string | null;
+  currency: string;
+  category_key?: string | null;
+  merchant_key?: string | null;
+};
+export type ReportMetric = { current: string; previous: string; delta: string; pct?: string | null; state: string };
+export type ReportDimensionItem = {
+  key: string;
+  category?: string;
+  merchant?: string;
+  currency: string;
+  total: string;
+  previous_total?: string;
+  delta?: string;
+  count: number;
+  previous_count?: number;
+  share: number;
+  synthetic?: boolean;
+  fallback?: boolean;
+  drillable: boolean;
+  average_check?: string | null;
+  operation_scope?: ReportOperationScope | null;
+};
+export type FinancialReport = {
+  kind: ReportKind;
+  period: { key: string; start_date: string; end_date: string };
+  comparison_period: { key: string; start_date: string; end_date: string };
+  workspace: { scope: number | 'all' | null; name: string; type: string; read_only: boolean };
+  filters: { operation_type: 'all' | 'expense' | 'income'; category: string };
+  available_currencies: string[];
+  selected_currency: string;
+  data_state: ReportDataState;
+  summary: { currency: string; income: string; expense: string; result: string; operation_count: number } | null;
+  comparison: ({ income: ReportMetric; expense: ReportMetric; result: ReportMetric; count: number; previous_count: number }) | null;
+  structure_type: 'expense' | 'income';
+  categories: ReportDimensionItem[];
+  merchants: ReportDimensionItem[];
+  observations: Array<{
+    kind: string;
+    title: string;
+    description: string;
+    delta?: string | null;
+    currency: string;
+    comparison_state?: string;
+    drilldown?: ReportOperationScope | null;
+  }>;
+  export_available: boolean;
+  export_reason?: string | null;
+};
 
 export type Workspace = {
   workspace_id: number | 'all' | null;
@@ -448,6 +507,7 @@ export type AppState = {
   detailOperationId?: number;
   search: string;
   operationScope?: { currency?: string; merchant?: string; merchant_key?: string; category_key?: string; scope_category?: string };
+  reportDrillActive?: boolean;
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;
@@ -471,6 +531,9 @@ export type AppState = {
   plansGoalView?: 'active' | 'archive';
   categoryType?: 'expense' | 'income';
   analyticsFilters?: {
+    mode?: 'analytics' | 'reports';
+    reportKind?: ReportKind;
+    reportCurrency?: string;
     categoryType: 'expense' | 'income';
     dynamicsType: 'expense' | 'income' | 'result' | 'both';
     radarType: 'expense' | 'income';

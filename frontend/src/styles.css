@@ -1373,6 +1373,58 @@ textarea:disabled {
   line-height: 1.45;
 }
 
+.analytics-report-entry {
+  justify-self: start;
+}
+
+.analytics-report-entry .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.report-mode-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.report-kind-selector button {
+  padding-inline: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.report-context .report-currency {
+  display: grid;
+  grid-template-columns: auto minmax(96px, 160px);
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.report-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.report-dimension-row small,
+.report-observation small {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+button.report-dimension-row,
+button.report-observation {
+  cursor: pointer;
+}
+
+.report-partial-note {
+  margin: 0;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2282,6 +2334,10 @@ canvas {
   .metrics-grid,
   .quick-actions,
   .actions {
+    grid-template-columns: 1fr;
+  }
+
+  .report-kind-selector {
     grid-template-columns: 1fr;
   }
 

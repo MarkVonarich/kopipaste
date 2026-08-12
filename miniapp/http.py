@@ -142,6 +142,8 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_operation(req, op_id, body))
         if method == "GET" and path == "/miniapp/api/analytics":
             return _json_response(start_response, 200, api.analytics(req, params))
+        if method == "GET" and path == "/miniapp/api/reports":
+            return _json_response(start_response, 200, api.report(req, params))
         if method == "GET" and path == "/miniapp/api/analytics/category-structure":
             return _json_response(start_response, 200, api.analytics(req, params))
         if method == "GET" and path == "/miniapp/api/analytics/time-dynamics":

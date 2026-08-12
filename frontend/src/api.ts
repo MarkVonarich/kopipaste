@@ -32,7 +32,9 @@ import type {
   Workspace,
   HomePreferences,
   ShoppingItem,
-  Announcement
+  Announcement,
+  FinancialReport,
+  ReportKind
 } from './types';
 
 type Envelope<T> = {
@@ -316,6 +318,10 @@ export const api = {
   analytics: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; category_type?: string; radar_type?: string; grouping?: string; analytics_search?: string; detail_kind?: string; detail_value?: string; detail_currency?: string; detail_operation_type?: string; detail_category_key?: string }) =>
     apiFetch<AnalyticsResponse>(
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
+    ),
+  report: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { report_kind: ReportKind; currency?: string }) =>
+    apiFetch<{ report: FinancialReport }>(
+      `/miniapp/api/reports${query({ workspace_id: workspaceId, ...filters })}`
     ),
   plans: (workspaceId: number | 'all' | null) => apiFetch<PlansResponse>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
   planningEstimate: (payload: PlanningPayload) =>

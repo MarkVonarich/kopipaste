@@ -77,7 +77,8 @@ from services.operations import (
 )
 from services.product_events import ProductEvent, track_product_event
 from services.planning import PlanningError, PlanningRequest, calculate_planning_estimate
-from services.announcements import announcement_candidate, dismiss_announcement, resolve_announcements
+from services.announcements import announcement_candidate, dismiss_announcement, report_ready_announcements, resolve_announcements
+from services.reports import ReportBuildRequest, build_report, comparable_period, completed_report_period, report_ready_kinds
 from services.home_preferences import get_home_preferences, home_widget_registry, reconcile_home_preferences, save_home_preferences
 from services.shopping import (
     ShoppingError,
@@ -671,20 +672,7 @@ class MiniAppAPI:
         return value
 
     def _previous_period(self, start: date, end: date, period_key: str) -> tuple[date, date, str]:
-        if period_key == "current_month":
-            prev_end = start - timedelta(days=1)
-            prev_start = prev_end.replace(day=1)
-            current_length = (end - start).days + 1
-            current_month_full = (end + timedelta(days=1)).day == 1
-            if current_month_full:
-                return prev_start, prev_end, "previous_month"
-            return prev_start, min(prev_start + timedelta(days=current_length - 1), prev_end), "previous_month_to_date"
-        if period_key == "previous_month":
-            prev_end = start - timedelta(days=1)
-            return prev_end.replace(day=1), prev_end, "month_before_previous"
-        length = (end - start).days + 1
-        prev_end = start - timedelta(days=1)
-        return prev_end - timedelta(days=length - 1), prev_end, "previous_equal_period"
+        return comparable_period(start, end, period_key)
 
     def _safe_goal_event(self, req: MiniAppRequest, event_name: str, *, workspace_id: int | None, action: str, result: str = "success") -> None:
         self._track(req, event_name, workspace_id=workspace_id, properties={"action": action, "result": result, "source": "mini_app"})
@@ -1076,11 +1064,19 @@ class MiniAppAPI:
                 }
             except Exception as exc:
                 log.info("miniapp_home_shopping_unavailable reason=%s", type(exc).__name__)
-        try:
-            announcements = resolve_announcements(req.user_id)
-        except Exception as exc:
-            log.info("miniapp_announcements_unavailable reason=%s", type(exc).__name__)
-            announcements = []
+        announcements = []
+        if not params.get("_skip_announcements"):
+            try:
+                announcement_today = user_local_date(req.user_id, None if tx.all_scope else tx.workspace_ids[0])
+                workspace_where, workspace_params = self._workspace_filter_sql(tx.workspace_ids, req.user_id)
+                ready = report_ready_kinds(workspace_where, workspace_params, today=announcement_today)
+                announcements = resolve_announcements(
+                    req.user_id,
+                    today=announcement_today,
+                    extra_candidates=report_ready_announcements(ready, today=announcement_today),
+                )
+            except Exception as exc:
+                log.info("miniapp_announcements_unavailable reason=%s", type(exc).__name__)
         return success({
             "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
             "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
@@ -1709,7 +1705,7 @@ class MiniAppAPI:
 
     def analytics(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         tx = self._transaction_filters(req, params)
-        overview = self.overview(req, {**params, "_skip_insights": True})["data"]
+        overview = self.overview(req, {**params, "_skip_insights": True, "_skip_announcements": True})["data"]
         available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
         requested_currency = str(params.get("currency") or "").strip().upper()
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
@@ -1800,6 +1796,62 @@ class MiniAppAPI:
             "selected_detail": selected_detail,
             "top_expense_categories": structure["items"],
         }, request_id=req.request_id)
+
+    def report(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
+        report_kind = str(params.get("report_kind") or "selected")
+        if report_kind not in {"selected", "completed_week", "completed_month"}:
+            raise MiniAppError(400, "bad_report_kind", "Invalid report kind.")
+        report_params = dict(params)
+        if report_kind != "selected":
+            workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
+            today = user_local_date(req.user_id, None if all_scope else workspace_ids[0])
+            start, end, _period_key = completed_report_period(report_kind, today)
+            if report_kind == "completed_month":
+                report_params.update({"period": "previous_month"})
+            else:
+                report_params.update({"period": "custom", "start_date": start.isoformat(), "end_date": end.isoformat()})
+        analytics = self.analytics(req, report_params)["data"]
+        tx = self._transaction_filters(req, report_params)
+        requested_currency = str(params.get("currency") or "").strip().upper() or None
+        if requested_currency and requested_currency not in ALLOWED_CURRENCIES:
+            raise MiniAppError(400, "bad_currency", "Invalid currency.")
+        if tx.all_scope:
+            workspace_name, workspace_type, read_only, workspace_scope = "Все пространства", "all", True, "all"
+        elif tx.workspace_ids[0] is None:
+            workspace_name, workspace_type, read_only, workspace_scope = "Личное", "legacy_personal", False, None
+        else:
+            row = next((item for item in self._workspace_rows(req.user_id) if item["workspace_id"] == tx.workspace_ids[0]), None)
+            workspace_name = str((row or {}).get("name") or "Пространство")
+            workspace_type = str((row or {}).get("kind") or "shared")
+            read_only = bool(row and row.get("read_only"))
+            workspace_scope = tx.workspace_ids[0]
+        report = build_report(
+            analytics,
+            ReportBuildRequest(
+                report_kind=report_kind,
+                workspace_scope=workspace_scope,
+                workspace_name=workspace_name,
+                workspace_type=workspace_type,
+                read_only=read_only,
+                selected_currency=requested_currency,
+                fallback_currency=get_user_currency(req.user_id),
+            ),
+        )
+        self._track(
+            req,
+            "report_opened",
+            workspace_id=None if tx.all_scope else tx.workspace_ids[0],
+            properties={
+                "report_kind": report_kind,
+                "period_kind": report["period"]["key"],
+                "workspace_type": workspace_type,
+                "operation_type": tx.operation_type,
+                "result": report["data_state"],
+                "source": "mini_app",
+                "currency": report["selected_currency"],
+            },
+        )
+        return success({"report": report}, request_id=req.request_id)
 
     def _chart_op_type(self, params: dict[str, Any], key: str, global_operation_type: str) -> str:
         if global_operation_type in {"expense", "income"}:
@@ -4037,14 +4089,25 @@ class MiniAppAPI:
             "smart_planning_opened",
             "smart_planning_applied",
             "smart_planning_warning_seen",
+            "report_drilldown_opened",
+            "report_export_requested",
         }
         if event not in allowed:
             raise MiniAppError(400, "bad_event", "Invalid analytics event.")
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total", "widget_key", "update_key", "update_kind", "workspace_type", "planning_kind", "history_confidence", "warning_kind"}
+            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "report_kind", "currency", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total", "widget_key", "update_key", "update_kind", "workspace_type", "planning_kind", "history_confidence", "warning_kind"}
         }
+        if event in {"report_drilldown_opened", "report_export_requested"}:
+            raw = body.get("properties") or {}
+            props = {"source": "mini_app"}
+            if raw.get("report_kind") in {"selected", "completed_week", "completed_month"}:
+                props["report_kind"] = raw["report_kind"]
+            if raw.get("currency") in ALLOWED_CURRENCIES:
+                props["currency"] = raw["currency"]
+            if event == "report_drilldown_opened" and raw.get("kind") in {"category", "merchant", "observation"}:
+                props["kind"] = raw["kind"]
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)
 
