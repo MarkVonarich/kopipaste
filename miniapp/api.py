@@ -1047,8 +1047,13 @@ class MiniAppAPI:
             info = {"kind": "currencies", "text": "Валюты различаются, поэтому суммы сгруппированы без автоматической конвертации."}
         challenges = self._home_challenges(req)
         focus_items = self._home_focus_items(req, params, tx)
-        goal_items = [item for item in focus_items if item.get("kind") in {"goal", "empty"}]
-        limit_items = [item for item in focus_items if item.get("kind") == "limit"]
+        if tx.all_scope:
+            scope_marker = focus_items[0]
+            goal_items = [{**scope_marker, "description": "Цели доступны для одного пространства.", "target_mode": "goals"}]
+            limit_items = [{**scope_marker, "description": "Лимиты доступны для одного пространства.", "target_mode": "limits"}]
+        else:
+            goal_items = [item for item in focus_items if item.get("kind") in {"goal", "empty"}]
+            limit_items = [item for item in focus_items if item.get("kind") == "limit"]
         reminders = self._home_reminders(req)
         insights = [] if params.get("_skip_insights") else self._home_insights(req, tx, totals, focus_items)
         try:

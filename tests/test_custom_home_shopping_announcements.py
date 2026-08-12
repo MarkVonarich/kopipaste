@@ -292,6 +292,38 @@ def test_limits_home_collection_reuses_grouped_budget_read_model(monkeypatch):
     assert items[0]["title"] == "Дом"
 
 
+def test_all_workspace_overview_exposes_goal_and_limit_scope_markers(monkeypatch):
+    api = MiniAppAPI()
+    tx = TransactionFilters([10, 20], True, date(2026, 8, 1), date(2026, 8, 11), "current_month", "all", None, "workspace_id = ANY(%s)", ([10, 20],))
+    monkeypatch.setattr(api, "_transaction_filters", lambda *_args: tx)
+    monkeypatch.setattr(api, "operations", lambda *_args: {"data": {"items": []}})
+    monkeypatch.setattr(api, "_home_challenges", lambda *_args: [])
+    monkeypatch.setattr(api, "_home_reminders", lambda *_args: [])
+    monkeypatch.setattr(api, "_home_insights", lambda *_args: [])
+    monkeypatch.setattr(api, "_activity_calendar", lambda *_args: {})
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda *_args: [])
+    monkeypatch.setattr("miniapp.api.get_user_currency", lambda *_args: "RUB")
+    monkeypatch.setattr("miniapp.api.get_home_preferences", lambda *_args: {"order": [], "enabled": []})
+    monkeypatch.setattr("miniapp.api.resolve_announcements", lambda *_args: [])
+
+    data = api.overview(api.request(42), {"workspace_id": "all"})["data"]
+
+    assert data["goal_items"] == [{"kind": "empty", "title": "Выберите пространство", "description": "Цели доступны для одного пространства.", "read_only": True, "target_mode": "goals"}]
+    assert data["limit_items"] == [{"kind": "empty", "title": "Выберите пространство", "description": "Лимиты доступны для одного пространства.", "read_only": True, "target_mode": "limits"}]
+
+
+def test_all_workspace_focus_does_not_query_or_aggregate_limits(monkeypatch):
+    api = MiniAppAPI()
+    tx = TransactionFilters([10, 20], True, date(2026, 8, 1), date(2026, 8, 11), "current_month", "all", None, "workspace_id = ANY(%s)", ([10, 20],))
+    monkeypatch.setattr(api, "goals", lambda *_args: (_ for _ in ()).throw(AssertionError("must not query goals")))
+    monkeypatch.setattr(api, "limits", lambda *_args: (_ for _ in ()).throw(AssertionError("must not query limits")))
+    monkeypatch.setattr("miniapp.api.list_category_budget_groups", lambda *_args: (_ for _ in ()).throw(AssertionError("must not aggregate budgets")))
+
+    items = api._home_focus_items(api.request(42), {"workspace_id": "all"}, tx)
+
+    assert items == [{"kind": "empty", "title": "Выберите пространство", "description": "Фокус доступен для одного пространства.", "read_only": True}]
+
+
 def test_privacy_deletion_anonymizes_shared_shopping_without_second_member(monkeypatch):
     from services.personal_data_deletion import _anonymize_shared_shopping_attribution
 

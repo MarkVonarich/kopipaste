@@ -53,6 +53,45 @@ describe('Product Evolution v3 PR2', () => {
     expect(html).toContain('Кафе');
   });
 
+  it('shows concrete-workspace selection for both Goals and Limits in all scope', () => {
+    const html = HomeScreen({
+      ...base,
+      workspace_scope: 'all',
+      home_preferences: { order: ['goals', 'limits'], enabled: ['goals', 'limits'] },
+      goal_items: [{ kind: 'empty', title: 'Выберите пространство', description: 'Цели доступны для одного пространства.', target_mode: 'goals' }],
+      limit_items: [{ kind: 'empty', title: 'Выберите пространство', description: 'Лимиты доступны для одного пространства.', target_mode: 'limits' }],
+    }, [], 'RUB', false);
+
+    expect(html.match(/Выберите пространство/g)).toHaveLength(2);
+    expect(html).toContain('Цели доступны для одного пространства.');
+    expect(html).toContain('Лимиты доступны для одного пространства.');
+    expect(html).not.toContain('Нет активных лимитов');
+  });
+
+  it('keeps the genuine empty Limits state for a concrete workspace', () => {
+    const html = HomeScreen({
+      ...base,
+      workspace_scope: 10,
+      home_preferences: { order: ['limits'], enabled: ['limits'] },
+      limit_items: [],
+    }, [], 'RUB', true);
+
+    expect(html).toContain('Нет активных лимитов');
+    expect(html).toContain('Добавьте лимит в Планах.');
+  });
+
+  it('keeps the genuine empty Goals state for a concrete workspace', () => {
+    const html = HomeScreen({
+      ...base,
+      workspace_scope: 10,
+      home_preferences: { order: ['goals'], enabled: ['goals'] },
+      goal_items: [],
+    }, [], 'RUB', true);
+
+    expect(html).toContain('Нет активных целей');
+    expect(html).toContain('Добавьте цель в Планах.');
+  });
+
   it('renders mobile-safe drag handles and keyboard fallback controls', () => {
     const preferences = { widgets, order: widgets.map((item) => item.key), enabled: widgets.map((item) => item.key) };
     const html = HomeSettingsForm(preferences, preferences.order, preferences.enabled);
