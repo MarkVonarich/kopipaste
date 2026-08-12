@@ -265,6 +265,8 @@ export type PlanningHistoryPeriod = {
   expense: string;
   net: string;
   operation_count: number;
+  expense_count: number;
+  income_count: number;
 };
 
 export type PlanningConflict = {

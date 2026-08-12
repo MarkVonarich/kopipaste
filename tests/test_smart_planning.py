@@ -33,6 +33,26 @@ def _request(kind="category_limit", **overrides):
     return PlanningRequest(**values)
 
 
+def _history_row(
+    month: int,
+    *,
+    selected: Decimal | int | str = 0,
+    expense: Decimal | int | str = 0,
+    income: Decimal | int | str = 0,
+    expense_count: int = 1,
+    income_count: int = 1,
+):
+    return (
+        date(2026, month, 1),
+        expense_count + income_count,
+        expense_count,
+        income_count,
+        Decimal(str(selected)),
+        Decimal(str(expense)),
+        Decimal(str(income)),
+    )
+
+
 def test_exact_four_month_average_is_16750():
     assert arithmetic_mean(map(Decimal, ("15400", "17900", "12300", "21400"))) == Decimal("16750.00")
     assert history_confidence(4) == "good"
@@ -65,10 +85,10 @@ def test_history_query_is_bounded_scoped_legacy_currency_compatible_and_canonica
         calls.append((" ".join(sql.split()), params))
         if "FROM public.operations" in sql:
             return [
-                (date(2026, 5, 1), 2, Decimal("15400"), Decimal("16000"), Decimal("30000")),
-                (date(2026, 6, 1), 2, Decimal("17900"), Decimal("18000"), Decimal("30000")),
-                (date(2026, 7, 1), 2, Decimal("12300"), Decimal("13000"), Decimal("30000")),
-                (date(2026, 8, 1), 2, Decimal("21400"), Decimal("22000"), Decimal("30000")),
+                _history_row(5, selected=15400, expense=16000, income=30000),
+                _history_row(6, selected=17900, expense=18000, income=30000),
+                _history_row(7, selected=12300, expense=13000, income=30000),
+                _history_row(8, selected=21400, expense=22000, income=30000),
             ]
         return []
 
@@ -83,6 +103,8 @@ def test_history_query_is_bounded_scoped_legacy_currency_compatible_and_canonica
     operations_sql, params = calls[0]
     assert "o.workspace_id=%s" in operations_sql
     assert "COALESCE(o.currency, %s)=%s" in operations_sql
+    assert "AS expense_count" in operations_sql
+    assert "AS income_count" in operations_sql
     assert "=ANY(%s)" in operations_sql
     assert params[-3:-1] == ("RUB", "RUB")
     assert date(2026, 9, 1) not in params
@@ -104,7 +126,7 @@ def test_legacy_currency_fallback_matches_analytics_for_requested_currency(monke
             "EUR": Decimal("25"),
         }
         amount = totals[requested_currency]
-        return [(date(2026, month, 1), 3, amount, amount, Decimal("0")) for month in (5, 6, 7, 8)]
+        return [_history_row(month, selected=amount, expense=amount, income=0, expense_count=3, income_count=0) for month in (5, 6, 7, 8)]
 
     monkeypatch.setattr("services.planning.pg_fetchall", fake_fetch)
 
@@ -137,7 +159,7 @@ def test_goal_cash_flow_uses_same_legacy_currency_fallback(monkeypatch):
             default_currency, requested_currency = params[-3:-1]
             assert (default_currency, requested_currency) == ("RUB", "RUB")
             return [
-                (date(2026, month, 1), 2, Decimal("0"), Decimal("500"), Decimal("2000"))
+                _history_row(month, expense=500, income=2000)
                 for month in (5, 6, 7, 8)
             ]
         return []
@@ -162,7 +184,7 @@ def test_goal_cash_flow_uses_same_legacy_currency_fallback(monkeypatch):
 def test_missing_periods_are_not_fabricated_as_zero(monkeypatch):
     monkeypatch.setattr(
         "services.planning.pg_fetchall",
-        lambda sql, _params: [(date(2026, 8, 1), 1, Decimal("100"), Decimal("100"), Decimal("0"))]
+        lambda sql, _params: [_history_row(8, selected=100, expense=100, income_count=0)]
         if "FROM public.operations" in sql
         else [],
     )
@@ -177,7 +199,7 @@ def test_missing_periods_are_not_fabricated_as_zero(monkeypatch):
 def test_covered_period_can_prove_genuine_zero_category_spend(monkeypatch):
     monkeypatch.setattr(
         "services.planning.pg_fetchall",
-        lambda sql, _params: [(date(2026, month, 1), 1, Decimal("0"), Decimal("100"), Decimal("0")) for month in (5, 6, 7, 8)]
+        lambda sql, _params: [_history_row(month, selected=0, expense=100, income_count=0) for month in (5, 6, 7, 8)]
         if "FROM public.operations" in sql
         else [],
     )
@@ -187,6 +209,44 @@ def test_covered_period_can_prove_genuine_zero_category_spend(monkeypatch):
     assert result["history_confidence"] == "good"
     assert result["baseline_average"] == Decimal("0.00")
     assert result["recommendation"] is None
+    assert all(item["expense_count"] == 1 and item["income_count"] == 0 for item in result["history"])
+
+
+@pytest.mark.parametrize("kind", ("category_limit", "general_limit"))
+def test_income_only_periods_do_not_establish_spending_history(monkeypatch, kind):
+    monkeypatch.setattr(
+        "services.planning.pg_fetchall",
+        lambda sql, _params: [
+            _history_row(month, income=100000, expense_count=0, income_count=1)
+            for month in (5, 6, 7, 8)
+        ]
+        if "FROM public.operations" in sql
+        else [],
+    )
+
+    result = calculate_planning_estimate(_request(kind), today=date(2026, 9, 12))
+
+    assert result["valid_periods"] == 0
+    assert result["history"] == []
+    assert result["history_confidence"] == "insufficient"
+    assert result["baseline_average"] is None
+    assert result["recommendation"] is None
+
+
+def test_spending_confidence_counts_only_expense_covered_periods(monkeypatch):
+    rows = [
+        _history_row(5, selected=100, expense=100, income_count=0),
+        _history_row(6, income=1000, expense_count=0, income_count=1),
+        _history_row(7, selected=300, expense=300, income_count=0),
+        _history_row(8, income=1000, expense_count=0, income_count=1),
+    ]
+    monkeypatch.setattr("services.planning.pg_fetchall", lambda sql, _params: rows if "FROM public.operations" in sql else [])
+
+    result = calculate_planning_estimate(_request(), today=date(2026, 9, 12))
+
+    assert result["valid_periods"] == 2
+    assert result["history_confidence"] == "limited"
+    assert result["baseline_average"] == Decimal("200.00")
 
 
 def test_grouped_budget_sums_canonical_categories_in_one_query(monkeypatch):
@@ -195,7 +255,7 @@ def test_grouped_budget_sums_canonical_categories_in_one_query(monkeypatch):
     def fake_fetch(sql, params):
         calls.append((sql, params))
         if "FROM public.operations" in sql:
-            return [(date(2026, month, 1), 4, Decimal(value), Decimal(value), Decimal("0")) for month, value in ((5, 31200), (6, 35100), (7, 28900), (8, 34800))]
+            return [_history_row(month, selected=value, expense=value, expense_count=4, income_count=0) for month, value in ((5, 31200), (6, 35100), (7, 28900), (8, 34800))]
         return []
 
     monkeypatch.setattr("services.planning.pg_fetchall", fake_fetch)
@@ -255,7 +315,7 @@ def test_goal_comfortable_pace_subtracts_only_other_active_commitments(monkeypat
     def fake_fetch(sql, _params):
         if "FROM public.operations" in sql:
             return [
-                (date(2026, month, 1), 4, Decimal("0"), Decimal("70000"), Decimal("100000"))
+                _history_row(month, expense=70000, income=100000, expense_count=2, income_count=2)
                 for month in (5, 6, 7, 8)
             ]
         if "FROM public.financial_goals" in sql:
@@ -275,16 +335,61 @@ def test_goal_comfortable_pace_subtracts_only_other_active_commitments(monkeypat
 
     result = calculate_planning_estimate(request, today=date(2026, 9, 1))
 
+    assert result["valid_periods"] == 4
+    assert result["history_confidence"] == "good"
     assert result["comfortable_pace"]["average_monthly_net"] == Decimal("30000.00")
     assert result["comfortable_pace"]["other_goal_commitments"] == Decimal("10000.00")
     assert result["comfortable_pace"]["monthly_amount"] == Decimal("20000.00")
     assert result["feasibility"] == "compatible"
 
 
+@pytest.mark.parametrize(
+    ("expense_count", "income_count", "expense", "income"),
+    (
+        (0, 1, 0, 100000),
+        (1, 0, 70000, 0),
+    ),
+)
+def test_goal_single_sided_history_keeps_required_pace_but_disables_comfort(monkeypatch, expense_count, income_count, expense, income):
+    monkeypatch.setattr(
+        "services.planning.pg_fetchall",
+        lambda sql, _params: [
+            _history_row(
+                month,
+                expense=expense,
+                income=income,
+                expense_count=expense_count,
+                income_count=income_count,
+            )
+            for month in (5, 6, 7, 8)
+        ]
+        if "FROM public.operations" in sql
+        else [],
+    )
+    request = _request(
+        "goal",
+        categories=(),
+        target_amount=Decimal("120000"),
+        deadline=date(2027, 2, 28),
+        frequency="monthly",
+        schedule_config={"day": 5},
+    )
+
+    result = calculate_planning_estimate(request, today=date(2026, 9, 1))
+
+    assert result["valid_periods"] == 0
+    assert result["history_confidence"] == "insufficient"
+    assert result["required_pace"]["monthly_amount"] == Decimal("20000.00")
+    assert result["comfortable_pace"]["average_monthly_net"] is None
+    assert result["comfortable_pace"]["monthly_amount"] is None
+    assert result["recommendation"] is None
+    assert result["feasibility"] == "insufficient_history"
+
+
 def test_goal_stretched_and_insufficient_history_states(monkeypatch):
     def four_periods(sql, _params):
         if "FROM public.operations" in sql:
-            return [(date(2026, month, 1), 2, 0, 0, 18000) for month in (5, 6, 7, 8)]
+            return [_history_row(month, expense=1000, income=19000) for month in (5, 6, 7, 8)]
         return []
 
     monkeypatch.setattr("services.planning.pg_fetchall", four_periods)
@@ -304,7 +409,7 @@ def test_goal_stretched_and_insufficient_history_states(monkeypatch):
 
     monkeypatch.setattr(
         "services.planning.pg_fetchall",
-        lambda sql, _params: [(date(2026, 8, 1), 2, 0, 0, 18000)] if "FROM public.operations" in sql else [],
+        lambda sql, _params: [_history_row(8, expense=1000, income=19000)] if "FROM public.operations" in sql else [],
     )
     insufficient = calculate_planning_estimate(request, today=date(2026, 9, 1))
     assert insufficient["required_pace"]["monthly_amount"] == Decimal("25000.00")

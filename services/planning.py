@@ -67,6 +67,8 @@ class PlanningHistoryPeriod:
     expense: Decimal
     net: Decimal
     operation_count: int
+    expense_count: int
+    income_count: int
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,8 @@ def aggregate_history(request: PlanningRequest, *, today: date) -> list[Planning
         f"""
         SELECT date_trunc(%s, o.op_date)::date AS period_start,
                COUNT(*)::int AS operation_count,
+               COUNT(*) FILTER (WHERE o.type=%s)::int AS expense_count,
+               COUNT(*) FILTER (WHERE o.type=%s)::int AS income_count,
                COALESCE(SUM(o.amount) FILTER (
                    WHERE o.type=%s {category_filter}
                ), 0) AS selected_expense,
@@ -201,6 +205,8 @@ def aggregate_history(request: PlanningRequest, *, today: date) -> list[Planning
         (
             grouping,
             EXPENSE_TYPE,
+            INCOME_TYPE,
+            EXPENSE_TYPE,
             *category_params,
             EXPENSE_TYPE,
             INCOME_TYPE,
@@ -216,11 +222,15 @@ def aggregate_history(request: PlanningRequest, *, today: date) -> list[Planning
     history: list[PlanningHistoryPeriod] = []
     for period in periods:
         row = by_start.get(period.start)
-        if not row or int(row[1] or 0) <= 0:
+        if not row:
             continue
-        selected_expense = _money(row[2] or 0)
-        total_expense = _money(row[3] or 0)
-        total_income = _money(row[4] or 0)
+        expense_count = int(row[2] or 0)
+        income_count = int(row[3] or 0)
+        if expense_count <= 0 or (request.kind == "goal" and income_count <= 0):
+            continue
+        selected_expense = _money(row[4] or 0)
+        total_expense = _money(row[5] or 0)
+        total_income = _money(row[6] or 0)
         amount = total_income - total_expense if request.kind == "goal" else selected_expense
         history.append(
             PlanningHistoryPeriod(
@@ -232,6 +242,8 @@ def aggregate_history(request: PlanningRequest, *, today: date) -> list[Planning
                 expense=total_expense,
                 net=_money(total_income - total_expense),
                 operation_count=int(row[1]),
+                expense_count=expense_count,
+                income_count=income_count,
             )
         )
     return history

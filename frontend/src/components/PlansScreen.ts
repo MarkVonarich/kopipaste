@@ -328,7 +328,7 @@ function feasibilityLabel(value: PlanningEstimate['feasibility']): string {
   if (value === 'compatible') return 'Срок совместим с историческим денежным потоком.';
   if (value === 'stretched') return 'Для срока нужен темп выше исторически комфортного.';
   if (value === 'required_pace_unavailable') return 'Выберите срок и расписание для необходимого темпа.';
-  return 'Необходимый темп рассчитан, но истории для оценки комфортности недостаточно.';
+  return 'Недостаточно истории доходов и расходов для оценки комфортного темпа.';
 }
 
 export function PlanningPanel(estimate?: PlanningEstimate, currentAmount = ''): string {
@@ -344,7 +344,7 @@ export function PlanningPanel(estimate?: PlanningEstimate, currentAmount = ''): 
     ? formatMoneyString(estimate.recommendation, currency)
     : zeroHistory
       ? 'За выбранные периоды расходов не было.'
-      : 'Недостаточно истории';
+      : 'Недостаточно истории расходов.';
   const difference = !isGoal && hasBaseline && currentAmount
     ? Number(currentAmount.replace(',', '.')) - Number(estimate.baseline_average)
     : 0;
@@ -354,7 +354,7 @@ export function PlanningPanel(estimate?: PlanningEstimate, currentAmount = ''): 
       <details class="planning-history" open>
         <summary>История за ${estimate.valid_periods} из ${estimate.periods_requested} периодов</summary>
         <div class="planning-history-rows">
-          ${estimate.history.map((item) => `<div class="planning-history-period" data-testid="planning-history-row"><div class="detail-row light"><span>${esc(item.label)}</span><strong>${formatMoneyString(isGoal ? item.net : item.amount, currency)}</strong></div>${isGoal ? `<p class="caption">Доходы ${formatMoneyString(item.income, currency)} · расходы ${formatMoneyString(item.expense, currency)}</p>` : ''}</div>`).join('') || '<p class="caption">Нет надёжной истории в выбранной валюте.</p>'}
+          ${estimate.history.map((item) => `<div class="planning-history-period" data-testid="planning-history-row"><div class="detail-row light"><span>${esc(item.label)}</span><strong>${formatMoneyString(isGoal ? item.net : item.amount, currency)}</strong></div>${isGoal ? `<p class="caption">Доходы ${formatMoneyString(item.income, currency)} · расходы ${formatMoneyString(item.expense, currency)}</p>` : ''}</div>`).join('') || `<p class="caption">${isGoal ? 'Нет полной истории доходов и расходов в выбранной валюте.' : 'Нет истории расходов в выбранной валюте.'}</p>`}
         </div>
       </details>
       ${isGoal ? `
