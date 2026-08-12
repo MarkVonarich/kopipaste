@@ -3,7 +3,14 @@ export type ThemeMode = 'telegram' | 'light' | 'dark';
 export type PeriodKey = 'current_week' | 'current_month' | 'previous_month' | 'custom';
 export type GlobalOperationType = 'all' | 'expense' | 'income';
 export type OperationType = 'Расходы' | 'Доходы';
-export type ProfileSection = 'user' | 'appearance' | 'workspaces' | 'notifications' | 'premium' | 'help' | 'legal';
+export type ProfileSection = 'user' | 'appearance' | 'home' | 'workspaces' | 'notifications' | 'premium' | 'help' | 'legal';
+
+export type HomeWidgetKey = 'financial_result' | 'activity' | 'income_expense' | 'challenges' | 'goals' | 'limits' | 'reminders' | 'insights' | 'shopping_list' | 'recent_operations' | 'whats_new';
+export type HomeWidget = { key: HomeWidgetKey; title: string; description: string; layout: 'compact' | 'wide'; default_enabled: boolean; default_order: number };
+export type HomePreferences = { widgets: HomeWidget[]; order: HomeWidgetKey[]; enabled: HomeWidgetKey[] };
+export type ShoppingItem = { id: number; workspace_id: number; text: string; completed: boolean; completed_at?: string | null; created_at: string; updated_at: string };
+export type AnnouncementActionType = 'OPEN_HOME_SETTINGS' | 'OPEN_SHOPPING_LIST' | 'OPEN_PLANS' | 'OPEN_PROFILE' | 'OPEN_ANALYTICS' | 'OPEN_DETAIL';
+export type Announcement = { id: string; family: string; kind: 'feature' | 'improvement' | 'fix' | 'report'; released_on: string; title: string; description: string; detail?: string | null; action: { type: AnnouncementActionType; label: string } };
 
 export type Workspace = {
   workspace_id: number | 'all' | null;
@@ -413,7 +420,7 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'home-settings' | 'shopping-list';
   profileAccordion?: ProfileSection | null;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';
@@ -447,7 +454,15 @@ export type AppState = {
   reminderDraft?: Partial<ReminderPayload>;
   homeChallengeIndex?: number;
   homeFocusIndex?: number;
+  homeGoalIndex?: number;
+  homeLimitIndex?: number;
   homeReminderIndex?: number;
+  announcementIndex?: number;
+  homeDraftOrder?: HomeWidgetKey[];
+  homeDraftEnabled?: HomeWidgetKey[];
+  confirmClearShopping?: boolean;
+  shoppingEditId?: number;
+  shoppingEditText?: string;
   exportDraft?: Record<string, unknown>;
   exportPreview?: {
     preset: string;

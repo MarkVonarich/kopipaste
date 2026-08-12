@@ -5,7 +5,7 @@ import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ThemeMode, Workspace } from './types';
+import type { Announcement, AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, HomeWidgetKey, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ShoppingItem, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
@@ -15,6 +15,8 @@ import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
 import { CategoryBudgetForm, CategoryDeleteForm, CategoryDetail, CategoryForm, GoalContributionForm, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
 import { AdditionalMenu, CurrencyForm, ExportForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
+import { HomeSettingsForm } from './components/HomeSettings';
+import { ShoppingList } from './components/ShoppingList';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
 
@@ -28,6 +30,11 @@ let operations: OperationsResponse | null = null;
 let analytics: AnalyticsResponse | null = null;
 let plans: PlansResponse | null = null;
 let profile: Awaited<ReturnType<typeof api.profile>> | null = null;
+let shoppingItems: ShoppingItem[] = [];
+let shoppingReadOnly = true;
+let shoppingNote = '';
+let shoppingActiveCount = 0;
+let shoppingCompletedCount = 0;
 let selectedOperation: Operation | null = null;
 let selectedGoal: Goal | null = null;
 let selectedLimit: BudgetLimit | null = null;
@@ -35,6 +42,7 @@ let selectedReminder: Reminder | null = null;
 let selectedCategoryBudget: CategoryBudgetGroup | null = null;
 let selectedCategory: CategoryOption | null = null;
 let selectedInsight: Insight | null = null;
+let selectedAnnouncement: Announcement | null = null;
 let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
@@ -42,6 +50,7 @@ let chartInstances: Chart[] = [];
 let homeScreenEventsRegistered = false;
 let homeScreenCheckSeq = 0;
 const impressedInsightIds = new Set<string>();
+const impressedAnnouncementIds = new Set<string>();
 const rejectedInsightIds = new Set<string>();
 
 function showStartupBlocker(message: string): void {
@@ -225,8 +234,10 @@ function renderNav(): string {
 function renderHome(): string {
   return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite(), activeFilters(), {
     challenge: state.homeChallengeIndex || 0,
-    focus: state.homeFocusIndex || 0,
+    goal: state.homeGoalIndex || 0,
+    limit: state.homeLimitIndex || 0,
     reminder: state.homeReminderIndex || 0,
+    announcement: state.announcementIndex || 0,
   });
 }
 
@@ -259,19 +270,146 @@ function renderProfile(): string {
   return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion);
 }
 
-function carouselTotal(kind: 'challenge' | 'focus' | 'reminder'): number {
+function carouselTotal(kind: 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement'): number {
   if (kind === 'challenge') return Math.max(1, overview?.challenges?.length || (overview?.challenge ? 1 : 0));
-  if (kind === 'focus') return Math.max(1, overview?.focus_items?.length || (overview?.focus ? 1 : 0));
+  if (kind === 'goal') return Math.max(1, overview?.goal_items?.length || 0);
+  if (kind === 'limit') return Math.max(1, overview?.limit_items?.length || 0);
+  if (kind === 'announcement') return Math.max(1, overview?.announcements?.length || 0);
   return Math.max(1, overview?.reminders?.length || (overview?.reminder ? 1 : 0));
 }
 
-function setHomeCarouselIndex(kind: 'challenge' | 'focus' | 'reminder', index: number, direction: string): void {
+function setHomeCarouselIndex(kind: 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement', index: number, direction: string): void {
   const total = carouselTotal(kind);
   const clamped = Math.max(0, Math.min(index, total - 1));
   if (kind === 'challenge') state.homeChallengeIndex = clamped;
-  if (kind === 'focus') state.homeFocusIndex = clamped;
+  if (kind === 'goal') state.homeGoalIndex = clamped;
+  if (kind === 'limit') state.homeLimitIndex = clamped;
   if (kind === 'reminder') state.homeReminderIndex = clamped;
-  void api.track(`mini_app_${kind}_carousel_changed`, { direction, position: String(clamped + 1), total: String(total), source: 'mini_app' });
+  if (kind === 'announcement') state.announcementIndex = clamped;
+  const eventKind = kind === 'goal' || kind === 'limit' ? 'focus' : kind;
+  void api.track(`mini_app_${eventKind}_carousel_changed`, { direction, position: String(clamped + 1), total: String(total), source: 'mini_app' });
+}
+
+function currentAnnouncement(): Announcement | null {
+  const items = overview?.announcements || [];
+  if (!items.length) return null;
+  const index = Math.max(0, Math.min(state.announcementIndex || 0, items.length - 1));
+  return items[index] || null;
+}
+
+function trackVisibleAnnouncement(): void {
+  if (state.tab !== 'home') return;
+  if (!app.querySelector('[data-carousel="announcement"]')) return;
+  const announcement = currentAnnouncement();
+  if (!announcement || impressedAnnouncementIds.has(announcement.id)) return;
+  impressedAnnouncementIds.add(announcement.id);
+  void api.track('mini_app_announcement_impression', {
+    update_key: announcement.id,
+    update_kind: announcement.kind,
+    source: 'mini_app',
+  }).catch(() => impressedAnnouncementIds.delete(announcement.id));
+}
+
+function applyShoppingResponse(response: Awaited<ReturnType<typeof api.shoppingItems>>): void {
+  shoppingItems = response.items;
+  shoppingReadOnly = response.read_only;
+  shoppingNote = response.note || '';
+  shoppingActiveCount = Number(response.active_count || 0);
+  shoppingCompletedCount = Number(response.completed_count || 0);
+}
+
+async function refreshShoppingItems(): Promise<void> {
+  applyShoppingResponse(await api.shoppingItems(state.workspaceId));
+  syncShoppingOverview();
+}
+
+async function openShoppingList(): Promise<void> {
+  state.sheet = 'shopping-list';
+  state.saveError = undefined;
+  state.confirmClearShopping = false;
+  state.shoppingEditId = undefined;
+  state.shoppingEditText = undefined;
+  try {
+    const response = await api.shoppingItems(state.workspaceId);
+    applyShoppingResponse(response);
+    await api.track('mini_app_shopping_opened', { source: 'mini_app', result: response.read_only ? 'read_only' : 'write' });
+  } catch (error) {
+    shoppingItems = [];
+    shoppingReadOnly = true;
+    shoppingNote = '';
+    shoppingActiveCount = 0;
+    shoppingCompletedCount = 0;
+    state.saveError = safeError(error);
+  }
+  render();
+}
+
+function syncShoppingOverview(): void {
+  if (!overview) return;
+  overview = {
+    ...overview,
+    shopping: {
+      items: shoppingItems.slice(0, 5),
+      active_count: shoppingActiveCount,
+      completed_count: shoppingCompletedCount,
+      read_only: shoppingReadOnly,
+      available: !shoppingNote && state.workspaceId !== 'all' && state.workspaceId !== null,
+    },
+  };
+}
+
+function openHomeSettings(): void {
+  const preferences = profile?.home_preferences || (overview?.home_widgets && overview.home_preferences ? { widgets: overview.home_widgets, ...overview.home_preferences } : null);
+  if (preferences) {
+    state.homeDraftOrder = [...preferences.order];
+    state.homeDraftEnabled = [...preferences.enabled];
+  }
+  state.sheet = 'home-settings';
+  state.saveError = undefined;
+  void api.track('mini_app_home_customization_opened', { source: 'mini_app' });
+  render();
+}
+
+async function openAnnouncementTarget(announcement: Announcement): Promise<void> {
+  const target = announcement.action.type;
+  if (target === 'OPEN_DETAIL') {
+    if (!announcement.detail?.trim()) return;
+    selectedAnnouncement = announcement;
+    state.sheet = 'announcement-detail';
+    state.saveError = undefined;
+    render();
+    return;
+  }
+  if (target === 'OPEN_HOME_SETTINGS') {
+    openHomeSettings();
+    return;
+  }
+  if (target === 'OPEN_SHOPPING_LIST') {
+    await openShoppingList();
+    return;
+  }
+  state.sheet = null;
+  if (target === 'OPEN_PROFILE') state.tab = 'profile';
+  else if (target === 'OPEN_ANALYTICS') state.tab = 'analytics';
+  else if (target === 'OPEN_PLANS') state.tab = 'plans';
+  else return;
+  await loadScreen();
+}
+
+async function openCurrentAnnouncement(): Promise<void> {
+  const announcement = currentAnnouncement();
+  if (!announcement) return;
+  void api.track('mini_app_announcement_opened', {
+    action_type: announcement.action.type,
+    update_key: announcement.id,
+    update_kind: announcement.kind,
+    source: 'mini_app',
+  });
+  await openAnnouncementTarget(announcement);
+}
+
+function announcementKindLabel(kind: Announcement['kind']): string {
+  return kind === 'feature' ? 'Новая возможность' : kind === 'improvement' ? 'Улучшение' : kind === 'fix' ? 'Исправление' : 'Новое в КопиPaste';
 }
 
 function renderSheet(): string {
@@ -292,6 +430,23 @@ function renderSheet(): string {
   }
   if (state.sheet === 'insight-detail' && selectedInsight) {
     return BottomSheet('Инсайт', InsightDetail(selectedInsight, state.saving, state.saveError));
+  }
+  if (state.sheet === 'announcement-detail' && selectedAnnouncement?.detail?.trim()) {
+    return BottomSheet(selectedAnnouncement.title, `<div class="detail-grid announcement-detail"><span class="eyebrow">${esc(announcementKindLabel(selectedAnnouncement.kind))}</span><p>${esc(selectedAnnouncement.detail)}</p></div>`);
+  }
+  if (state.sheet === 'home-settings') {
+    const preferences = profile?.home_preferences || (overview?.home_widgets && overview.home_preferences ? { widgets: overview.home_widgets, ...overview.home_preferences } : null);
+    if (!preferences) return BottomSheet('Настройка главной', '<p class="caption">Настройки временно недоступны.</p>');
+    return BottomSheet('Настройка главной', HomeSettingsForm(
+      preferences,
+      state.homeDraftOrder || preferences.order,
+      state.homeDraftEnabled || preferences.enabled,
+      state.saving,
+      state.saveError,
+    ));
+  }
+  if (state.sheet === 'shopping-list') {
+    return BottomSheet('Список покупок', ShoppingList(shoppingItems, shoppingReadOnly, state.saving, Boolean(state.confirmClearShopping), state.saveError, shoppingNote, state.shoppingEditId, state.shoppingEditText));
   }
   if (!state.sheet && !selectedOperation) return '';
   if (state.sheet === 'goal-create') {
@@ -446,6 +601,7 @@ function render(): void {
   wireEvents();
   syncGoalScheduleFields();
   renderCharts();
+  if (!state.loading && !state.error && state.tab === 'home') trackVisibleAnnouncement();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
     if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
@@ -519,6 +675,8 @@ async function loadScreen(): Promise<void> {
         impressedInsightIds.add(impressionKey);
         void api.insightImpression(insight.id, state.workspaceId).catch(() => impressedInsightIds.delete(impressionKey));
       }
+      const announcementTotal = overview.announcements?.length || 0;
+      state.announcementIndex = announcementTotal ? Math.min(state.announcementIndex || 0, announcementTotal - 1) : 0;
     }
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
@@ -711,6 +869,7 @@ function closeSheet(): void {
   selectedCategoryBudget = null;
   selectedCategory = null;
   selectedInsight = null;
+  selectedAnnouncement = null;
   state.selectedWorkspaceId = undefined;
   state.saveError = undefined;
   state.saving = false;
@@ -728,6 +887,8 @@ function closeSheet(): void {
   state.confirmLimitDeleteId = undefined;
   state.confirmGoalDeleteId = undefined;
   state.formDraft = undefined;
+  state.shoppingEditId = undefined;
+  state.shoppingEditText = undefined;
   render();
 }
 
@@ -1109,7 +1270,7 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="carousel-dot"]').forEach((button) => {
     button.addEventListener('click', () => {
-      const kind = button.dataset.carousel as 'challenge' | 'focus' | 'reminder';
+      const kind = button.dataset.carousel as 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement';
       setHomeCarouselIndex(kind, Number(button.dataset.index || 0), 'dot');
       hapticSelection();
       render();
@@ -1117,7 +1278,7 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLElement>('[data-carousel]').forEach((node) => {
     let startX = 0;
-    const kind = node.dataset.carousel as 'challenge' | 'focus' | 'reminder';
+    const kind = node.dataset.carousel as 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement';
     node.addEventListener('keydown', (event) => {
       if (!(event instanceof KeyboardEvent)) return;
       const current = Number(node.dataset.index || 0);
@@ -1131,6 +1292,10 @@ function wireEvents(): void {
         setHomeCarouselIndex(kind, current + 1, 'next');
         render();
       }
+      if (event.key === 'Enter' && kind === 'announcement') {
+        event.preventDefault();
+        void openCurrentAnnouncement();
+      }
     });
     node.addEventListener('pointerdown', (event) => {
       startX = event.clientX;
@@ -1138,6 +1303,7 @@ function wireEvents(): void {
     node.addEventListener('pointerup', (event) => {
       const delta = event.clientX - startX;
       if (Math.abs(delta) < 32) return;
+      node.dataset.suppressClick = 'true';
       const current = Number(node.dataset.index || 0);
       setHomeCarouselIndex(kind, current + (delta < 0 ? 1 : -1), delta < 0 ? 'next' : 'prev');
       hapticSelection();
@@ -1166,6 +1332,154 @@ function wireEvents(): void {
   app.querySelector<HTMLButtonElement>('[data-action="go-operations"]')?.addEventListener('click', async () => {
     state.tab = 'operations';
     await loadScreen();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="shopping-open"]').forEach((button) => {
+    button.addEventListener('click', () => void openShoppingList());
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="home-settings-open"]').forEach((button) => {
+    button.addEventListener('click', openHomeSettings);
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    await openCurrentAnnouncement();
+  });
+  app.querySelector<HTMLElement>('[data-announcement-target]')?.addEventListener('click', async (event) => {
+    if ((event.currentTarget as HTMLElement).dataset.suppressClick === 'true' || (event.target as HTMLElement).closest('button')) return;
+    await openCurrentAnnouncement();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="announcement-dismiss"]')?.addEventListener('click', async (event) => {
+    const id = (event.currentTarget as HTMLButtonElement).dataset.id;
+    if (!id) return;
+    try {
+      await api.dismissAnnouncement(id);
+      if (overview) overview = { ...overview, announcements: (overview.announcements || []).filter((item) => item.id !== id) };
+      state.announcementIndex = Math.min(state.announcementIndex || 0, Math.max(0, (overview?.announcements?.length || 0) - 1));
+      render();
+    } catch (error) {
+      state.error = safeError(error);
+      render();
+    }
+  });
+  app.querySelector<HTMLFormElement>('form[data-action="shopping-add"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const text = String(new FormData(event.currentTarget as HTMLFormElement).get('text') || '').trim();
+    if (!text || state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.createShoppingItem(state.workspaceId, text);
+      await refreshShoppingItems();
+      state.saving = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="shopping-toggle"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (state.saving) return;
+      state.saving = true;
+      render();
+      try {
+        await api.updateShoppingItem(Number(button.dataset.id), state.workspaceId, { completed: button.dataset.completed !== 'true' });
+        await refreshShoppingItems();
+        state.saving = false;
+        render();
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="shopping-delete"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (state.saving) return;
+      state.saving = true;
+      render();
+      try {
+        await api.deleteShoppingItem(Number(button.dataset.id), state.workspaceId);
+        await refreshShoppingItems();
+        state.saving = false;
+        render();
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="shopping-edit"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const item = shoppingItems.find((entry) => entry.id === Number(button.dataset.id));
+      if (!item || state.saving) return;
+      state.shoppingEditId = item.id;
+      state.shoppingEditText = item.text;
+      state.saveError = undefined;
+      render();
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="shopping-edit-cancel"]')?.addEventListener('click', () => {
+    state.shoppingEditId = undefined;
+    state.shoppingEditText = undefined;
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLFormElement>('form[data-action="shopping-edit-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    const item = shoppingItems.find((entry) => entry.id === Number(form.dataset.id));
+    const text = String(new FormData(form).get('text') || '').trim();
+    if (!item || !text || state.saving) return;
+    if (text === item.text) {
+      state.shoppingEditId = undefined;
+      state.shoppingEditText = undefined;
+      render();
+      return;
+    }
+    state.shoppingEditText = text;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.updateShoppingItem(item.id, state.workspaceId, { text });
+      await refreshShoppingItems();
+      state.shoppingEditId = undefined;
+      state.shoppingEditText = undefined;
+      state.saving = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="shopping-clear"]')?.addEventListener('click', () => {
+    state.confirmClearShopping = true;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="shopping-clear-cancel"]')?.addEventListener('click', () => {
+    state.confirmClearShopping = false;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="shopping-clear-confirm"]')?.addEventListener('click', async () => {
+    if (state.saving) return;
+    state.saving = true;
+    render();
+    try {
+      await api.clearCompletedShoppingItems(state.workspaceId);
+      await refreshShoppingItems();
+      state.saving = false;
+      state.confirmClearShopping = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
   app.querySelector<HTMLButtonElement>('[data-action="home-challenge"]')?.addEventListener('click', async () => {
     await api.track('mini_app_home_challenge_opened', { kind: overview?.challenge?.completed ? 'completed' : 'active', source: 'mini_app' });
@@ -1648,6 +1962,86 @@ function wireEvents(): void {
       await api.track('mini_app_profile_section_opened', { section, source: 'mini_app' });
       render();
     });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-enable-all"]')?.addEventListener('click', () => {
+    const widgets = profile?.home_preferences.widgets || overview?.home_widgets || [];
+    state.homeDraftEnabled = widgets.map((widget) => widget.key);
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-reset"]')?.addEventListener('click', () => {
+    const widgets = profile?.home_preferences.widgets || overview?.home_widgets || [];
+    const defaults = [...widgets].sort((left, right) => left.default_order - right.default_order);
+    state.homeDraftOrder = defaults.map((widget) => widget.key);
+    state.homeDraftEnabled = defaults.filter((widget) => widget.default_enabled).map((widget) => widget.key);
+    render();
+  });
+  app.querySelectorAll<HTMLInputElement>('[data-action="home-widget-toggle"]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const key = input.dataset.key as HomeWidgetKey;
+      const enabled = new Set(state.homeDraftEnabled || []);
+      if (input.checked) enabled.add(key); else enabled.delete(key);
+      state.homeDraftEnabled = (state.homeDraftOrder || []).filter((item) => enabled.has(item));
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="home-widget-move"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const order = [...(state.homeDraftOrder || [])];
+      const index = order.indexOf(button.dataset.key as HomeWidgetKey);
+      const next = button.dataset.direction === 'up' ? index - 1 : index + 1;
+      if (index < 0 || next < 0 || next >= order.length) return;
+      [order[index], order[next]] = [order[next], order[index]];
+      state.homeDraftOrder = order;
+      hapticSelection();
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="home-drag"]').forEach((handle) => {
+    handle.addEventListener('pointerdown', (event) => {
+      const key = handle.closest<HTMLElement>('[data-home-key]')?.dataset.homeKey as HomeWidgetKey;
+      if (!key) return;
+      handle.setPointerCapture(event.pointerId);
+      let changed = false;
+      const move = (moveEvent: PointerEvent) => {
+        const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest<HTMLElement>('[data-home-key]');
+        const targetKey = target?.dataset.homeKey as HomeWidgetKey;
+        if (!targetKey || targetKey === key) return;
+        const order = [...(state.homeDraftOrder || [])];
+        const from = order.indexOf(key);
+        const to = order.indexOf(targetKey);
+        if (from < 0 || to < 0) return;
+        order.splice(to, 0, order.splice(from, 1)[0]);
+        state.homeDraftOrder = order;
+        changed = true;
+        const dragged = handle.closest<HTMLElement>('[data-home-key]');
+        if (dragged && target?.parentElement) target.parentElement.insertBefore(dragged, from < to ? target.nextSibling : target);
+      };
+      const finish = () => {
+        handle.removeEventListener('pointermove', move);
+        if (changed) hapticSelection();
+        render();
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', finish, { once: true });
+      handle.addEventListener('pointercancel', finish, { once: true });
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-settings-save"]')?.addEventListener('click', async () => {
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const saved = await api.saveHomePreferences(state.homeDraftOrder || [], state.homeDraftEnabled || []);
+      if (profile) profile = { ...profile, home_preferences: saved };
+      if (overview) overview = { ...overview, home_widgets: saved.widgets, home_preferences: { order: saved.order, enabled: saved.enabled } };
+      state.saving = false;
+      state.sheet = null;
+      showToast('Главная сохранена');
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
   app.querySelector<HTMLButtonElement>('[data-action="profile-name-open"]')?.addEventListener('click', () => {
     state.sheet = 'profile-name';

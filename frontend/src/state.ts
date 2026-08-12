@@ -76,7 +76,10 @@ export function initialState(): AppState {
     plansGoalView: 'active',
     homeChallengeIndex: 0,
     homeFocusIndex: 0,
+    homeGoalIndex: 0,
+    homeLimitIndex: 0,
     homeReminderIndex: 0,
+    announcementIndex: 0,
     analyticsFilters: { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }
   };
 }

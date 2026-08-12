@@ -76,6 +76,16 @@ from services.operations import (
     update_financial_operation,
 )
 from services.product_events import ProductEvent, track_product_event
+from services.announcements import announcement_candidate, dismiss_announcement, resolve_announcements
+from services.home_preferences import get_home_preferences, home_widget_registry, reconcile_home_preferences, save_home_preferences
+from services.shopping import (
+    ShoppingError,
+    clear_completed_shopping_items,
+    create_shopping_item,
+    delete_shopping_item,
+    shopping_summary,
+    update_shopping_item,
+)
 from services.export_xlsx import build_export_xlsx
 from services.reminders import (
     ReminderError,
@@ -1037,8 +1047,39 @@ class MiniAppAPI:
             info = {"kind": "currencies", "text": "Валюты различаются, поэтому суммы сгруппированы без автоматической конвертации."}
         challenges = self._home_challenges(req)
         focus_items = self._home_focus_items(req, params, tx)
+        if tx.all_scope:
+            scope_marker = focus_items[0]
+            goal_items = [{**scope_marker, "description": "Цели доступны для одного пространства.", "target_mode": "goals"}]
+            limit_items = [{**scope_marker, "description": "Лимиты доступны для одного пространства.", "target_mode": "limits"}]
+        else:
+            goal_items = [item for item in focus_items if item.get("kind") in {"goal", "empty"}]
+            limit_items = [item for item in focus_items if item.get("kind") == "limit"]
         reminders = self._home_reminders(req)
         insights = [] if params.get("_skip_insights") else self._home_insights(req, tx, totals, focus_items)
+        try:
+            home_preferences = get_home_preferences(req.user_id)
+        except Exception as exc:
+            log.info("miniapp_home_preferences_unavailable reason=%s", type(exc).__name__)
+            home_preferences = reconcile_home_preferences(None, None)
+        shopping = {"items": [], "active_count": 0, "completed_count": 0, "read_only": True, "available": False}
+        if not tx.all_scope and tx.workspace_ids[0] is not None:
+            try:
+                workspace_row = next((row for row in self._workspace_rows(req.user_id) if row["workspace_id"] == tx.workspace_ids[0]), None)
+                summary = shopping_summary(int(tx.workspace_ids[0]), preview_limit=5)
+                shopping = {
+                    "items": [item.as_dict() for item in summary.items],
+                    "active_count": summary.active_count,
+                    "completed_count": summary.completed_count,
+                    "read_only": not bool(workspace_row and workspace_row.get("role") in WRITE_ROLES),
+                    "available": True,
+                }
+            except Exception as exc:
+                log.info("miniapp_home_shopping_unavailable reason=%s", type(exc).__name__)
+        try:
+            announcements = resolve_announcements(req.user_id)
+        except Exception as exc:
+            log.info("miniapp_announcements_unavailable reason=%s", type(exc).__name__)
+            announcements = []
         return success({
             "period": {"key": tx.period_key, "start_date": tx.start, "end_date": tx.end},
             "filters": {"operation_type": tx.operation_type, "category": tx.category or "all"},
@@ -1050,12 +1091,18 @@ class MiniAppAPI:
             "challenges": challenges,
             "challenge": challenges[0] if challenges else None,
             "focus_items": focus_items,
+            "goal_items": goal_items,
+            "limit_items": limit_items,
             "focus": focus_items[0] if focus_items else {"kind": "empty", "title": "Фокус свободен", "description": "Добавьте цель или лимит, чтобы видеть главный приоритет.", "target_mode": "goals"},
             "insights": insights,
             "insight": insights[0] if insights else None,
             "reminders": reminders,
             "reminder": reminders[0] if reminders else self._home_reminder(req),
             "activity": self._activity_calendar(req, tx),
+            "home_widgets": home_widget_registry(),
+            "home_preferences": home_preferences,
+            "shopping": shopping,
+            "announcements": announcements,
         }, request_id=req.request_id)
 
     def _home_challenge(self, req: MiniAppRequest) -> dict | None:
@@ -1166,14 +1213,38 @@ class MiniAppAPI:
             log.info("miniapp_home_focus_goals_unavailable reason=%s", type(exc).__name__)
         try:
             limits = self.limits(req, params)["data"].get("items", [])
+            if not tx.all_scope:
+                try:
+                    budget_rows = list_category_budget_groups(req.user_id, tx.workspace_ids[0])
+                    limits = [
+                        *limits,
+                        *[
+                            self._category_budget_dict(req, item)
+                            for item in budget_rows
+                            if item.get("period_type") in LIMIT_PERIODS and item.get("enabled", True)
+                        ],
+                    ]
+                except Exception as exc:
+                    log.info("miniapp_home_focus_category_budgets_unavailable reason=%s", type(exc).__name__)
             for limit in limits:
+                if not limit.get("enabled", True):
+                    continue
                 limit_category_key = None
                 if limit.get("category"):
                     try:
                         limit_category_key = normalized_category_key(str(limit["category"]))
                     except ValueError:
                         continue
-                if tx.category and limit.get("category"):
+                if tx.category and limit.get("kind") == "category_budget":
+                    budget_keys = set()
+                    for category_name in limit.get("categories") or []:
+                        try:
+                            budget_keys.add(normalized_category_key(str(category_name)))
+                        except ValueError:
+                            continue
+                    if selected_category_key not in budget_keys:
+                        continue
+                elif tx.category and limit.get("category"):
                     if selected_category_key and limit_category_key:
                         if limit_category_key != selected_category_key:
                             continue
@@ -1231,6 +1302,7 @@ class MiniAppAPI:
                     "currency": limit.get("currency"),
                     "period": limit.get("period"),
                     "category": limit.get("category"),
+                    "budget_kind": limit.get("kind"),
                     "enabled": limit.get("enabled", True),
                     "status": status,
                     "cta_label": "Открыть лимиты",
@@ -3447,6 +3519,89 @@ class MiniAppAPI:
         )
         return to_decimal_money(rows[0][0] if rows else 0)
 
+    def home_preferences(self, req: MiniAppRequest) -> dict:
+        return success({"widgets": home_widget_registry(), **get_home_preferences(req.user_id)}, request_id=req.request_id)
+
+    def update_home_preferences(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        try:
+            prefs = save_home_preferences(req.user_id, body.get("order"), body.get("enabled"))
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_home_preferences", "Invalid Home preferences.") from exc
+        self._track(req, "mini_app_home_preferences_saved", properties={"result": "success", "total": len(prefs["enabled"]), "source": "mini_app"})
+        return success({"widgets": home_widget_registry(), **prefs}, request_id=req.request_id)
+
+    def shopping_items(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
+        workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
+        if all_scope or workspace_ids[0] is None:
+            return success({"items": [], "read_only": True, "note": "Выберите одно пространство для списка покупок."}, request_id=req.request_id)
+        workspace_id = int(workspace_ids[0])
+        row = next((item for item in self._workspace_rows(req.user_id) if item["workspace_id"] == workspace_id), None)
+        summary = shopping_summary(workspace_id, preview_limit=100)
+        return success({
+            "items": [item.as_dict() for item in summary.items],
+            "active_count": summary.active_count,
+            "completed_count": summary.completed_count,
+            "read_only": not bool(row and row.get("role") in WRITE_ROLES),
+        }, request_id=req.request_id)
+
+    def create_shopping_item(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        try:
+            item = create_shopping_item(int(ctx.workspace_id), req.user_id, body.get("text"))
+        except ShoppingError as exc:
+            raise MiniAppError(400, str(exc), "Проверьте название покупки.") from exc
+        self._track(req, "mini_app_shopping_item_created", workspace_id=ctx.workspace_id, properties={"result": "success", "source": "mini_app"})
+        return success({"item": item.as_dict()}, request_id=req.request_id)
+
+    def update_shopping_item(self, req: MiniAppRequest, item_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        if "completed" in body and not isinstance(body["completed"], bool):
+            raise MiniAppError(400, "bad_shopping_state", "Проверьте статус покупки.")
+        try:
+            item = update_shopping_item(
+                int(ctx.workspace_id),
+                int(item_id),
+                req.user_id,
+                text=body.get("text") if "text" in body else None,
+                completed=body["completed"] if "completed" in body else None,
+            )
+        except ShoppingError as exc:
+            raise MiniAppError(400, str(exc), "Проверьте изменение покупки.") from exc
+        if item is None:
+            raise MiniAppError(404, "shopping_item_not_found", "Покупка не найдена.")
+        action = "completed" if body.get("completed") is True else "restored" if body.get("completed") is False else "edited"
+        self._track(req, "mini_app_shopping_item_updated", workspace_id=ctx.workspace_id, properties={"action": action, "result": "success", "source": "mini_app"})
+        return success({"item": item.as_dict()}, request_id=req.request_id)
+
+    def delete_shopping_item(self, req: MiniAppRequest, item_id: int, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        if not delete_shopping_item(int(ctx.workspace_id), int(item_id)):
+            raise MiniAppError(404, "shopping_item_not_found", "Покупка не найдена.")
+        self._track(req, "mini_app_shopping_item_deleted", workspace_id=ctx.workspace_id, properties={"result": "success", "source": "mini_app"})
+        return success({"deleted": True, "item_id": int(item_id)}, request_id=req.request_id)
+
+    def clear_completed_shopping_items(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        count = clear_completed_shopping_items(int(ctx.workspace_id))
+        self._track(req, "mini_app_shopping_completed_cleared", workspace_id=ctx.workspace_id, properties={"result": "success", "total": count, "source": "mini_app"})
+        return success({"deleted": count}, request_id=req.request_id)
+
+    def dismiss_announcement(self, req: MiniAppRequest, candidate_id: str) -> dict:
+        self._check_write_rate(req)
+        candidate = announcement_candidate(candidate_id)
+        if not dismiss_announcement(req.user_id, candidate_id):
+            raise MiniAppError(404, "announcement_not_found", "Объявление не найдено.")
+        properties = {"result": "success", "source": "mini_app"}
+        if candidate is not None:
+            properties.update({"update_key": candidate.id, "update_kind": candidate.kind})
+        self._track(req, "mini_app_announcement_dismissed", properties=properties)
+        return success({"dismissed": True, "candidate_id": candidate_id}, request_id=req.request_id)
+
     def profile(self, req: MiniAppRequest) -> dict:
         timezone_name, _reason = user_timezone_name(req.user_id)
         try:
@@ -3463,6 +3618,11 @@ class MiniAppAPI:
             log.info("miniapp_profile_categories_unavailable user=%s reason=%s", req.user_id, type(exc).__name__)
             categories = {"expense": [], "income": []}
         preferred_name = get_user_preferred_name(req.user_id)
+        try:
+            home_preferences = get_home_preferences(req.user_id)
+        except Exception as exc:
+            log.info("miniapp_home_preferences_unavailable reason=%s", type(exc).__name__)
+            home_preferences = reconcile_home_preferences(None, None)
         return success({
             "theme": self._profile_theme(req.user_id),
             "preferred_name": preferred_name,
@@ -3474,6 +3634,7 @@ class MiniAppAPI:
             "workspaces": self._workspace_rows(req.user_id),
             "categories": categories,
             "notifications": notifications,
+            "home_preferences": {"widgets": home_widget_registry(), **home_preferences},
             "premium": self._premium_info(),
             "export": self._export_info(req),
             "help_url": os.getenv("MINIAPP_HELP_URL", "https://t.me/chiracredible"),
@@ -3773,13 +3934,24 @@ class MiniAppAPI:
             "mini_app_challenge_carousel_changed",
             "mini_app_focus_carousel_changed",
             "mini_app_reminder_carousel_changed",
+            "mini_app_home_preferences_saved",
+            "mini_app_shopping_opened",
+            "mini_app_shopping_item_created",
+            "mini_app_shopping_item_updated",
+            "mini_app_shopping_item_deleted",
+            "mini_app_shopping_completed_cleared",
+            "mini_app_announcement_opened",
+            "mini_app_announcement_dismissed",
+            "mini_app_announcement_carousel_changed",
+            "mini_app_home_customization_opened",
+            "mini_app_announcement_impression",
         }
         if event not in allowed:
             raise MiniAppError(400, "bad_event", "Invalid analytics event.")
         props = {
             k: v
             for k, v in (body.get("properties") or {}).items()
-            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total"}
+            if k in {"tab", "period", "scope", "action", "action_type", "chart_type", "filter_kind", "period_kind", "operation_type", "has_category_filter", "grouping", "result", "source", "surface", "kind", "detector_type", "setting", "section", "reminder_state", "budget_kind", "direction", "position", "total", "widget_key", "update_key", "update_kind", "workspace_type"}
         }
         self._track(req, event, properties=props)
         return success({"tracked": True}, request_id=req.request_id)
