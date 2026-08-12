@@ -145,6 +145,26 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     renameCategory: vi.fn(),
     createCategory: vi.fn(),
     goalPlanPreview: vi.fn(async () => ({ plan_preview: { strategy: 'deadline', frequency: 'monthly', remaining_amount: '950.00', occurrence_count: 5, recommended_amount: '190.00', next_occurrence: '2026-09-05', projected_completion_date: '2026-12-05', required_contributions: null, feasible: true, reason: null, schedule_config: { day: 5 }, preview_payload_hash: 'preview-hash' } })),
+    planningEstimate: vi.fn(async (payload: any): Promise<any> => ({
+      estimate: {
+        kind: payload.kind,
+        scope: { workspace_id: 10, currency: payload.currency || 'RUB', period: payload.period || 'month', categories: payload.categories || ['food'] },
+        history: [
+          { start_date: '2026-04-01', end_date: '2026-04-30', label: 'Апрель', amount: '15400.00', income: '0.00', expense: '15400.00', net: '-15400.00', operation_count: 2, expense_count: 2, income_count: 0 },
+          { start_date: '2026-05-01', end_date: '2026-05-31', label: 'Май', amount: '17900.00', income: '0.00', expense: '17900.00', net: '-17900.00', operation_count: 2, expense_count: 2, income_count: 0 },
+          { start_date: '2026-06-01', end_date: '2026-06-30', label: 'Июнь', amount: '12300.00', income: '0.00', expense: '12300.00', net: '-12300.00', operation_count: 2, expense_count: 2, income_count: 0 },
+          { start_date: '2026-07-01', end_date: '2026-07-31', label: 'Июль', amount: '21400.00', income: '0.00', expense: '21400.00', net: '-21400.00', operation_count: 2, expense_count: 2, income_count: 0 },
+        ],
+        periods_requested: 4,
+        valid_periods: 4,
+        history_confidence: 'good',
+        baseline_average: '16750.00',
+        recommendation: '16750.00',
+        conflicts: [],
+        read_only: false,
+        can_apply: true,
+      },
+    })),
     updateGoal: vi.fn(async () => ({ goal: {}, plan_preview: {} })),
     setGoalStatus: vi.fn(async (_id, _workspace, status) => ({ goal: { status } })),
     deleteGoal: vi.fn(async (id) => ({ deleted: true, goal_id: id, deleted_movement_count: 2 })),
@@ -227,6 +247,32 @@ async function openPlansLimits() {
 
 async function flush(times = 4) {
   for (let index = 0; index < times; index += 1) await Promise.resolve();
+}
+
+function dispatchPointer(target: EventTarget, type: string, clientX: number, clientY: number, pointerId = 7): void {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    pointerId: { value: pointerId },
+    clientX: { value: clientX },
+    clientY: { value: clientY },
+  });
+  target.dispatchEvent(event);
+}
+
+function planningDropZone(): HTMLElement {
+  const zone = document.querySelector<HTMLElement>('[data-planning-drop-zone]')!;
+  zone.getBoundingClientRect = vi.fn(() => ({
+    x: 100,
+    y: 100,
+    left: 100,
+    top: 100,
+    right: 220,
+    bottom: 220,
+    width: 120,
+    height: 120,
+    toJSON: () => ({}),
+  } as DOMRect));
+  return zone;
 }
 
 describe('main plan handlers', () => {
@@ -420,6 +466,167 @@ describe('main plan handlers', () => {
 
     expect(document.body.textContent).toContain('Выберите одно пространство для списка покупок.');
     expect(document.body.textContent).not.toContain('Список доступен только для чтения.');
+  });
+
+  it('calculates, applies and saves a recommendation through the existing limit API', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    await openPlansLimits();
+
+    document.querySelector<HTMLButtonElement>('[data-action="limit-create"][data-scope="category"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')!.checked = false;
+    document.querySelector<HTMLButtonElement>('[data-action="planning-calculate"]')?.click();
+    await flush(8);
+
+    expect(api.planningEstimate).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'category_limit',
+      workspace_id: 10,
+      currency: 'RUB',
+      category: 'Food',
+      period: 'month',
+    }));
+    expect(document.querySelectorAll('[data-testid="planning-history-row"]')).toHaveLength(4);
+    expect(document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked).toBe(false);
+
+    document.querySelector<HTMLButtonElement>('[data-action="planning-apply"]')?.click();
+    const amount = document.querySelector<HTMLInputElement>('form[data-action="create-limit"] input[name="amount"]');
+    expect(amount?.value).toBe('16750.00');
+    expect(document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked).toBe(false);
+
+    document.querySelector<HTMLFormElement>('form[data-action="create-limit"]')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush(8);
+    expect(api.createLimit).toHaveBeenCalledWith(expect.objectContaining({ amount: '16750.00', category: 'Food', scope: 'category', alerts_enabled: false }));
+  });
+
+  it('keeps an existing limit alert choice through planning rerender', async () => {
+    installAppMocks();
+    await import('../src/main');
+    await flush();
+    await openPlansLimits();
+
+    document.querySelector<HTMLButtonElement>('[data-action="limit-edit"][data-id="category:month:Food"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')!.checked = false;
+    document.querySelector<HTMLButtonElement>('[data-action="planning-calculate"]')?.click();
+    await flush(8);
+
+    expect(document.querySelector<HTMLInputElement>('form[data-action="save-limit"] input[name="alerts_enabled"]')?.checked).toBe(false);
+  });
+
+  it('implements the complete grouped-budget pointer lifecycle and preserves tap fallback', async () => {
+    installAppMocks();
+    await import('../src/main');
+    await flush();
+    await openPlansLimits();
+
+    document.querySelector<HTMLButtonElement>('[data-action="category-budget-create"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')!.checked = false;
+    document.querySelector<HTMLButtonElement>('[data-action="planning-category-toggle"][data-category="Food"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).not.toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked).toBe(false);
+
+    document.querySelector<HTMLButtonElement>('.planning-selected-chip[data-category="Food"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).toBeNull();
+
+    const successfulZone = planningDropZone();
+    const successfulHandle = document.querySelector<HTMLElement>('[data-planning-drag="Food"]')!;
+    dispatchPointer(successfulHandle, 'pointerdown', 20, 20);
+    dispatchPointer(window, 'pointermove', 150, 150);
+    expect(successfulZone.classList.contains('drag-over')).toBe(true);
+    dispatchPointer(window, 'pointerup', 150, 150);
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).not.toBeNull();
+    expect(successfulZone.classList.contains('drag-over')).toBe(false);
+    expect(successfulHandle.closest('.planning-category-chip')?.classList.contains('dragging')).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked).toBe(false);
+
+    document.querySelector<HTMLButtonElement>('[data-action="planning-category-toggle"][data-category="Food"]')?.click();
+    expect(document.querySelectorAll('input[name="categories"][value="Food"]')).toHaveLength(1);
+
+    const duplicateZone = planningDropZone();
+    dispatchPointer(document.querySelector<HTMLElement>('[data-planning-drag="Food"]')!, 'pointerdown', 20, 20);
+    dispatchPointer(window, 'pointerup', 150, 150);
+    expect(duplicateZone.classList.contains('drag-over')).toBe(false);
+    expect(document.querySelectorAll('input[name="categories"][value="Food"]')).toHaveLength(1);
+
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    document.querySelector<HTMLButtonElement>('.planning-selected-chip[data-category="Food"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).toBeNull();
+
+    const outsideZone = planningDropZone();
+    dispatchPointer(document.querySelector<HTMLElement>('[data-planning-drag="Food"]')!, 'pointerdown', 20, 20);
+    dispatchPointer(window, 'pointermove', 50, 50);
+    dispatchPointer(window, 'pointerup', 50, 50);
+    expect(outsideZone.classList.contains('drag-over')).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).toBeNull();
+
+    const cancelledZone = planningDropZone();
+    const cancelledHandle = document.querySelector<HTMLElement>('[data-planning-drag="Food"]')!;
+    dispatchPointer(cancelledHandle, 'pointerdown', 20, 20);
+    dispatchPointer(window, 'pointermove', 150, 150);
+    dispatchPointer(window, 'pointercancel', 150, 150);
+    expect(cancelledZone.classList.contains('drag-over')).toBe(false);
+    expect(cancelledHandle.closest('.planning-category-chip')?.classList.contains('dragging')).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-action="planning-category-toggle"][data-category="Food"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('input[name="categories"][value="Food"]')).not.toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked).toBe(false);
+    document.querySelector<HTMLButtonElement>('[data-action="planning-calculate"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="planning-apply"]')?.click();
+    expect(document.querySelector<HTMLInputElement>('input[name="alerts_enabled"]')?.checked).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('input[name="amount"]')?.value).toBe('16750.00');
+  });
+
+  it('applies goal comfort pace only to the draft and requires a fresh preview hash', async () => {
+    const api = installAppMocks();
+    api.planningEstimate.mockResolvedValue({
+      estimate: {
+        kind: 'goal',
+        scope: { workspace_id: 10, currency: 'RUB', period: 'month', categories: [] },
+        history: [],
+        periods_requested: 4,
+        valid_periods: 4,
+        history_confidence: 'good',
+        baseline_average: '25000.00',
+        recommendation: '15000.00',
+        required_pace: { amount: '20000.00', monthly_amount: '20000.00', occurrence_count: 6 },
+        comfortable_pace: { amount: '15000.00', monthly_amount: '15000.00', average_monthly_net: '25000.00', other_goal_commitments: '10000.00', commitment_count: 1 },
+        feasibility: 'stretched',
+        gap: '5000.00',
+        comfortable_completion_date: '2027-03-05',
+        conflicts: [],
+        read_only: false,
+        can_apply: true,
+      },
+    });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="goal-create"]')?.click();
+
+    const form = document.querySelector<HTMLFormElement>('form[data-action="create-goal"]')!;
+    form.querySelector<HTMLInputElement>('input[name="title"]')!.value = 'Trip';
+    form.querySelector<HTMLInputElement>('input[name="target_amount"]')!.value = '120000';
+    form.querySelector<HTMLInputElement>('input[name="deadline"]')!.value = '2027-02-28';
+    form.querySelector<HTMLSelectElement>('select[name="frequency"]')!.value = 'monthly';
+    form.querySelector<HTMLInputElement>('input[name="day"]')!.value = '5';
+    expect(form.querySelector<HTMLSelectElement>('select[name="strategy"]')!.value).toBe('deadline');
+    form.querySelector<HTMLButtonElement>('[data-action="planning-calculate"]')!.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="planning-apply"]')?.click();
+
+    expect(document.querySelector<HTMLSelectElement>('select[name="strategy"]')?.value).toBe('contribution');
+    expect(document.querySelector<HTMLInputElement>('input[name="comfortable_amount"]')?.value).toBe('15000.00');
+    expect(document.querySelector('[data-submit-mode="confirm"]')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-submit-mode="preview"]')?.click();
+    await flush(8);
+    expect(api.goalPlanPreview).toHaveBeenCalledWith(expect.objectContaining({ strategy: 'contribution', comfortable_amount: '15000.00' }));
+    expect(document.querySelector('[data-submit-mode="confirm"]')).not.toBeNull();
   });
 
   it('opens general limit edit and delete handlers from general_limits', async () => {

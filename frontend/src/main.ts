@@ -1,6 +1,6 @@
 import './styles.css';
 import Chart from 'chart.js/auto';
-import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse } from './api';
+import { api, requestId, type GoalMovementPayload, type GoalPayload, type LimitPayload, type OperationPayload, type OperationsResponse, type Overview, type PlansResponse, type AnalyticsResponse, type PlanningPayload } from './api';
 import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
@@ -19,6 +19,7 @@ import { HomeSettingsForm } from './components/HomeSettings';
 import { ShoppingList } from './components/ShoppingList';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
+import { canonicalCategoryKey, togglePlanningCategory } from './planningSelection';
 
 const appRoot = document.querySelector<HTMLDivElement>('#app');
 if (!appRoot) throw new Error('Missing app root');
@@ -52,6 +53,18 @@ let homeScreenCheckSeq = 0;
 const impressedInsightIds = new Set<string>();
 const impressedAnnouncementIds = new Set<string>();
 const rejectedInsightIds = new Set<string>();
+let suppressPlanningCategoryClick = '';
+let cancelPlanningDrag: (() => void) | null = null;
+
+function pointerIsOverElement(event: PointerEvent, element: HTMLElement): boolean {
+  const rect = element.getBoundingClientRect();
+  if (rect.width > 0 || rect.height > 0) {
+    return event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
+  }
+  const hit = document.elementFromPoint?.(event.clientX, event.clientY);
+  return hit === element || (hit instanceof Node && element.contains(hit));
+}
 
 function showStartupBlocker(message: string): void {
   state.loading = false;
@@ -73,9 +86,7 @@ function esc(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
-function categoryKey(value: unknown): string {
-  return String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru').replace(/ё/g, 'е');
-}
+const categoryKey = canonicalCategoryKey;
 
 function applyTheme(mode: ThemeMode): void {
   const tg = getTelegramWebApp();
@@ -187,6 +198,53 @@ function categoryBudgetPayload(form: HTMLFormElement) {
     period: String(data.get('period') || 'month') as 'week' | 'month',
     categories: data.getAll('categories').map((item) => String(item)),
     alerts_enabled: data.get('alerts_enabled') === 'on',
+  };
+}
+
+function planningDraftFromForm(form: HTMLFormElement): Record<string, unknown> {
+  const data = new FormData(form);
+  const draft: Record<string, unknown> = {};
+  data.forEach((value, key) => {
+    if (key === 'categories') return;
+    draft[key] = String(value);
+  });
+  draft.categories = data.getAll('categories').map(String);
+  for (const name of ['alerts_enabled', 'reminders_enabled']) {
+    const checkbox = form.querySelector<HTMLInputElement>(`input[name="${name}"]`);
+    if (checkbox) draft[name] = checkbox.checked;
+  }
+  if (form.dataset.action === 'create-goal' || form.dataset.action === 'save-goal') {
+    return { ...state.goalDraft, ...draft };
+  }
+  return draft;
+}
+
+function planningPayload(form: HTMLFormElement, kind: PlanningPayload['kind']): PlanningPayload {
+  if (kind === 'goal') {
+    const goal = goalPayload(form);
+    return {
+      workspace_id: state.workspaceId,
+      kind,
+      currency: selectedGoal?.currency || state.boot?.user.currency || 'RUB',
+      editing_entity_id: selectedGoal?.id,
+      target_amount: goal.target_amount,
+      current_amount: goal.current_amount,
+      deadline: goal.deadline,
+      frequency: goal.frequency,
+      day: goal.day,
+      days: goal.days,
+      weekday: goal.weekday,
+    };
+  }
+  const data = new FormData(form);
+  return {
+    workspace_id: state.workspaceId,
+    kind,
+    currency: String(data.get('currency') || selectedLimit?.currency || state.boot?.user.currency || 'RUB'),
+    period: String(data.get('period') || 'month') as 'week' | 'month',
+    category: String(data.get('category') || ''),
+    categories: data.getAll('categories').map(String),
+    editing_entity_id: kind === 'category_budget' ? selectedCategoryBudget?.id : selectedLimit?.id,
   };
 }
 
@@ -450,22 +508,22 @@ function renderSheet(): string {
   }
   if (!state.sheet && !selectedOperation) return '';
   if (state.sheet === 'goal-create') {
-    return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
+    return BottomSheet('Новая цель', GoalForm(null, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft, state.planningEstimate));
   }
   if (state.sheet === 'goal-detail' && selectedGoal) {
     return BottomSheet(selectedGoal.title, GoalDetail(selectedGoal, canWrite()));
   }
   if (state.sheet === 'goal-edit' && selectedGoal) {
-    return BottomSheet('Изменить цель', GoalForm(selectedGoal, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft));
+    return BottomSheet('Изменить цель', GoalForm(selectedGoal, state.saving, state.saveError, state.goalPlanPreview, state.goalDraft, state.planningEstimate));
   }
   if (state.sheet === 'goal-contribution' && selectedGoal) {
     return BottomSheet('Пополнить цель', GoalContributionForm(selectedGoal, state.goalIdempotencyKey || requestId(), state.saving, state.saveError));
   }
   if (state.sheet === 'limit-create') {
-    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError, state.limitCreateScope || 'category', state.insightLimitCategory || '', state.insightLimitCurrency || ''));
+    return BottomSheet('Новый лимит', LimitForm(null, categoryOptions, state.saving, state.saveError, state.limitCreateScope || 'category', state.insightLimitCategory || '', state.insightLimitCurrency || '', state.planningEstimate, state.planningDraft));
   }
   if (state.sheet === 'limit-edit' && selectedLimit) {
-    return BottomSheet('Изменить лимит', LimitForm(selectedLimit, categoryOptions, state.saving, state.saveError));
+    return BottomSheet('Изменить лимит', LimitForm(selectedLimit, categoryOptions, state.saving, state.saveError, 'category', '', '', state.planningEstimate, state.planningDraft));
   }
   if (state.sheet === 'reminder-create') {
     return BottomSheet('Новое напоминание', ReminderForm(null, categoryOptions, state.saving, state.saveError, state.reminderDraft as Record<string, unknown> | undefined));
@@ -505,10 +563,10 @@ function renderSheet(): string {
     `);
   }
   if (state.sheet === 'category-budget-create') {
-    return BottomSheet('Новый бюджет категорий', CategoryBudgetForm(null, categoryOptions, state.saving, state.saveError, profile?.available_currencies, state.boot?.user.currency || 'RUB'));
+    return BottomSheet('Новый бюджет категорий', CategoryBudgetForm(null, categoryOptions, state.saving, state.saveError, profile?.available_currencies, state.boot?.user.currency || 'RUB', state.planningEstimate, state.planningDraft));
   }
   if (state.sheet === 'category-budget-edit' && selectedCategoryBudget) {
-    return BottomSheet('Изменить бюджет категорий', CategoryBudgetForm(selectedCategoryBudget, categoryOptions, state.saving, state.saveError, profile?.available_currencies, state.boot?.user.currency || 'RUB'));
+    return BottomSheet('Изменить бюджет категорий', CategoryBudgetForm(selectedCategoryBudget, categoryOptions, state.saving, state.saveError, profile?.available_currencies, state.boot?.user.currency || 'RUB', state.planningEstimate, state.planningDraft));
   }
   if (state.sheet === 'category-detail' && selectedCategory) {
     return BottomSheet(selectedCategory.name, CategoryDetail(selectedCategory, state.categoryType || 'expense', canWrite() && !plans?.categories_read_only));
@@ -642,6 +700,10 @@ function safeError(error: unknown): string {
     budget_not_found: 'Бюджет не найден.',
     budget_invalid_categories: 'Выберите категории из списка.',
     budget_access_denied: 'Нет доступа к бюджету.',
+    categories_required: 'Выберите хотя бы одну категорию для расчёта.',
+    bad_planning_request: 'Проверьте параметры расчёта.',
+    bad_planning_period: 'Выберите неделю или месяц.',
+    bad_goal_schedule: 'Проверьте расписание цели.',
   }[code] || 'Не получилось выполнить действие. Попробуйте ещё раз.';
 }
 
@@ -883,6 +945,8 @@ function closeSheet(): void {
   state.goalPlanPreview = undefined;
   state.goalPreviewPayloadHash = undefined;
   state.goalDraft = undefined;
+  state.planningEstimate = undefined;
+  state.planningDraft = undefined;
   state.reminderDraft = undefined;
   state.confirmLimitDeleteId = undefined;
   state.confirmGoalDeleteId = undefined;
@@ -1568,6 +1632,8 @@ function wireEvents(): void {
     state.goalPlanPreview = undefined;
     state.goalPreviewPayloadHash = undefined;
     state.goalDraft = undefined;
+    state.planningEstimate = undefined;
+    state.planningDraft = undefined;
     state.saveError = undefined;
     state.dirty = false;
     render();
@@ -1598,6 +1664,8 @@ function wireEvents(): void {
       state.goalPlanPreview = undefined;
       state.goalPreviewPayloadHash = undefined;
       state.goalDraft = undefined;
+      state.planningEstimate = undefined;
+      state.planningDraft = undefined;
       state.saveError = undefined;
       state.dirty = false;
       render();
@@ -1673,12 +1741,17 @@ function wireEvents(): void {
       state.limitCreateIdempotencyKey = requestId();
       state.saveError = undefined;
       state.dirty = false;
+      state.planningEstimate = undefined;
+      state.planningDraft = undefined;
       render();
     });
   });
   app.querySelector<HTMLSelectElement>('form[data-action="create-limit"] select[name="scope"]')?.addEventListener('change', async (event) => {
+    const form = (event.currentTarget as HTMLSelectElement).closest<HTMLFormElement>('form');
     const scope = (event.currentTarget as HTMLSelectElement).value === 'all_expenses' ? 'all_expenses' : 'category';
     state.limitCreateScope = scope;
+    if (form) state.planningDraft = planningDraftFromForm(form);
+    state.planningEstimate = undefined;
     if (scope === 'category') await loadCategoriesFor('expense');
     render();
   });
@@ -1690,6 +1763,8 @@ function wireEvents(): void {
       state.sheet = selectedLimit ? 'limit-edit' : null;
       state.saveError = undefined;
       state.dirty = false;
+      state.planningEstimate = undefined;
+      state.planningDraft = undefined;
       render();
     });
   });
@@ -1854,6 +1929,9 @@ function wireEvents(): void {
     selectedCategoryBudget = null;
     state.sheet = 'category-budget-create';
     state.saveError = undefined;
+    state.planningEstimate = undefined;
+    state.planningDraft = undefined;
+    state.dirty = false;
     render();
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="category-budget-edit"]').forEach((button) => {
@@ -1862,6 +1940,9 @@ function wireEvents(): void {
       selectedCategoryBudget = (plans?.category_budgets || []).find((budget) => budget.id === Number(button.dataset.id)) || null;
       state.sheet = selectedCategoryBudget ? 'category-budget-edit' : null;
       state.saveError = undefined;
+      state.planningEstimate = undefined;
+      state.planningDraft = undefined;
+      state.dirty = false;
       render();
     });
   });
@@ -2141,6 +2222,169 @@ function wireEvents(): void {
   app.querySelector('[data-action="close-confirm"]')?.addEventListener('click', (event) => {
     if ((event.target as HTMLElement).dataset.action === 'close-confirm') closeSheet();
   });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="planning-calculate"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (state.saving) return;
+      const form = button.closest<HTMLFormElement>('form');
+      if (!form) return;
+      const kind = button.dataset.kind as PlanningPayload['kind'];
+      const payload = planningPayload(form, kind);
+      if (kind === 'goal') state.goalDraft = goalPayload(form) as unknown as Record<string, unknown>;
+      else state.planningDraft = planningDraftFromForm(form);
+      state.saving = true;
+      state.saveError = undefined;
+      void api.track('smart_planning_opened', {
+        planning_kind: kind,
+        period_kind: payload.period || 'month',
+        source: 'mini_app',
+        workspace_type: currentWorkspace()?.kind || 'unknown',
+      });
+      render();
+      try {
+        const response = await api.planningEstimate(payload);
+        state.planningEstimate = response.estimate;
+        state.saving = false;
+        for (const conflict of response.estimate.conflicts) {
+          void api.track('smart_planning_warning_seen', {
+            planning_kind: kind,
+            period_kind: response.estimate.scope.period,
+            history_confidence: response.estimate.history_confidence,
+            warning_kind: conflict.kind,
+            source: 'mini_app',
+          });
+        }
+        render();
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
+        render();
+      }
+    });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="planning-apply"]')?.addEventListener('click', () => {
+    const estimate = state.planningEstimate;
+    if (!estimate?.can_apply || !estimate.recommendation) return;
+    if (estimate.kind === 'goal') {
+      state.goalDraft = {
+        ...(state.goalDraft || {}),
+        strategy: 'contribution',
+        comfortable_amount: estimate.recommendation,
+      };
+      state.goalPlanPreview = undefined;
+      state.goalPreviewPayloadHash = undefined;
+    } else {
+      state.planningDraft = { ...(state.planningDraft || {}), amount: estimate.recommendation };
+    }
+    state.dirty = true;
+    void api.track('smart_planning_applied', {
+      planning_kind: estimate.kind,
+      period_kind: estimate.scope.period,
+      history_confidence: estimate.history_confidence,
+      source: 'mini_app',
+    });
+    render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="planning-open-conflict"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entityId = button.dataset.entityId || '';
+      state.planningEstimate = undefined;
+      state.planningDraft = undefined;
+      state.saveError = undefined;
+      state.dirty = false;
+      if (entityId.startsWith('budget:')) {
+        selectedCategoryBudget = (plans?.category_budgets || []).find((budget) => budget.id === Number(entityId.split(':')[1])) || null;
+        state.sheet = selectedCategoryBudget ? 'category-budget-edit' : state.sheet;
+      } else {
+        selectedLimit = findLimitById(entityId);
+        state.sheet = selectedLimit ? 'limit-edit' : state.sheet;
+      }
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="planning-category-toggle"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const category = button.dataset.category || '';
+      if (!category || suppressPlanningCategoryClick === category) {
+        suppressPlanningCategoryClick = '';
+        return;
+      }
+      const form = button.closest<HTMLFormElement>('form');
+      if (!form) return;
+      const draft = planningDraftFromForm(form);
+      draft.categories = togglePlanningCategory((draft.categories as string[]) || [], category);
+      state.planningDraft = draft;
+      state.planningEstimate = undefined;
+      state.dirty = true;
+      hapticSelection();
+      render();
+    });
+  });
+  app.querySelectorAll<HTMLElement>('[data-planning-drag]').forEach((handle) => {
+    handle.addEventListener('pointerdown', (event) => {
+      const category = handle.dataset.planningDrag || '';
+      const form = handle.closest<HTMLFormElement>('form');
+      const dropZone = form?.querySelector<HTMLElement>('[data-planning-drop-zone]');
+      const chip = handle.closest<HTMLElement>('.planning-category-chip');
+      if (!category || !form || !dropZone || !chip) return;
+      cancelPlanningDrag?.();
+      const pointerId = event.pointerId;
+      let cleaned = false;
+      const setDragOver = (over: boolean) => dropZone.classList.toggle('drag-over', over);
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', cancel);
+        chip.classList.remove('dragging');
+        setDragOver(false);
+        try {
+          if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+        } catch {
+          // The WebView may release capture before pointerup reaches this listener.
+        }
+        if (cancelPlanningDrag === cleanup) cancelPlanningDrag = null;
+      };
+      const move = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== pointerId) return;
+        setDragOver(pointerIsOverElement(moveEvent, dropZone));
+      };
+      const finish = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) return;
+        const accepted = pointerIsOverElement(upEvent, dropZone);
+        cleanup();
+        if (!accepted) return;
+        suppressPlanningCategoryClick = category;
+        window.setTimeout(() => {
+          if (suppressPlanningCategoryClick === category) suppressPlanningCategoryClick = '';
+        }, 0);
+        const draft = planningDraftFromForm(form);
+        const selected = (draft.categories as string[]) || [];
+        if (selected.some((item) => canonicalCategoryKey(item) === canonicalCategoryKey(category))) return;
+        draft.categories = [...selected, category];
+        state.planningDraft = draft;
+        state.planningEstimate = undefined;
+        state.dirty = true;
+        hapticSelection();
+        render();
+      };
+      const cancel = (cancelEvent: PointerEvent) => {
+        if (cancelEvent.pointerId === pointerId) cleanup();
+      };
+      cancelPlanningDrag = cleanup;
+      chip.classList.add('dragging');
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', cancel);
+      try {
+        handle.setPointerCapture?.(pointerId);
+      } catch {
+        // Window listeners still complete the gesture when capture is unavailable.
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  });
   app.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('form input, form textarea, form select').forEach((input) => {
     const invalidateGoalPreview = () => {
       const form = input.closest<HTMLFormElement>('form[data-action="create-goal"], form[data-action="save-goal"]');
@@ -2157,10 +2401,18 @@ function wireEvents(): void {
     input.addEventListener('input', () => {
       state.dirty = true;
       invalidateGoalPreview();
+      if (input.name !== 'amount' && input.name !== 'comfortable_amount') {
+        state.planningEstimate = undefined;
+        input.closest('form')?.querySelector('[data-testid="smart-planning-result"]')?.remove();
+      }
     });
     input.addEventListener('change', () => {
       state.dirty = true;
       invalidateGoalPreview();
+      if (input.name !== 'amount' && input.name !== 'comfortable_amount') {
+        state.planningEstimate = undefined;
+        input.closest('form')?.querySelector('[data-testid="smart-planning-result"]')?.remove();
+      }
       if (input.getAttribute('name') === 'frequency') syncGoalScheduleFields();
     });
   });

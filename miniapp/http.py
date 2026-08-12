@@ -150,6 +150,8 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.analytics(req, params))
         if method == "GET" and path == "/miniapp/api/plans":
             return _json_response(start_response, 200, api.plans(req, params))
+        if method == "POST" and path == "/miniapp/api/planning/estimate":
+            return _json_response(start_response, 200, api.planning_estimate(req, body))
         if method == "GET" and path == "/miniapp/api/reminders":
             return _json_response(start_response, 200, api.reminders(req, params))
         if method == "POST" and path == "/miniapp/api/reminders":

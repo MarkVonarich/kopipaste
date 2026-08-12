@@ -10,6 +10,7 @@ import type {
   Goal,
   GoalMovement,
   GoalPlanPreview,
+  PlanningEstimate,
   GlobalFinancialFilters,
   NotificationPreferences,
   Operation,
@@ -213,6 +214,23 @@ export type LimitPayload = {
   alerts_enabled?: boolean;
 };
 
+export type PlanningPayload = {
+  workspace_id: number | 'all' | null;
+  kind: PlanningEstimate['kind'];
+  currency: string;
+  period?: 'week' | 'month';
+  category?: string;
+  categories?: string[];
+  editing_entity_id?: string | number;
+  target_amount?: string;
+  current_amount?: string;
+  deadline?: string;
+  frequency?: GoalPayload['frequency'];
+  day?: number;
+  days?: number[];
+  weekday?: number;
+};
+
 export class ApiError extends Error {
   code: string;
 
@@ -300,6 +318,8 @@ export const api = {
       `/miniapp/api/analytics${query({ workspace_id: workspaceId, ...filters })}`
     ),
   plans: (workspaceId: number | 'all' | null) => apiFetch<PlansResponse>(`/miniapp/api/plans${query({ workspace_id: workspaceId })}`),
+  planningEstimate: (payload: PlanningPayload) =>
+    apiFetch<{ estimate: PlanningEstimate }>('/miniapp/api/planning/estimate', { method: 'POST', body: JSON.stringify(payload) }),
   goals: (workspaceId: number | 'all' | null, statusGroup: 'active' | 'archive' = 'active') => apiFetch<{ items: Goal[]; read_only: boolean; note?: string }>(`/miniapp/api/goals${query({ workspace_id: workspaceId, status_group: statusGroup })}`),
   goalDetail: (id: number, workspaceId: number | 'all' | null) =>
     apiFetch<{ goal: Goal; movements: GoalMovement[] }>(`/miniapp/api/goals/${id}${query({ workspace_id: workspaceId })}`),
