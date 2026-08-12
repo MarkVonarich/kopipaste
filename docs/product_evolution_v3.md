@@ -92,11 +92,11 @@ The Profile editor keeps an unsaved local draft. Every widget has a toggle, a Po
 
 Shopping items belong to one concrete workspace and are shared with every workspace member. Existing workspace access controls authorize reads; existing write roles authorize create, edit, complete, restore, delete, and confirmed clear-completed operations. `all` and legacy scope without a concrete workspace are read-only/unavailable. Viewer UI contains no mutation controls.
 
-Item text is normalized, rejects control characters, and is limited to 200 characters. Product events record only bounded action/result metadata and never item text. Personal-workspace rows are removed by workspace cascade during account deletion. Shared-workspace rows remain, while matching `created_by` and `updated_by` attribution is set to `NULL` before the member row is removed.
+Item text is normalized, rejects control characters, and is limited to 200 characters. Product events record only bounded action/result metadata and never item text. Personal-workspace rows are removed by workspace cascade during account deletion. Non-personal workspace rows remain, while only matching `created_by` and `updated_by` attribution is set to `NULL` before the member row is removed, regardless of whether another active member exists. Other users' actor IDs are preserved.
 
 ## What's New
 
-What's New candidates are immutable code-defined release metadata, not remotely supplied HTML. Each candidate has a stable ID, family, release date, Russian title/description, and a typed action. Allowed targets are `OPEN_HOME_SETTINGS`, `OPEN_SHOPPING_LIST`, `OPEN_PLANS`, `OPEN_PROFILE`, `OPEN_ANALYTICS`, and `OPEN_DETAIL`; the client maps these values to existing navigation only.
+What's New candidates are immutable code-defined release metadata, not remotely supplied HTML. Each candidate has a stable ID, family, release date, Russian title/description, a typed action, and optional plain-text detail copy. Allowed targets are `OPEN_HOME_SETTINGS`, `OPEN_SHOPPING_LIST`, `OPEN_PLANS`, `OPEN_PROFILE`, `OPEN_ANALYTICS`, and `OPEN_DETAIL`; navigation targets map only to existing product surfaces, while `OPEN_DETAIL` opens the existing Bottom Sheet and never accepts HTML, executable content, URLs, or remote copy.
 
 The resolver excludes dismissed candidates and uses an explicit half-open freshness interval: a card is eligible while `0 <= age_in_days < 21`, and expires at age 21. It then keeps the newest candidate in each family, sorts newest first, and returns at most five. Dismissal is user-scoped. The carousel moves only through swipe, keyboard arrows, card/CTA activation, or dots; it never advances automatically. The first release includes Custom Home, Shopping List, and Plans 2.0 cards.
 
@@ -105,6 +105,8 @@ The resolver accepts a candidate collection before applying eligibility and rank
 Product analytics uses the existing outbox and bounded event properties for customization open/save, shopping mutations, and announcement impression/open/dismiss actions. Shopping text, financial amounts, operation descriptions, and arbitrary target data are never included.
 
 Permanent release rule: every future user-visible release must add or deliberately update a code-defined What's New candidate in the same pull request. Reuse a family only when the new card supersedes an older message. Candidate copy must contain no personal data, financial values, secrets, raw user text, or arbitrary navigation URL.
+
+`released_on` is the date a candidate becomes user-visible in production, not the date its code is written. When several unreleased pull requests are deployed together later, the final release pull request must adjust those candidates to the actual production visibility date. Already released old cards are never renewed automatically.
 
 ## PR 2 storage and privacy
 

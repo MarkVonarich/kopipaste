@@ -264,7 +264,7 @@ export const api = {
   homePreferences: () => apiFetch<HomePreferences>('/miniapp/api/profile/home'),
   saveHomePreferences: (order: HomePreferences['order'], enabled: HomePreferences['enabled']) =>
     apiFetch<HomePreferences>('/miniapp/api/profile/home', { method: 'POST', body: JSON.stringify({ order, enabled }) }),
-  shoppingItems: (workspaceId: number | 'all' | null) => apiFetch<{ items: ShoppingItem[]; read_only: boolean; note?: string }>(`/miniapp/api/shopping${query({ workspace_id: workspaceId })}`),
+  shoppingItems: (workspaceId: number | 'all' | null) => apiFetch<{ items: ShoppingItem[]; read_only: boolean; active_count?: number; completed_count?: number; note?: string }>(`/miniapp/api/shopping${query({ workspace_id: workspaceId })}`),
   createShoppingItem: (workspace_id: number | 'all' | null, text: string) => apiFetch<{ item: ShoppingItem }>('/miniapp/api/shopping', { method: 'POST', body: JSON.stringify({ workspace_id, text }) }),
   updateShoppingItem: (id: number, workspace_id: number | 'all' | null, payload: { text?: string; completed?: boolean }) => apiFetch<{ item: ShoppingItem }>(`/miniapp/api/shopping/${id}`, { method: 'PATCH', body: JSON.stringify({ workspace_id, ...payload }) }),
   deleteShoppingItem: (id: number, workspace_id: number | 'all' | null) => apiFetch<{ deleted: boolean }>(`/miniapp/api/shopping/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),

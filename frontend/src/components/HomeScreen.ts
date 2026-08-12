@@ -309,7 +309,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
       )}
       ${recent.length ? TransactionList(recent.slice(0, 3), 'За период операций нет.') : EmptyPanel('Операций пока нет', 'Добавьте первый расход или доход, чтобы увидеть историю здесь.', emptyAction)}
       <button class="button text" data-action="go-operations">Все операции</button></div>`,
-    whats_new: announcement ? `<article class="announcement-card" data-carousel="announcement" data-announcement-target="${esc(announcement.action.type)}" tabindex="0" aria-label="Новое в КопиPaste">
+    whats_new: announcement ? `<article class="announcement-card" data-carousel="announcement" data-index="${announcementIndex}" data-announcement-target="${esc(announcement.action.type)}" tabindex="0" aria-label="Новое в КопиPaste">
       <button class="announcement-dismiss" type="button" data-action="announcement-dismiss" data-id="${esc(announcement.id)}" aria-label="Скрыть">×</button>
       <span class="announcement-accent" aria-hidden="true">${icon(announcement.action.type === 'OPEN_PLANS' ? 'plans' : announcement.action.type === 'OPEN_PROFILE' || announcement.action.type === 'OPEN_HOME_SETTINGS' ? 'profile' : 'home')}</span>
       <span class="eyebrow">${announcement.kind === 'feature' ? 'Новая возможность' : announcement.kind === 'improvement' ? 'Улучшение' : announcement.kind === 'fix' ? 'Исправление' : 'Новое в КопиPaste'}</span>

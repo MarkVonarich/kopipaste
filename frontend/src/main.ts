@@ -5,7 +5,7 @@ import { decimalStringToVisualPoint } from './chartDecimal';
 import { formatMoneyString, normalizeMoneyText } from './money';
 import { checkHomeScreenStatus, getTelegramWebApp, hapticDestructive, hapticError, hapticSelection, hapticSuccess, initTelegramShell, prepareTelegramLaunch, requestAddToHomeScreen } from './telegram';
 import { initialState, persistState, pickInitialWorkspace } from './state';
-import type { AnnouncementActionType, AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, HomeWidgetKey, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ShoppingItem, ThemeMode, Workspace } from './types';
+import type { Announcement, AppState, BudgetLimit, CategoryBudgetGroup, CategoryOption, GlobalFinancialFilters, Goal, HomeWidgetKey, Insight, InsightActionType, Operation, OperationType, PeriodKey, Reminder, ShoppingItem, ThemeMode, Workspace } from './types';
 import { AppShell } from './components/AppShell';
 import { BottomNavigation } from './components/BottomNavigation';
 import { BottomSheet } from './components/BottomSheet';
@@ -32,6 +32,9 @@ let plans: PlansResponse | null = null;
 let profile: Awaited<ReturnType<typeof api.profile>> | null = null;
 let shoppingItems: ShoppingItem[] = [];
 let shoppingReadOnly = true;
+let shoppingNote = '';
+let shoppingActiveCount = 0;
+let shoppingCompletedCount = 0;
 let selectedOperation: Operation | null = null;
 let selectedGoal: Goal | null = null;
 let selectedLimit: BudgetLimit | null = null;
@@ -39,6 +42,7 @@ let selectedReminder: Reminder | null = null;
 let selectedCategoryBudget: CategoryBudgetGroup | null = null;
 let selectedCategory: CategoryOption | null = null;
 let selectedInsight: Insight | null = null;
+let selectedAnnouncement: Announcement | null = null;
 let categoryOptions: CategoryOption[] = [];
 let globalCategoryOptions: CategoryOption[] = [];
 let toastTimer = 0;
@@ -286,18 +290,55 @@ function setHomeCarouselIndex(kind: 'challenge' | 'goal' | 'limit' | 'reminder' 
   void api.track(`mini_app_${eventKind}_carousel_changed`, { direction, position: String(clamped + 1), total: String(total), source: 'mini_app' });
 }
 
+function currentAnnouncement(): Announcement | null {
+  const items = overview?.announcements || [];
+  if (!items.length) return null;
+  const index = Math.max(0, Math.min(state.announcementIndex || 0, items.length - 1));
+  return items[index] || null;
+}
+
+function trackVisibleAnnouncement(): void {
+  if (state.tab !== 'home') return;
+  if (!app.querySelector('[data-carousel="announcement"]')) return;
+  const announcement = currentAnnouncement();
+  if (!announcement || impressedAnnouncementIds.has(announcement.id)) return;
+  impressedAnnouncementIds.add(announcement.id);
+  void api.track('mini_app_announcement_impression', {
+    update_key: announcement.id,
+    update_kind: announcement.kind,
+    source: 'mini_app',
+  }).catch(() => impressedAnnouncementIds.delete(announcement.id));
+}
+
+function applyShoppingResponse(response: Awaited<ReturnType<typeof api.shoppingItems>>): void {
+  shoppingItems = response.items;
+  shoppingReadOnly = response.read_only;
+  shoppingNote = response.note || '';
+  shoppingActiveCount = Number(response.active_count || 0);
+  shoppingCompletedCount = Number(response.completed_count || 0);
+}
+
+async function refreshShoppingItems(): Promise<void> {
+  applyShoppingResponse(await api.shoppingItems(state.workspaceId));
+  syncShoppingOverview();
+}
+
 async function openShoppingList(): Promise<void> {
   state.sheet = 'shopping-list';
   state.saveError = undefined;
   state.confirmClearShopping = false;
+  state.shoppingEditId = undefined;
+  state.shoppingEditText = undefined;
   try {
     const response = await api.shoppingItems(state.workspaceId);
-    shoppingItems = response.items;
-    shoppingReadOnly = response.read_only;
+    applyShoppingResponse(response);
     await api.track('mini_app_shopping_opened', { source: 'mini_app', result: response.read_only ? 'read_only' : 'write' });
   } catch (error) {
     shoppingItems = [];
     shoppingReadOnly = true;
+    shoppingNote = '';
+    shoppingActiveCount = 0;
+    shoppingCompletedCount = 0;
     state.saveError = safeError(error);
   }
   render();
@@ -309,10 +350,10 @@ function syncShoppingOverview(): void {
     ...overview,
     shopping: {
       items: shoppingItems.slice(0, 5),
-      active_count: shoppingItems.filter((item) => !item.completed).length,
-      completed_count: shoppingItems.filter((item) => item.completed).length,
+      active_count: shoppingActiveCount,
+      completed_count: shoppingCompletedCount,
       read_only: shoppingReadOnly,
-      available: state.workspaceId !== 'all' && state.workspaceId !== null,
+      available: !shoppingNote && state.workspaceId !== 'all' && state.workspaceId !== null,
     },
   };
 }
@@ -329,7 +370,16 @@ function openHomeSettings(): void {
   render();
 }
 
-async function openAnnouncementTarget(target: AnnouncementActionType): Promise<void> {
+async function openAnnouncementTarget(announcement: Announcement): Promise<void> {
+  const target = announcement.action.type;
+  if (target === 'OPEN_DETAIL') {
+    if (!announcement.detail?.trim()) return;
+    selectedAnnouncement = announcement;
+    state.sheet = 'announcement-detail';
+    state.saveError = undefined;
+    render();
+    return;
+  }
   if (target === 'OPEN_HOME_SETTINGS') {
     openHomeSettings();
     return;
@@ -340,9 +390,26 @@ async function openAnnouncementTarget(target: AnnouncementActionType): Promise<v
   }
   state.sheet = null;
   if (target === 'OPEN_PROFILE') state.tab = 'profile';
-  else if (target === 'OPEN_ANALYTICS' || target === 'OPEN_DETAIL') state.tab = 'analytics';
-  else state.tab = 'plans';
+  else if (target === 'OPEN_ANALYTICS') state.tab = 'analytics';
+  else if (target === 'OPEN_PLANS') state.tab = 'plans';
+  else return;
   await loadScreen();
+}
+
+async function openCurrentAnnouncement(): Promise<void> {
+  const announcement = currentAnnouncement();
+  if (!announcement) return;
+  void api.track('mini_app_announcement_opened', {
+    action_type: announcement.action.type,
+    update_key: announcement.id,
+    update_kind: announcement.kind,
+    source: 'mini_app',
+  });
+  await openAnnouncementTarget(announcement);
+}
+
+function announcementKindLabel(kind: Announcement['kind']): string {
+  return kind === 'feature' ? 'Новая возможность' : kind === 'improvement' ? 'Улучшение' : kind === 'fix' ? 'Исправление' : 'Новое в КопиPaste';
 }
 
 function renderSheet(): string {
@@ -364,6 +431,9 @@ function renderSheet(): string {
   if (state.sheet === 'insight-detail' && selectedInsight) {
     return BottomSheet('Инсайт', InsightDetail(selectedInsight, state.saving, state.saveError));
   }
+  if (state.sheet === 'announcement-detail' && selectedAnnouncement?.detail?.trim()) {
+    return BottomSheet(selectedAnnouncement.title, `<div class="detail-grid announcement-detail"><span class="eyebrow">${esc(announcementKindLabel(selectedAnnouncement.kind))}</span><p>${esc(selectedAnnouncement.detail)}</p></div>`);
+  }
   if (state.sheet === 'home-settings') {
     const preferences = profile?.home_preferences || (overview?.home_widgets && overview.home_preferences ? { widgets: overview.home_widgets, ...overview.home_preferences } : null);
     if (!preferences) return BottomSheet('Настройка главной', '<p class="caption">Настройки временно недоступны.</p>');
@@ -376,7 +446,7 @@ function renderSheet(): string {
     ));
   }
   if (state.sheet === 'shopping-list') {
-    return BottomSheet('Список покупок', ShoppingList(shoppingItems, shoppingReadOnly, state.saving, Boolean(state.confirmClearShopping), state.saveError));
+    return BottomSheet('Список покупок', ShoppingList(shoppingItems, shoppingReadOnly, state.saving, Boolean(state.confirmClearShopping), state.saveError, shoppingNote, state.shoppingEditId, state.shoppingEditText));
   }
   if (!state.sheet && !selectedOperation) return '';
   if (state.sheet === 'goal-create') {
@@ -531,6 +601,7 @@ function render(): void {
   wireEvents();
   syncGoalScheduleFields();
   renderCharts();
+  if (!state.loading && !state.error && state.tab === 'home') trackVisibleAnnouncement();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
     if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
@@ -604,11 +675,8 @@ async function loadScreen(): Promise<void> {
         impressedInsightIds.add(impressionKey);
         void api.insightImpression(insight.id, state.workspaceId).catch(() => impressedInsightIds.delete(impressionKey));
       }
-      for (const announcement of overview.announcements || []) {
-        if (impressedAnnouncementIds.has(announcement.id)) continue;
-        impressedAnnouncementIds.add(announcement.id);
-        void api.track('mini_app_announcement_impression', { update_key: announcement.id, update_kind: announcement.kind, source: 'mini_app' });
-      }
+      const announcementTotal = overview.announcements?.length || 0;
+      state.announcementIndex = announcementTotal ? Math.min(state.announcementIndex || 0, announcementTotal - 1) : 0;
     }
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
@@ -801,6 +869,7 @@ function closeSheet(): void {
   selectedCategoryBudget = null;
   selectedCategory = null;
   selectedInsight = null;
+  selectedAnnouncement = null;
   state.selectedWorkspaceId = undefined;
   state.saveError = undefined;
   state.saving = false;
@@ -818,6 +887,8 @@ function closeSheet(): void {
   state.confirmLimitDeleteId = undefined;
   state.confirmGoalDeleteId = undefined;
   state.formDraft = undefined;
+  state.shoppingEditId = undefined;
+  state.shoppingEditText = undefined;
   render();
 }
 
@@ -1223,9 +1294,7 @@ function wireEvents(): void {
       }
       if (event.key === 'Enter' && kind === 'announcement') {
         event.preventDefault();
-        const target = node.dataset.announcementTarget as AnnouncementActionType;
-        void api.track('mini_app_announcement_opened', { action_type: target, source: 'mini_app' });
-        void openAnnouncementTarget(target);
+        void openCurrentAnnouncement();
       }
     });
     node.addEventListener('pointerdown', (event) => {
@@ -1271,15 +1340,12 @@ function wireEvents(): void {
     button.addEventListener('click', openHomeSettings);
   });
   app.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.addEventListener('click', async (event) => {
-    const target = (event.currentTarget as HTMLButtonElement).dataset.target as AnnouncementActionType;
-    await api.track('mini_app_announcement_opened', { action_type: target, source: 'mini_app' });
-    await openAnnouncementTarget(target);
+    event.stopPropagation();
+    await openCurrentAnnouncement();
   });
   app.querySelector<HTMLElement>('[data-announcement-target]')?.addEventListener('click', async (event) => {
     if ((event.currentTarget as HTMLElement).dataset.suppressClick === 'true' || (event.target as HTMLElement).closest('button')) return;
-    const target = (event.currentTarget as HTMLElement).dataset.announcementTarget as AnnouncementActionType;
-    await api.track('mini_app_announcement_opened', { action_type: target, source: 'mini_app' });
-    await openAnnouncementTarget(target);
+    await openCurrentAnnouncement();
   });
   app.querySelector<HTMLButtonElement>('[data-action="announcement-dismiss"]')?.addEventListener('click', async (event) => {
     const id = (event.currentTarget as HTMLButtonElement).dataset.id;
@@ -1287,7 +1353,7 @@ function wireEvents(): void {
     try {
       await api.dismissAnnouncement(id);
       if (overview) overview = { ...overview, announcements: (overview.announcements || []).filter((item) => item.id !== id) };
-      state.announcementIndex = 0;
+      state.announcementIndex = Math.min(state.announcementIndex || 0, Math.max(0, (overview?.announcements?.length || 0) - 1));
       render();
     } catch (error) {
       state.error = safeError(error);
@@ -1303,10 +1369,7 @@ function wireEvents(): void {
     render();
     try {
       await api.createShoppingItem(state.workspaceId, text);
-      const response = await api.shoppingItems(state.workspaceId);
-      shoppingItems = response.items;
-      shoppingReadOnly = response.read_only;
-      syncShoppingOverview();
+      await refreshShoppingItems();
       state.saving = false;
       render();
     } catch (error) {
@@ -1321,9 +1384,8 @@ function wireEvents(): void {
       state.saving = true;
       render();
       try {
-        const response = await api.updateShoppingItem(Number(button.dataset.id), state.workspaceId, { completed: button.dataset.completed !== 'true' });
-        shoppingItems = shoppingItems.map((item) => item.id === response.item.id ? response.item : item);
-        syncShoppingOverview();
+        await api.updateShoppingItem(Number(button.dataset.id), state.workspaceId, { completed: button.dataset.completed !== 'true' });
+        await refreshShoppingItems();
         state.saving = false;
         render();
       } catch (error) {
@@ -1340,8 +1402,7 @@ function wireEvents(): void {
       render();
       try {
         await api.deleteShoppingItem(Number(button.dataset.id), state.workspaceId);
-        shoppingItems = shoppingItems.filter((item) => item.id !== Number(button.dataset.id));
-        syncShoppingOverview();
+        await refreshShoppingItems();
         state.saving = false;
         render();
       } catch (error) {
@@ -1352,25 +1413,49 @@ function wireEvents(): void {
     });
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="shopping-edit"]').forEach((button) => {
-    button.addEventListener('click', async () => {
+    button.addEventListener('click', () => {
       const item = shoppingItems.find((entry) => entry.id === Number(button.dataset.id));
       if (!item || state.saving) return;
-      const text = window.prompt('Изменить покупку', item.text)?.trim();
-      if (!text || text === item.text) return;
-      state.saving = true;
+      state.shoppingEditId = item.id;
+      state.shoppingEditText = item.text;
+      state.saveError = undefined;
       render();
-      try {
-        const response = await api.updateShoppingItem(item.id, state.workspaceId, { text });
-        shoppingItems = shoppingItems.map((entry) => entry.id === item.id ? response.item : entry);
-        syncShoppingOverview();
-        state.saving = false;
-        render();
-      } catch (error) {
-        state.saving = false;
-        state.saveError = safeError(error);
-        render();
-      }
     });
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="shopping-edit-cancel"]')?.addEventListener('click', () => {
+    state.shoppingEditId = undefined;
+    state.shoppingEditText = undefined;
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLFormElement>('form[data-action="shopping-edit-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    const item = shoppingItems.find((entry) => entry.id === Number(form.dataset.id));
+    const text = String(new FormData(form).get('text') || '').trim();
+    if (!item || !text || state.saving) return;
+    if (text === item.text) {
+      state.shoppingEditId = undefined;
+      state.shoppingEditText = undefined;
+      render();
+      return;
+    }
+    state.shoppingEditText = text;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.updateShoppingItem(item.id, state.workspaceId, { text });
+      await refreshShoppingItems();
+      state.shoppingEditId = undefined;
+      state.shoppingEditText = undefined;
+      state.saving = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
   });
   app.querySelector<HTMLButtonElement>('[data-action="shopping-clear"]')?.addEventListener('click', () => {
     state.confirmClearShopping = true;
@@ -1386,8 +1471,7 @@ function wireEvents(): void {
     render();
     try {
       await api.clearCompletedShoppingItems(state.workspaceId);
-      shoppingItems = shoppingItems.filter((item) => !item.completed);
-      syncShoppingOverview();
+      await refreshShoppingItems();
       state.saving = false;
       state.confirmClearShopping = false;
       render();

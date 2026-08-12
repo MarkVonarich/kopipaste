@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { HomeScreen } from '../src/components/HomeScreen';
 import { HomeSettingsForm } from '../src/components/HomeSettings';
 import { ShoppingList } from '../src/components/ShoppingList';
+import mainSource from '../src/main.ts?raw';
 import type { HomePreferences } from '../src/types';
 
 const widgets: HomePreferences['widgets'] = [
@@ -89,5 +90,22 @@ describe('Product Evolution v3 PR2', () => {
     expect(html).toContain('Куплено');
     expect(html).toContain('&lt;script&gt;');
     expect(html).not.toContain('<script>');
+  });
+
+  it('uses inline shopping edit controls without a browser prompt', () => {
+    const item = { id: 1, workspace_id: 10, text: '<b>Молоко</b>', completed: false, created_at: '2026-08-11', updated_at: '2026-08-11' };
+    const html = ShoppingList([item], false, false, false, '', '', 1, item.text);
+
+    expect(html).toContain('data-action="shopping-edit-save"');
+    expect(html).toContain('maxlength="200"');
+    expect(html).toContain('&lt;b&gt;Молоко&lt;/b&gt;');
+    expect(mainSource).not.toContain('window.prompt');
+  });
+
+  it('shows a concrete-workspace note instead of generic read-only copy', () => {
+    const html = ShoppingList([], true, false, false, '', 'Выберите одно пространство для списка покупок.');
+
+    expect(html).toContain('Выберите одно пространство для списка покупок.');
+    expect(html).not.toContain('Список доступен только для чтения.');
   });
 });

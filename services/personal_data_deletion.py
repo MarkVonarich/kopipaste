@@ -103,6 +103,25 @@ def _personal_workspace_ids(cur, user_id: int) -> list[int]:
     return [int(r[0]) for r in cur.fetchall()]
 
 
+def _anonymize_shared_shopping_attribution(cur, user_id: int) -> int:
+    shopping_columns = _table_columns(cur, "shopping_items")
+    if not {"workspace_id", "created_by", "updated_by"} <= shopping_columns or not _table_exists(cur, "workspaces"):
+        return 0
+    cur.execute(
+        """
+        UPDATE public.shopping_items i
+           SET created_by=CASE WHEN i.created_by=%s THEN NULL ELSE i.created_by END,
+               updated_by=CASE WHEN i.updated_by=%s THEN NULL ELSE i.updated_by END
+          FROM public.workspaces w
+         WHERE i.workspace_id=w.id
+           AND w.kind<>'personal'
+           AND (i.created_by=%s OR i.updated_by=%s)
+        """,
+        (user_id, user_id, user_id, user_id),
+    )
+    return int(cur.rowcount)
+
+
 def history_period_bounds(period: str, today: date | None = None) -> tuple[date | None, date | None]:
     today = today or date.today()
     if period == "today":
@@ -319,22 +338,7 @@ def delete_user_data(user_id: int) -> DeletionResult:
                     )
                     anonymized = cur.rowcount
 
-            shopping_columns = _table_columns(cur, "shopping_items")
-            if {"workspace_id", "created_by", "updated_by"} <= shopping_columns and _table_exists(cur, "workspace_members"):
-                cur.execute(
-                    """
-                    UPDATE public.shopping_items i
-                       SET created_by=CASE WHEN i.created_by=%s THEN NULL ELSE i.created_by END,
-                           updated_by=CASE WHEN i.updated_by=%s THEN NULL ELSE i.updated_by END
-                      FROM public.workspace_members m
-                     WHERE i.workspace_id=m.workspace_id
-                       AND (i.created_by=%s OR i.updated_by=%s)
-                       AND m.user_id<>%s
-                       AND m.status='active'
-                    """,
-                    (user_id, user_id, user_id, user_id, user_id),
-                )
-                anonymized_shopping = int(cur.rowcount)
+            anonymized_shopping = _anonymize_shared_shopping_attribution(cur, user_id)
 
             for table, where in PERSONAL_TABLES.items():
                 columns = _table_columns(cur, table)

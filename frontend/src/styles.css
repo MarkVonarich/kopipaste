@@ -1912,6 +1912,19 @@ canvas {
   overflow-wrap: anywhere;
 }
 
+.shopping-edit-form {
+  flex-wrap: wrap;
+}
+
+.shopping-edit-form .input {
+  min-width: min(220px, 100%);
+  flex: 1 1 220px;
+}
+
+.shopping-edit-form .shopping-item-actions {
+  flex: 0 1 auto;
+}
+
 .shopping-item.completed > span {
   color: var(--text-secondary);
   text-decoration: line-through;

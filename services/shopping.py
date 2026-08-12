@@ -35,6 +35,13 @@ class ShoppingItem:
         }
 
 
+@dataclass(frozen=True)
+class ShoppingSummary:
+    items: list[ShoppingItem]
+    active_count: int
+    completed_count: int
+
+
 def normalize_item_text(value: object) -> str:
     if not isinstance(value, str):
         raise ShoppingError("bad_item_text")
@@ -63,6 +70,24 @@ def list_shopping_items(workspace_id: int, *, limit: int = 100) -> list[Shopping
         (int(workspace_id), max(1, min(int(limit), 200))),
     )
     return [_item(row) for row in rows]
+
+
+def shopping_summary(workspace_id: int, *, preview_limit: int = 5) -> ShoppingSummary:
+    rows = pg_fetchall(
+        """
+        SELECT COUNT(*) FILTER (WHERE completed_at IS NULL),
+               COUNT(*) FILTER (WHERE completed_at IS NOT NULL)
+          FROM public.shopping_items
+         WHERE workspace_id=%s
+        """,
+        (int(workspace_id),),
+    )
+    active_count, completed_count = rows[0] if rows else (0, 0)
+    return ShoppingSummary(
+        items=list_shopping_items(workspace_id, limit=preview_limit),
+        active_count=int(active_count or 0),
+        completed_count=int(completed_count or 0),
+    )
 
 
 def create_shopping_item(workspace_id: int, actor_user_id: int, text: object) -> ShoppingItem:

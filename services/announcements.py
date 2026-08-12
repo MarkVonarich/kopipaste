@@ -28,6 +28,7 @@ class Announcement:
     description: str
     action_type: str
     action_label: str
+    detail: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -37,6 +38,7 @@ class Announcement:
             "released_on": self.released_on,
             "title": self.title,
             "description": self.description,
+            "detail": self.detail,
             "action": {"type": self.action_type, "label": self.action_label},
         }
 
@@ -76,8 +78,12 @@ def resolve_announcements(user_id: int, *, today: date | None = None) -> list[di
     return resolve_announcement_candidates(ANNOUNCEMENTS, dismissed, today=today)
 
 
+def announcement_candidate(candidate_id: str) -> Announcement | None:
+    return next((item for item in ANNOUNCEMENTS if item.id == candidate_id), None)
+
+
 def dismiss_announcement(user_id: int, candidate_id: str) -> bool:
-    known = next((item for item in ANNOUNCEMENTS if item.id == candidate_id), None)
+    known = announcement_candidate(candidate_id)
     if known is None:
         return False
     conn = get_conn()

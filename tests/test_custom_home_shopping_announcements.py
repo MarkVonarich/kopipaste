@@ -4,9 +4,9 @@ import pytest
 
 from miniapp.api import MiniAppAPI, MiniAppError
 from miniapp.api import TransactionFilters
-from services.announcements import Announcement, resolve_announcements
+from services.announcements import Announcement, resolve_announcement_candidates, resolve_announcements
 from services.home_preferences import HOME_WIDGET_KEYS, home_widget_registry, reconcile_home_preferences, validate_home_preferences
-from services.shopping import ShoppingItem, normalize_item_text
+from services.shopping import ShoppingItem, ShoppingSummary, normalize_item_text, shopping_summary
 
 
 def test_home_widget_registry_is_canonical_and_reconciliation_is_forward_compatible():
@@ -119,6 +119,40 @@ def test_announcement_dismissal_is_user_scoped_on_reload(monkeypatch):
     assert "custom-home-v1" in {item["id"] for item in resolve_announcements(2, today=date(2026, 8, 11))}
 
 
+def test_announcement_dismiss_event_includes_safe_candidate_metadata(monkeypatch):
+    api = MiniAppAPI()
+    candidate = Announcement("fix-v1", "fix", "fix", date(2026, 8, 11), "Fix", "Summary", "OPEN_DETAIL", "Details", "Исправили.")
+    events = []
+    monkeypatch.setattr(api, "_check_write_rate", lambda *_args: None)
+    monkeypatch.setattr(api, "_track", lambda _req, name, **kwargs: events.append((name, kwargs)))
+    monkeypatch.setattr("miniapp.api.announcement_candidate", lambda *_args: candidate)
+    monkeypatch.setattr("miniapp.api.dismiss_announcement", lambda *_args: True)
+
+    api.dismiss_announcement(api.request(42), candidate.id)
+
+    assert events == [("mini_app_announcement_dismissed", {"properties": {"result": "success", "source": "mini_app", "update_key": "fix-v1", "update_kind": "fix"}})]
+
+
+def test_open_detail_candidate_serializes_safe_plain_detail():
+    candidate = Announcement(
+        "fix-v1",
+        "fix",
+        "fix",
+        date(2026, 8, 11),
+        "Исправление",
+        "Короткое описание",
+        "OPEN_DETAIL",
+        "Подробнее",
+        "Исправили отображение списка.",
+    )
+
+    visible = resolve_announcement_candidates((candidate,), set(), today=date(2026, 8, 11))
+
+    assert visible[0]["kind"] == "fix"
+    assert visible[0]["detail"] == "Исправили отображение списка."
+    assert visible[0]["action"]["type"] == "OPEN_DETAIL"
+
+
 def test_shopping_text_is_normalized_and_bounded():
     assert normalize_item_text("  Молоко   и хлеб ") == "Молоко и хлеб"
     with pytest.raises(ValueError):
@@ -171,13 +205,65 @@ def test_shopping_reads_are_bounded_and_workspace_isolated(monkeypatch):
     assert "WHERE workspace_id=%s" in calls[0][0]
 
 
+def test_shopping_summary_counts_full_list_and_keeps_preview_bounded(monkeypatch):
+    now = datetime.now(timezone.utc)
+    preview_rows = [(item_id, 10, f"Item {item_id}", None, now, now) for item_id in range(1, 6)]
+    calls = []
+
+    def _fetch(sql, params):
+        calls.append((sql, params))
+        return [(12, 4)] if "COUNT(*) FILTER" in sql else preview_rows
+
+    monkeypatch.setattr("services.shopping.pg_fetchall", _fetch)
+
+    summary = shopping_summary(10, preview_limit=5)
+
+    assert summary.active_count == 12
+    assert summary.completed_count == 4
+    assert len(summary.items) == 5
+    assert calls[0][1] == (10,)
+    assert calls[1][1] == (10, 5)
+    assert all("period" not in sql.lower() and "category" not in sql.lower() and "currency" not in sql.lower() for sql, _params in calls)
+
+
+def test_home_shopping_uses_full_counts_and_ignores_financial_filters(monkeypatch):
+    api = MiniAppAPI()
+    tx = TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 11), "current_month", "expense", "Food", "workspace_id=%s", (10,))
+    now = datetime.now(timezone.utc)
+    items = [ShoppingItem(item_id, 10, f"Item {item_id}", None, now, now) for item_id in range(1, 6)]
+    calls = []
+    monkeypatch.setattr(api, "_transaction_filters", lambda *_args: tx)
+    monkeypatch.setattr(api, "operations", lambda *_args: {"data": {"items": []}})
+    monkeypatch.setattr(api, "_home_challenges", lambda *_args: [])
+    monkeypatch.setattr(api, "_home_focus_items", lambda *_args: [])
+    monkeypatch.setattr(api, "_home_reminders", lambda *_args: [])
+    monkeypatch.setattr(api, "_home_insights", lambda *_args: [])
+    monkeypatch.setattr(api, "_workspace_rows", lambda *_args: [{"workspace_id": 10, "role": "member"}])
+    monkeypatch.setattr("miniapp.api.pg_fetchall", lambda *_args: [])
+    monkeypatch.setattr("miniapp.api.get_user_currency", lambda *_args: "RUB")
+    monkeypatch.setattr("miniapp.api.get_home_preferences", lambda *_args: {"order": [], "enabled": []})
+    monkeypatch.setattr("miniapp.api.resolve_announcements", lambda *_args: [])
+    monkeypatch.setattr(
+        "miniapp.api.shopping_summary",
+        lambda workspace_id, **kwargs: calls.append((workspace_id, kwargs)) or ShoppingSummary(items, 12, 4),
+    )
+
+    data = api.overview(api.request(42), {"workspace_id": 10, "period": "current_month", "operation_type": "expense", "category": "Food"})["data"]
+
+    assert data["shopping"]["active_count"] == 12
+    assert data["shopping"]["completed_count"] == 4
+    assert len(data["shopping"]["items"]) == 5
+    assert calls == [(10, {"preview_limit": 5})]
+
+
 def test_all_workspace_scope_never_merges_shopping_lists(monkeypatch):
     api = MiniAppAPI()
     monkeypatch.setattr(api, "_read_scope", lambda *_args: ([10, 20], True))
-    monkeypatch.setattr("miniapp.api.list_shopping_items", lambda *_args: (_ for _ in ()).throw(AssertionError("must not query")))
+    monkeypatch.setattr("miniapp.api.shopping_summary", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not query")))
     data = api.shopping_items(api.request(42), {"workspace_id": "all"})["data"]
     assert data["items"] == []
     assert data["read_only"] is True
+    assert data["note"] == "Выберите одно пространство для списка покупок."
 
 
 def test_limits_home_collection_reuses_grouped_budget_read_model(monkeypatch):
@@ -206,7 +292,52 @@ def test_limits_home_collection_reuses_grouped_budget_read_model(monkeypatch):
     assert items[0]["title"] == "Дом"
 
 
-def test_privacy_deletion_declares_user_owned_state_and_shared_anonymization():
+def test_privacy_deletion_anonymizes_shared_shopping_without_second_member(monkeypatch):
+    from services.personal_data_deletion import _anonymize_shared_shopping_attribution
+
+    class Cursor:
+        rowcount = 1
+
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+    cur = Cursor()
+    monkeypatch.setattr("services.personal_data_deletion._table_columns", lambda *_args: {"workspace_id", "created_by", "updated_by"})
+    monkeypatch.setattr("services.personal_data_deletion._table_exists", lambda *_args: True)
+
+    assert _anonymize_shared_shopping_attribution(cur, 42) == 1
+    sql, params = cur.calls[0]
+    assert "FROM public.workspaces w" in sql
+    assert "w.kind<>'personal'" in sql
+    assert "workspace_members" not in sql
+    assert params == (42, 42, 42, 42)
+
+
+def test_privacy_deletion_preserves_other_creator_and_nulls_deleting_updater(monkeypatch):
+    from services.personal_data_deletion import _anonymize_shared_shopping_attribution
+
+    class Cursor:
+        rowcount = 1
+
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
+
+    cur = Cursor()
+    monkeypatch.setattr("services.personal_data_deletion._table_columns", lambda *_args: {"workspace_id", "created_by", "updated_by"})
+    monkeypatch.setattr("services.personal_data_deletion._table_exists", lambda *_args: True)
+
+    _anonymize_shared_shopping_attribution(cur, 42)
+
+    assert "created_by=CASE WHEN i.created_by=%s THEN NULL ELSE i.created_by END" in cur.sql
+    assert "updated_by=CASE WHEN i.updated_by=%s THEN NULL ELSE i.updated_by END" in cur.sql
+    assert cur.params == (42, 42, 42, 42)
+
+
+def test_privacy_deletion_declares_user_owned_state_and_personal_workspace_cascade():
     from services.personal_data_deletion import PERSONAL_TABLES
 
     source = open("/root/bot_finuchet/services/personal_data_deletion.py", encoding="utf-8").read()
@@ -214,6 +345,7 @@ def test_privacy_deletion_declares_user_owned_state_and_shared_anonymization():
     assert PERSONAL_TABLES["user_announcement_state"] == "user_id=%s"
     assert "UPDATE public.shopping_items" in source
     assert "created_by=CASE" in source
+    assert "DELETE FROM public.workspaces WHERE kind='personal' AND owner_user_id=%s" in source
 
 
 def test_migration_uses_workspace_cascade_and_nullable_actor_attribution():

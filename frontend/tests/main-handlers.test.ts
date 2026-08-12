@@ -105,7 +105,7 @@ function analyticsData(currencies: string[], selectedCurrency: string | null = n
   };
 }
 
-function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ workspace_id: 10, name: 'Family', kind: 'group', role: 'member', active: true, read_only: false }]) {
+function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ workspace_id: 10, name: 'Family', kind: 'group', role: 'member', active: true, read_only: false }], homeAnnouncements: any[] = []) {
   const api = {
     bootstrap: vi.fn(async () => ({
       user: { currency: 'RUB', timezone: 'Europe/Moscow' },
@@ -122,6 +122,7 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
       recent_operations: [],
       insights: homeInsights,
       insight: homeInsights[0] || null,
+      announcements: homeAnnouncements,
     })),
     operations: vi.fn(),
     analytics: vi.fn(async (_workspaceId: any, _filters: any) => analyticsData(['RUB'], 'RUB')),
@@ -168,9 +169,15 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     createLimit: vi.fn(async () => ({ limit: plansData.limits[0] })),
     updateLimit: vi.fn(async () => ({ limit: plansData.general_limits[0] })),
     deleteLimit: vi.fn(),
+    shoppingItems: vi.fn(async (): Promise<{ items: any[]; read_only: boolean; active_count: number; completed_count: number; note?: string }> => ({ items: [], read_only: false, active_count: 0, completed_count: 0 })),
+    createShoppingItem: vi.fn(),
+    updateShoppingItem: vi.fn(),
+    deleteShoppingItem: vi.fn(),
+    clearCompletedShoppingItems: vi.fn(),
+    dismissAnnouncement: vi.fn(async (id) => ({ dismissed: true, candidate_id: id })),
     insightImpression: vi.fn(async () => ({ recorded: true })),
     insightFeedback: vi.fn(async (_id, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
-    track: vi.fn(async () => undefined),
+    track: vi.fn(async (_name: string, _properties: Record<string, any> = {}) => undefined),
   };
   vi.doMock('../src/api', () => ({ api, requestId: () => 'request-id' }));
   return api;
@@ -194,6 +201,19 @@ function homeInsight(actions: any[] = [{ type: 'OPEN_MERCHANT', label: 'Посм
     ],
     actions,
     feedback: null,
+  };
+}
+
+function announcement(id: string, action: string = 'OPEN_DETAIL', detail: string | null = 'Исправили отображение списка.') {
+  return {
+    id,
+    family: id,
+    kind: action === 'OPEN_DETAIL' ? 'fix' : 'feature',
+    released_on: '2026-08-11',
+    title: `Update ${id}`,
+    description: 'Короткое описание',
+    detail,
+    action: { type: action, label: 'Открыть' },
   };
 }
 
@@ -229,6 +249,177 @@ describe('main plan handlers', () => {
     vi.restoreAllMocks();
     vi.doUnmock('../src/api');
     delete window.Telegram;
+  });
+
+  it('opens escaped OPEN_DETAIL copy in a sheet, stays on Home, and closes with Telegram Back', async () => {
+    let backHandler: (() => void) | undefined;
+    window.Telegram!.WebApp!.BackButton!.onClick = vi.fn((callback: () => void) => {
+      backHandler = callback;
+    });
+    const candidate = announcement('fix-v1', 'OPEN_DETAIL', '<b>Исправили карточку</b>');
+    const api = installAppMocks([], undefined, [candidate]);
+
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.click();
+    await flush();
+
+    const sheet = document.querySelector<HTMLElement>('[data-sheet]');
+    expect(sheet?.textContent).toContain('Исправление');
+    expect(sheet?.innerHTML).toContain('&lt;b&gt;Исправили карточку&lt;/b&gt;');
+    expect(document.querySelector('[data-tab="home"]')?.getAttribute('aria-current')).toBe('page');
+    expect(api.analytics).not.toHaveBeenCalled();
+
+    backHandler?.();
+    expect(document.querySelector('[data-sheet]')).toBeNull();
+    expect(document.querySelector('[data-tab="home"]')?.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('safely ignores OPEN_DETAIL without usable detail', async () => {
+    const api = installAppMocks([], undefined, [announcement('empty-detail', 'OPEN_DETAIL', null)]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.click();
+    await flush();
+
+    expect(document.querySelector('[data-sheet]')).toBeNull();
+    expect(document.querySelector('[data-tab="home"]')?.getAttribute('aria-current')).toBe('page');
+    expect(api.analytics).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['OPEN_PROFILE', 'profile'],
+    ['OPEN_ANALYTICS', 'analytics'],
+    ['OPEN_PLANS', 'plans'],
+  ])('keeps typed announcement navigation for %s', async (target, tab) => {
+    installAppMocks([], undefined, [announcement(`target-${target}`, target, null)]);
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.click();
+    await flush(8);
+
+    expect(document.querySelector(`[data-tab="${tab}"]`)?.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('keeps Home settings and Shopping List typed announcement targets working', async () => {
+    const api = installAppMocks([], undefined, [announcement('settings', 'OPEN_HOME_SETTINGS', null)]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.click();
+    await flush();
+    expect(document.querySelector('[data-sheet]')?.getAttribute('aria-label')).toBe('Настройка главной');
+
+    document.querySelector<HTMLButtonElement>('[data-action="close-sheet"]')?.click();
+    api.overview.mockResolvedValue({
+      period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' },
+      workspace_scope: 10,
+      aggregation_available: true,
+      totals_by_currency: {},
+      recent_operations: [],
+      announcements: [announcement('shopping', 'OPEN_SHOPPING_LIST', null)],
+    });
+    document.querySelector<HTMLSelectElement>('[data-action="period"]')?.dispatchEvent(new Event('change'));
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.click();
+    await flush();
+    expect(api.shoppingItems).toHaveBeenCalled();
+    expect(document.querySelector('[data-sheet]')?.getAttribute('aria-label')).toBe('Список покупок');
+  });
+
+  it('tracks only visible announcement slides once per session', async () => {
+    const api = installAppMocks([], undefined, [announcement('a'), announcement('b'), announcement('c')]);
+    await import('../src/main');
+    await flush();
+    const impressionIds = () => api.track.mock.calls
+      .filter(([name]) => name === 'mini_app_announcement_impression')
+      .map(([, properties]) => properties?.update_key);
+
+    expect(impressionIds()).toEqual(['a']);
+    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="announcement"][data-index="1"]')?.click();
+    expect(impressionIds()).toEqual(['a', 'b']);
+    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="announcement"][data-index="1"]')?.click();
+    expect(impressionIds()).toEqual(['a', 'b']);
+
+    const slide = document.querySelector<HTMLElement>('[data-carousel="announcement"]')!;
+    const pointerDown = new Event('pointerdown', { bubbles: true });
+    const pointerUp = new Event('pointerup', { bubbles: true });
+    Object.defineProperty(pointerDown, 'clientX', { value: 100 });
+    Object.defineProperty(pointerUp, 'clientX', { value: 20 });
+    slide.dispatchEvent(pointerDown);
+    slide.dispatchEvent(pointerUp);
+    expect(impressionIds()).toEqual(['a', 'b', 'c']);
+
+    document.querySelector<HTMLElement>('[data-carousel="announcement"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    expect(impressionIds()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('does not track an announcement when the Home widget is disabled', async () => {
+    const api = installAppMocks([], undefined, [announcement('hidden')]);
+    api.overview.mockResolvedValue({
+      period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' },
+      workspace_scope: 10,
+      aggregation_available: true,
+      totals_by_currency: {},
+      recent_operations: [],
+      home_widgets: [{ key: 'whats_new', title: 'Новое', description: 'Новости', layout: 'wide', default_enabled: true, default_order: 0 }],
+      home_preferences: { order: ['whats_new'], enabled: [] },
+      announcements: [announcement('hidden')],
+    });
+    await import('../src/main');
+    await flush();
+
+    expect(api.track.mock.calls.some(([name]) => name === 'mini_app_announcement_impression')).toBe(false);
+  });
+
+  it('tracks the next visible slide after dismissing the current announcement', async () => {
+    const api = installAppMocks([], undefined, [announcement('a'), announcement('b')]);
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-dismiss"]')?.click();
+    await flush();
+
+    const impressions = api.track.mock.calls.filter(([name]) => name === 'mini_app_announcement_impression');
+    expect(impressions.map(([, properties]) => properties?.update_key)).toEqual(['a', 'b']);
+    expect(api.dismissAnnouncement).toHaveBeenCalledWith('a');
+  });
+
+  it('edits a shopping item inline and cancel preserves the original text', async () => {
+    const api = installAppMocks();
+    const item = { id: 1, workspace_id: 10, text: 'Молоко', completed: false, created_at: '2026-08-11', updated_at: '2026-08-11' };
+    api.shoppingItems.mockResolvedValue({ items: [item], read_only: false, active_count: 1, completed_count: 0 });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="shopping-open"]')?.click();
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="shopping-edit"]')?.click();
+    const input = document.querySelector<HTMLInputElement>('form[data-action="shopping-edit-save"] input[name="text"]');
+    expect(input?.maxLength).toBe(200);
+    if (input) input.value = 'Хлеб';
+    document.querySelector<HTMLButtonElement>('[data-action="shopping-edit-cancel"]')?.click();
+    expect(document.body.textContent).toContain('Молоко');
+    expect(api.updateShoppingItem).not.toHaveBeenCalled();
+
+    document.querySelector<HTMLButtonElement>('[data-action="shopping-edit"]')?.click();
+    const editForm = document.querySelector<HTMLFormElement>('form[data-action="shopping-edit-save"]')!;
+    editForm.querySelector<HTMLInputElement>('input[name="text"]')!.value = 'Хлеб';
+    editForm.requestSubmit();
+    await flush(8);
+    expect(api.updateShoppingItem).toHaveBeenCalledWith(1, 10, { text: 'Хлеб' });
+  });
+
+  it('preserves the concrete-workspace explanation for all-workspaces shopping', async () => {
+    localStorage.setItem('finuchet-miniapp-state-v1', JSON.stringify({ workspaceId: 'all' }));
+    const api = installAppMocks();
+    api.shoppingItems.mockResolvedValue({ items: [], read_only: true, active_count: 0, completed_count: 0, note: 'Выберите одно пространство для списка покупок.' });
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="shopping-open"]')?.click();
+    await flush();
+
+    expect(document.body.textContent).toContain('Выберите одно пространство для списка покупок.');
+    expect(document.body.textContent).not.toContain('Список доступен только для чтения.');
   });
 
   it('opens general limit edit and delete handlers from general_limits', async () => {

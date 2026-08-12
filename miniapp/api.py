@@ -76,14 +76,14 @@ from services.operations import (
     update_financial_operation,
 )
 from services.product_events import ProductEvent, track_product_event
-from services.announcements import dismiss_announcement, resolve_announcements
+from services.announcements import announcement_candidate, dismiss_announcement, resolve_announcements
 from services.home_preferences import get_home_preferences, home_widget_registry, reconcile_home_preferences, save_home_preferences
 from services.shopping import (
     ShoppingError,
     clear_completed_shopping_items,
     create_shopping_item,
     delete_shopping_item,
-    list_shopping_items,
+    shopping_summary,
     update_shopping_item,
 )
 from services.export_xlsx import build_export_xlsx
@@ -1060,11 +1060,11 @@ class MiniAppAPI:
         if not tx.all_scope and tx.workspace_ids[0] is not None:
             try:
                 workspace_row = next((row for row in self._workspace_rows(req.user_id) if row["workspace_id"] == tx.workspace_ids[0]), None)
-                shopping_items = list_shopping_items(int(tx.workspace_ids[0]), limit=5)
+                summary = shopping_summary(int(tx.workspace_ids[0]), preview_limit=5)
                 shopping = {
-                    "items": [item.as_dict() for item in shopping_items],
-                    "active_count": sum(1 for item in shopping_items if item.completed_at is None),
-                    "completed_count": sum(1 for item in shopping_items if item.completed_at is not None),
+                    "items": [item.as_dict() for item in summary.items],
+                    "active_count": summary.active_count,
+                    "completed_count": summary.completed_count,
                     "read_only": not bool(workspace_row and workspace_row.get("role") in WRITE_ROLES),
                     "available": True,
                 }
@@ -3532,8 +3532,11 @@ class MiniAppAPI:
             return success({"items": [], "read_only": True, "note": "Выберите одно пространство для списка покупок."}, request_id=req.request_id)
         workspace_id = int(workspace_ids[0])
         row = next((item for item in self._workspace_rows(req.user_id) if item["workspace_id"] == workspace_id), None)
+        summary = shopping_summary(workspace_id, preview_limit=100)
         return success({
-            "items": [item.as_dict() for item in list_shopping_items(workspace_id)],
+            "items": [item.as_dict() for item in summary.items],
+            "active_count": summary.active_count,
+            "completed_count": summary.completed_count,
             "read_only": not bool(row and row.get("role") in WRITE_ROLES),
         }, request_id=req.request_id)
 
@@ -3585,9 +3588,13 @@ class MiniAppAPI:
 
     def dismiss_announcement(self, req: MiniAppRequest, candidate_id: str) -> dict:
         self._check_write_rate(req)
+        candidate = announcement_candidate(candidate_id)
         if not dismiss_announcement(req.user_id, candidate_id):
             raise MiniAppError(404, "announcement_not_found", "Объявление не найдено.")
-        self._track(req, "mini_app_announcement_dismissed", properties={"result": "success", "source": "mini_app"})
+        properties = {"result": "success", "source": "mini_app"}
+        if candidate is not None:
+            properties.update({"update_key": candidate.id, "update_kind": candidate.kind})
+        self._track(req, "mini_app_announcement_dismissed", properties=properties)
         return success({"dismissed": True, "candidate_id": candidate_id}, request_id=req.request_id)
 
     def profile(self, req: MiniAppRequest) -> dict:
