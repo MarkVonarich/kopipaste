@@ -255,9 +255,27 @@ def build_report(analytics: dict[str, Any], request: ReportBuildRequest) -> dict
     }
 
 
-def report_ready_kinds(workspace_where_sql: str, workspace_params: tuple[Any, ...], *, today: date) -> set[str]:
+def report_ready_kinds(
+    workspace_where_sql: str,
+    workspace_params: tuple[Any, ...],
+    *,
+    today: date,
+    operation_type: str = "all",
+    category: str | None = None,
+) -> set[str]:
     week_start, week_end, _ = completed_report_period("completed_week", today)
     month_start, month_end, _ = completed_report_period("completed_month", today)
+    scope_filters = []
+    scope_params: list[Any] = []
+    if operation_type in {"expense", "income"}:
+        scope_filters.append("type=%s")
+        scope_params.append("Расходы" if operation_type == "expense" else "Доходы")
+    elif operation_type != "all":
+        raise ValueError("bad_operation_type")
+    if category:
+        scope_filters.append("category=%s")
+        scope_params.append(category)
+    scope_sql = "".join(f"\n           AND {item}" for item in scope_filters)
     rows = pg_fetchall(
         f"""
         SELECT COUNT(*) FILTER (WHERE op_date BETWEEN %s AND %s),
@@ -266,8 +284,9 @@ def report_ready_kinds(workspace_where_sql: str, workspace_params: tuple[Any, ..
          WHERE {workspace_where_sql}
            AND COALESCE(type,'') <> 'noop'
            AND COALESCE(category,'') <> 'Без операций'
+           {scope_sql}
         """,
-        (week_start, week_end, month_start, month_end, *workspace_params),
+        (week_start, week_end, month_start, month_end, *workspace_params, *scope_params),
     )
     week_count, month_count = rows[0] if rows else (0, 0)
     result = set()

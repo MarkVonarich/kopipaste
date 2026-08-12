@@ -455,11 +455,13 @@ async function openAnnouncementTarget(announcement: Announcement): Promise<void>
   if (target === 'OPEN_PROFILE') state.tab = 'profile';
   else if (target === 'OPEN_ANALYTICS') state.tab = 'analytics';
   else if (target === 'OPEN_REPORTS' || target === 'OPEN_REPORT_WEEKLY' || target === 'OPEN_REPORT_MONTHLY') {
+    const currentFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
     state.tab = 'analytics';
     state.analyticsFilters = {
-      ...(state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }),
+      ...currentFilters,
       mode: 'reports',
       reportKind: target === 'OPEN_REPORT_WEEKLY' ? 'completed_week' : target === 'OPEN_REPORT_MONTHLY' ? 'completed_month' : 'selected',
+      reportCurrency: currentFilters.reportCurrency || currentFilters.analyticsCurrency,
     };
   }
   else if (target === 'OPEN_PLANS') state.tab = 'plans';
@@ -675,7 +677,7 @@ function render(): void {
   if (!state.loading && !state.error && state.tab === 'home') trackVisibleAnnouncement();
   const tg = getTelegramWebApp();
   if (tg?.BackButton) {
-    if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || state.reportDrillActive || (state.tab === 'analytics' && state.analyticsFilters?.mode === 'reports') || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
+    if (state.confirmDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation || state.reportReturnContext || (state.tab === 'analytics' && state.analyticsFilters?.mode === 'reports') || (state.tab === 'plans' && state.plansMode === 'goals' && state.plansGoalView === 'archive')) tg.BackButton.show();
     else tg.BackButton.hide();
   }
 }
@@ -992,9 +994,19 @@ function navigateBack(): void {
     render();
     return;
   }
-  if (state.reportDrillActive) {
-    state.reportDrillActive = false;
+  if (state.reportReturnContext) {
+    const context = state.reportReturnContext;
+    state.reportReturnContext = undefined;
     state.operationScope = undefined;
+    state.workspaceId = context.workspaceId;
+    state.search = context.search;
+    setGlobalFilters({ ...context.globalFilters });
+    state.analyticsFilters = {
+      ...(state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }),
+      mode: context.mode,
+      reportKind: context.reportKind,
+      reportCurrency: context.reportCurrency,
+    };
     state.tab = 'analytics';
     void loadScreen();
     return;
@@ -1192,7 +1204,7 @@ function wireEvents(): void {
       const tab = button.dataset.tab as AppState['tab'];
       hapticSelection();
       state.tab = tab;
-      state.reportDrillActive = false;
+      state.reportReturnContext = undefined;
       state.sheet = null;
       selectedOperation = null;
       await api.track('mini_app_tab_opened', { tab });
@@ -1207,10 +1219,12 @@ function wireEvents(): void {
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.addEventListener('click', async () => {
+    const currentFilters = state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' };
     state.analyticsFilters = {
-      ...(state.analyticsFilters || { categoryType: 'expense', dynamicsType: 'both', radarType: 'expense', structureMode: 'category' }),
+      ...currentFilters,
       mode: 'reports',
       reportKind: 'selected',
+      reportCurrency: currentFilters.reportCurrency || currentFilters.analyticsCurrency,
     };
     hapticSelection();
     await loadScreen();
@@ -1225,7 +1239,6 @@ function wireEvents(): void {
     button.addEventListener('click', async () => {
       if (!state.analyticsFilters) return;
       state.analyticsFilters.reportKind = (button.dataset.kind || 'selected') as ReportKind;
-      state.analyticsFilters.reportCurrency = undefined;
       hapticSelection();
       await loadScreen();
     });
@@ -1245,6 +1258,14 @@ function wireEvents(): void {
         return;
       }
       if (!scope.start_date || !scope.end_date || !scope.currency) return;
+      state.reportReturnContext = {
+        workspaceId: state.workspaceId,
+        globalFilters: { ...state.globalFilters },
+        mode: 'reports',
+        reportKind: state.analyticsFilters?.reportKind || report?.kind || 'selected',
+        reportCurrency: state.analyticsFilters?.reportCurrency || report?.selected_currency,
+        search: state.search,
+      };
       if (scope.workspace_id === 'all' || scope.workspace_id === null || typeof scope.workspace_id === 'number') state.workspaceId = scope.workspace_id;
       setGlobalFilters({
         period: 'custom',
@@ -1259,7 +1280,7 @@ function wireEvents(): void {
         merchant_key: scope.merchant_key || undefined,
         scope_category: scope.scope_category || undefined,
       };
-      state.reportDrillActive = true;
+      state.search = '';
       state.tab = 'operations';
       await api.track('report_drilldown_opened', {
         report_kind: report?.kind || 'selected',
@@ -1536,7 +1557,7 @@ function wireEvents(): void {
     const id = (event.currentTarget as HTMLButtonElement).dataset.id;
     if (!id) return;
     try {
-      await api.dismissAnnouncement(id);
+      await api.dismissAnnouncement(id, state.workspaceId);
       if (overview) overview = { ...overview, announcements: (overview.announcements || []).filter((item) => item.id !== id) };
       state.announcementIndex = Math.min(state.announcementIndex || 0, Math.max(0, (overview?.announcements?.length || 0) - 1));
       render();

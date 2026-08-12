@@ -507,7 +507,14 @@ export type AppState = {
   detailOperationId?: number;
   search: string;
   operationScope?: { currency?: string; merchant?: string; merchant_key?: string; category_key?: string; scope_category?: string };
-  reportDrillActive?: boolean;
+  reportReturnContext?: {
+    workspaceId: number | 'all' | null;
+    globalFilters: GlobalFinancialFilters;
+    mode: 'reports';
+    reportKind: ReportKind;
+    reportCurrency?: string;
+    search: string;
+  };
   saving: boolean;
   saveError?: string;
   addIdempotencyKey?: string;

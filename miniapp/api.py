@@ -1069,7 +1069,13 @@ class MiniAppAPI:
             try:
                 announcement_today = user_local_date(req.user_id, None if tx.all_scope else tx.workspace_ids[0])
                 workspace_where, workspace_params = self._workspace_filter_sql(tx.workspace_ids, req.user_id)
-                ready = report_ready_kinds(workspace_where, workspace_params, today=announcement_today)
+                ready = report_ready_kinds(
+                    workspace_where,
+                    workspace_params,
+                    today=announcement_today,
+                    operation_type=tx.operation_type,
+                    category=tx.category,
+                )
                 announcements = resolve_announcements(
                     req.user_id,
                     today=announcement_today,
@@ -3732,10 +3738,15 @@ class MiniAppAPI:
         self._track(req, "mini_app_shopping_completed_cleared", workspace_id=ctx.workspace_id, properties={"result": "success", "total": count, "source": "mini_app"})
         return success({"deleted": count}, request_id=req.request_id)
 
-    def dismiss_announcement(self, req: MiniAppRequest, candidate_id: str) -> dict:
+    def dismiss_announcement(self, req: MiniAppRequest, candidate_id: str, body: dict[str, Any] | None = None) -> dict:
         self._check_write_rate(req)
-        candidate = announcement_candidate(candidate_id)
-        if not dismiss_announcement(req.user_id, candidate_id):
+        workspace_id = None
+        if body and "workspace_id" in body:
+            workspace_ids, all_scope = self._read_scope(req, body.get("workspace_id"))
+            workspace_id = None if all_scope else workspace_ids[0]
+        announcement_today = user_local_date(req.user_id, workspace_id)
+        candidate = announcement_candidate(candidate_id, announcement_today)
+        if not dismiss_announcement(req.user_id, candidate_id, announcement_today):
             raise MiniAppError(404, "announcement_not_found", "Объявление не найдено.")
         properties = {"result": "success", "source": "mini_app"}
         if candidate is not None:

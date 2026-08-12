@@ -289,7 +289,7 @@ export const api = {
   updateShoppingItem: (id: number, workspace_id: number | 'all' | null, payload: { text?: string; completed?: boolean }) => apiFetch<{ item: ShoppingItem }>(`/miniapp/api/shopping/${id}`, { method: 'PATCH', body: JSON.stringify({ workspace_id, ...payload }) }),
   deleteShoppingItem: (id: number, workspace_id: number | 'all' | null) => apiFetch<{ deleted: boolean }>(`/miniapp/api/shopping/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),
   clearCompletedShoppingItems: (workspace_id: number | 'all' | null) => apiFetch<{ deleted: number }>('/miniapp/api/shopping/completed', { method: 'DELETE', body: JSON.stringify({ workspace_id }) }),
-  dismissAnnouncement: (id: string) => apiFetch<{ dismissed: boolean }>(`/miniapp/api/announcements/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: '{}' }),
+  dismissAnnouncement: (id: string, workspaceId: number | 'all' | null) => apiFetch<{ dismissed: boolean }>(`/miniapp/api/announcements/${encodeURIComponent(id)}/dismiss`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   insightImpression: (id: string, workspaceId: number | 'all' | null) =>
     apiFetch<{ recorded: boolean }>(`/miniapp/api/insights/${encodeURIComponent(id)}/impression`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId }) }),
   insightFeedback: (id: string, workspaceId: number | 'all' | null, feedbackType: 'useful' | 'not_useful') =>

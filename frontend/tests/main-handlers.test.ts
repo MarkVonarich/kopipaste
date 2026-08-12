@@ -106,9 +106,14 @@ function analyticsData(currencies: string[], selectedCurrency: string | null = n
 }
 
 function reportData(kind: 'selected' | 'completed_week' | 'completed_month' = 'selected', currency = 'RUB'): any {
+  const period = kind === 'completed_month'
+    ? { key: kind, start_date: '2026-07-01', end_date: '2026-07-31' }
+    : kind === 'completed_week'
+      ? { key: kind, start_date: '2026-08-03', end_date: '2026-08-09' }
+      : { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' };
   return {
     kind,
-    period: { key: kind === 'selected' ? 'current_month' : kind, start_date: '2026-08-03', end_date: '2026-08-09' },
+    period,
     comparison_period: { key: 'previous_equal_period', start_date: '2026-07-27', end_date: '2026-08-02' },
     workspace: { scope: 10, name: 'Family', type: 'group', read_only: false },
     filters: { operation_type: 'all', category: 'all' },
@@ -126,7 +131,7 @@ function reportData(kind: 'selected' | 'completed_week' | 'completed_month' = 's
     structure_type: 'expense',
     categories: [{
       key: 'food', category: 'Food', currency: 'RUB', total: '400.00', count: 4, share: 100, drillable: true,
-      operation_scope: { workspace_id: 10, period: 'custom', start_date: '2026-08-03', end_date: '2026-08-09', operation_type: 'expense', category: 'all', scope_category: null, currency: 'RUB', category_key: 'food', merchant_key: null },
+      operation_scope: { workspace_id: 10, period: 'custom', start_date: period.start_date, end_date: period.end_date, operation_type: 'expense', category: 'all', scope_category: null, currency: 'RUB', category_key: 'food', merchant_key: null },
     }],
     merchants: [],
     observations: [],
@@ -390,22 +395,28 @@ describe('main plan handlers', () => {
     document.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.click();
     await flush(8);
 
-    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'selected' }));
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'selected', currency: 'RUB' }));
     expect(document.querySelector('.reports-screen')).not.toBeNull();
 
     document.querySelector<HTMLButtonElement>('[data-action="report-kind"][data-kind="completed_week"]')?.click();
     await flush(8);
-    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_week' }));
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_week', currency: 'RUB' }));
 
     document.querySelector<HTMLButtonElement>('[data-action="report-kind"][data-kind="completed_month"]')?.click();
     await flush(8);
-    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_month' }));
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_month', currency: 'RUB' }));
 
     const currency = document.querySelector<HTMLSelectElement>('[data-action="report-currency"]')!;
     currency.value = 'EUR';
     currency.dispatchEvent(new Event('change'));
     await flush(8);
     expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'completed_month', currency: 'EUR' }));
+
+    document.querySelector<HTMLButtonElement>('[data-action="reports-close"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.click();
+    await flush(8);
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({ report_kind: 'selected', currency: 'EUR' }));
   });
 
   it.each([
@@ -437,6 +448,16 @@ describe('main plan handlers', () => {
     await flush(8);
     document.querySelector<HTMLButtonElement>('[data-action="reports-open"]')?.click();
     await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="report-kind"][data-kind="completed_month"]')?.click();
+    await flush(8);
+
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({
+      period: 'current_month',
+      operation_type: 'all',
+      category: 'all',
+      report_kind: 'completed_month',
+      currency: 'RUB',
+    }));
 
     document.querySelector<HTMLButtonElement>('[data-action="report-drill"][data-kind="category"]')?.click();
     await flush(8);
@@ -444,17 +465,27 @@ describe('main plan handlers', () => {
     expect(document.querySelector('[data-tab="operations"]')?.getAttribute('aria-current')).toBe('page');
     expect(api.operations).toHaveBeenLastCalledWith(10, expect.objectContaining({
       period: 'custom',
-      start_date: '2026-08-03',
-      end_date: '2026-08-09',
+      start_date: '2026-07-01',
+      end_date: '2026-07-31',
       operation_type: 'expense',
       currency: 'RUB',
       category_key: 'food',
     }), 0, '');
-    expect(api.track).toHaveBeenCalledWith('report_drilldown_opened', expect.objectContaining({ report_kind: 'selected', kind: 'category', currency: 'RUB' }));
+    expect(api.track).toHaveBeenCalledWith('report_drilldown_opened', expect.objectContaining({ report_kind: 'completed_month', kind: 'category', currency: 'RUB' }));
 
     backHandler?.();
     await flush(8);
     expect(document.querySelector('.reports-screen')).not.toBeNull();
+    expect(api.report).toHaveBeenLastCalledWith(10, expect.objectContaining({
+      period: 'current_month',
+      operation_type: 'all',
+      category: 'all',
+      report_kind: 'completed_month',
+      currency: 'RUB',
+    }));
+    expect(document.querySelector<HTMLSelectElement>('[data-action="period"]')?.value).toBe('current_month');
+    expect(document.querySelector<HTMLSelectElement>('[data-action="operation-type"]')?.value).toBe('all');
+    expect(document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')?.value).toBe('all');
 
     backHandler?.();
     await flush(8);
@@ -540,7 +571,7 @@ describe('main plan handlers', () => {
 
     const impressions = api.track.mock.calls.filter(([name]) => name === 'mini_app_announcement_impression');
     expect(impressions.map(([, properties]) => properties?.update_key)).toEqual(['a', 'b']);
-    expect(api.dismissAnnouncement).toHaveBeenCalledWith('a');
+    expect(api.dismissAnnouncement).toHaveBeenCalledWith('a', 10);
   });
 
   it('edits a shopping item inline and cancel preserves the original text', async () => {

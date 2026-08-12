@@ -261,6 +261,28 @@ def test_report_ready_eligibility_is_one_bounded_query(monkeypatch):
     assert calls[0][1] == (date(2026, 8, 3), date(2026, 8, 9), date(2026, 7, 1), date(2026, 7, 31), [10, 11])
 
 
+def test_report_ready_eligibility_uses_current_type_and_category_scope(monkeypatch):
+    calls = []
+
+    def _fetch(sql, params):
+        calls.append((sql, params))
+        category = params[-1] if "category=%s" in sql else None
+        return [(1, 0)] if category in {None, "Продукты"} else [(0, 0)]
+
+    monkeypatch.setattr("services.reports.pg_fetchall", _fetch)
+    workspace_where = "(workspace_id = ANY(%s) OR (workspace_id IS NULL AND user_id=%s))"
+    workspace_params = ([10], 42)
+
+    assert report_ready_kinds(workspace_where, workspace_params, today=date(2026, 8, 12), operation_type="expense", category="Такси") == set()
+    assert report_ready_kinds(workspace_where, workspace_params, today=date(2026, 8, 12), operation_type="expense", category="Продукты") == {"completed_week"}
+    assert report_ready_kinds(workspace_where, workspace_params, today=date(2026, 8, 12), operation_type="expense", category=None) == {"completed_week"}
+    assert len(calls) == 3
+    assert all("AND type=%s" in sql for sql, _params in calls)
+    assert "AND category=%s" in calls[0][0]
+    assert calls[0][1][-2:] == ("Расходы", "Такси")
+    assert calls[2][1][-1] == "Расходы"
+
+
 def test_report_ready_candidates_reuse_period_ids_dismissal_ttl_and_family():
     candidates = report_ready_announcements({"completed_week", "completed_month"}, today=date(2026, 8, 12))
     ids = {item.id for item in candidates}
@@ -275,6 +297,27 @@ def test_report_ready_candidates_reuse_period_ids_dismissal_ttl_and_family():
     assert announcement_candidate("report-ready-weekly-2026-08-09", today=date(2026, 8, 12)).family == "report-ready-weekly"
     assert announcement_candidate("report-ready-weekly-2026-08-08", today=date(2026, 8, 12)) is None
     assert announcement_candidate("report-ready-weekly-not-a-date", today=date(2026, 8, 12)) is None
+
+
+def test_dynamic_report_dismissal_uses_the_same_user_local_ttl_date(monkeypatch):
+    api = MiniAppAPI()
+    candidate_id = "report-ready-weekly-2026-08-09"
+    local_today = date(2026, 8, 29)
+    captured = []
+    monkeypatch.setattr(api, "_check_write_rate", lambda _req: None)
+    monkeypatch.setattr(api, "_read_scope", lambda _req, _scope: ([10], False))
+    monkeypatch.setattr("miniapp.api.user_local_date", lambda _user_id, workspace_id: captured.append(("local", workspace_id)) or local_today)
+    monkeypatch.setattr("miniapp.api.dismiss_announcement", lambda user_id, item_id, today: captured.append(("dismiss", user_id, item_id, today)) or True)
+    monkeypatch.setattr(api, "_track", lambda *_args, **_kwargs: None)
+
+    assert announcement_candidate(candidate_id, local_today) is not None
+    assert announcement_candidate(candidate_id, date(2026, 8, 30)) is None
+    api.dismiss_announcement(api.request(42), candidate_id, {"workspace_id": 10})
+
+    assert captured == [
+        ("local", 10),
+        ("dismiss", 42, candidate_id, local_today),
+    ]
 
 
 def _tx(workspace_ids, *, all_scope=False, period_key="current_month", start=date(2026, 8, 1), end=date(2026, 8, 12)):

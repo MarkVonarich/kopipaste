@@ -100,7 +100,7 @@ def resolve_announcements(user_id: int, *, today: date | None = None, extra_cand
     return resolve_announcement_candidates((*ANNOUNCEMENTS, *extra_candidates), dismissed, today=today)
 
 
-def announcement_candidate(candidate_id: str, *, today: date | None = None) -> Announcement | None:
+def announcement_candidate(candidate_id: str, today: date | None = None) -> Announcement | None:
     known = next((item for item in ANNOUNCEMENTS if item.id == candidate_id), None)
     if known is not None:
         return known
@@ -124,8 +124,8 @@ def announcement_candidate(candidate_id: str, *, today: date | None = None) -> A
     return None
 
 
-def dismiss_announcement(user_id: int, candidate_id: str) -> bool:
-    known = announcement_candidate(candidate_id)
+def dismiss_announcement(user_id: int, candidate_id: str, today: date | None = None) -> bool:
+    known = announcement_candidate(candidate_id, today)
     if known is None:
         return False
     conn = get_conn()
