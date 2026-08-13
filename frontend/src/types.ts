@@ -17,7 +17,7 @@ export type HomeWidgetKey = 'financial_result' | 'activity' | 'income_expense' |
 export type HomeWidget = { key: HomeWidgetKey; title: string; description: string; layout: 'compact' | 'wide'; default_enabled: boolean; default_order: number };
 export type HomePreferences = { widgets: HomeWidget[]; order: HomeWidgetKey[]; enabled: HomeWidgetKey[] };
 export type ShoppingItem = { id: number; workspace_id: number; text: string; completed: boolean; completed_at?: string | null; created_at: string; updated_at: string };
-export type AnnouncementActionType = 'OPEN_HOME_SETTINGS' | 'OPEN_SHOPPING_LIST' | 'OPEN_PLANS' | 'OPEN_PROFILE' | 'OPEN_ANALYTICS' | 'OPEN_REPORTS' | 'OPEN_REPORT_WEEKLY' | 'OPEN_REPORT_MONTHLY' | 'OPEN_DETAIL';
+export type AnnouncementActionType = 'OPEN_HOME' | 'OPEN_HOME_SETTINGS' | 'OPEN_SHOPPING_LIST' | 'OPEN_PLANS' | 'OPEN_PROFILE' | 'OPEN_ANALYTICS' | 'OPEN_REPORTS' | 'OPEN_REPORT_WEEKLY' | 'OPEN_REPORT_MONTHLY' | 'OPEN_DETAIL';
 export type Announcement = { id: string; family: string; kind: 'feature' | 'improvement' | 'fix' | 'report'; released_on: string; title: string; description: string; detail?: string | null; action: { type: AnnouncementActionType; label: string } };
 
 export type ReportKind = 'selected' | 'completed_week' | 'completed_month';
@@ -97,6 +97,64 @@ export type PeriodState = {
 export type GlobalFinancialFilters = PeriodState & {
   operation_type: GlobalOperationType;
   category: string;
+  currency?: string;
+};
+
+export type ForecastUnavailable = {
+  available: false;
+  code: string;
+  title: string;
+  description: string;
+};
+
+export type SpendableSummary = ForecastUnavailable | {
+  available: true;
+  amount: string;
+  currency: string;
+  approximate: boolean;
+  period_label: string;
+  quality_label: string;
+  quality_tier: 'known_only' | 'limited' | 'personal' | 'strong' | 'calibrated';
+  risk_state: 'normal' | 'watch' | 'attention';
+  fingerprint: string;
+  feedback?: 'useful' | 'not_useful' | null;
+  experiment?: { enabled: boolean; variant: string };
+};
+
+export type SpendableForecast = Extract<SpendableSummary, { available: true }> & {
+  current_result: string;
+  known_commitments: string;
+  known_commitment_count: number;
+  expected_income: string;
+  goal_reserve: string;
+  variable_q50: string;
+  variable_q80: string;
+  variable_q90: string;
+  variable_reserve: string;
+  general_budget_remaining?: string | null;
+  expected_end_result: string;
+  lower_spendable: string;
+  upper_spendable: string;
+  model_family: string;
+  model_version: string;
+  risk_policy_version: string;
+  calibration_state: string;
+  history_periods: number;
+  reasons: Array<{ code: string; label: string; amount?: string; count?: number }>;
+  trajectory: Array<{ date: string; expected_expense: string; upper_expense: string }>;
+};
+
+export type CanSpendResult = {
+  verdict: 'fits' | 'borderline' | 'does_not_fit' | 'insufficient_data';
+  amount_before: string;
+  projected_spendable_after: string;
+  general_budget_remaining?: string | null;
+  category_limit_remaining?: string | null;
+  grouped_budget_remaining?: string | null;
+  goal_reserve: string;
+  risk_state_before: string;
+  risk_state_after: string;
+  reasons: Array<{ code: string; label: string; amount?: string; count?: number }>;
 };
 
 export type InsightActionType = 'OPEN_ANALYTICS' | 'OPEN_CATEGORY' | 'OPEN_MERCHANT' | 'OPEN_OPERATIONS' | 'OPEN_LIMIT' | 'CREATE_LIMIT';
@@ -541,7 +599,9 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'vacation' | 'privacy-history' | 'privacy-account' | 'home-settings' | 'shopping-list';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'activity-detail' | 'spendable-detail' | 'can-spend-result' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'vacation' | 'privacy-history' | 'privacy-account' | 'home-settings' | 'shopping-list';
+  spendableForecast?: SpendableForecast;
+  canSpendResult?: CanSpendResult;
   profileAccordion?: ProfileSection | null;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';

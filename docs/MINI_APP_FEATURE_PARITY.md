@@ -58,3 +58,16 @@ This inventory is based on the current repository code in `routers/`, `services/
 - The global three-dot menu is available from every Mini App tab and uses Telegram native Add to Home Screen when supported.
 - Preferred name is shared with bot confirmations through `public.users.preferred_name`.
 - Currency, timezone, active workspace, workspace rename and quiet-hours editor are available from Profile without changing historical operations.
+
+## Advanced Forecasting And Fixed Home
+
+This section supersedes the earlier Home-layout bullets without rewriting their release history.
+
+- Home is fixed in the order Activity, `Итог` + `Свободно`, Income/Expense, compact What's New, Limits, Goals, Reminders, up to two Insights, Shopping and Recent Operations. Global filters remain above the screen in `AppShell`.
+- `Свободно` is an approximate, backend-authoritative period forecast for one workspace and currency. It excludes future income and exposes explicit unavailable states for aggregate/completed/future scopes.
+- Spendable detail includes deterministic obligations, protected goal schedule, downside variable-spend reserve, budget cap, forecast band, quality explanation and the category-aware can-spend tool.
+- Forecast-aware Insights add future consequence and structured reason evidence while preserving feedback/repetition suppression. Inline feedback is available on both rendered Spendable experiments and visible Insight cards.
+- Home settings contain only visibility toggles for Limits, Goals, Reminders, Insights and Shopping. Legacy arbitrary ordering is ignored; Activity, `Итог`, `Свободно`, Income/Expense, What's New and Recent Operations are fixed.
+- Challenges and their carousels are no longer user-facing on Home. Historical challenge data and unrelated challenge behavior are not destructively removed.
+- Category-limit title, amount, category, period and alerts now edit atomically in place. Goal archive/restore updates active/archive frontend state immediately after API success.
+- Forecast snapshot, model registry and feedback parity is Mini App-led. Telegram financial operation, goal, reminder and budget services remain authoritative inputs rather than parallel implementations.

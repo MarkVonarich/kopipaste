@@ -103,6 +103,15 @@ def application(environ, start_response):
                 return _json_response(start_response, 200, api.delete_category(req, token, body))
         if method == "GET" and path == "/miniapp/api/overview":
             return _json_response(start_response, 200, api.overview(req, params))
+        if method == "GET" and path == "/miniapp/api/forecast/spendable":
+            return _json_response(start_response, 200, api.spendable_forecast(req, params))
+        if method == "POST" and path == "/miniapp/api/forecast/can-spend":
+            return _json_response(start_response, 200, api.forecast_can_spend(req, body))
+        if method == "POST" and path == "/miniapp/api/forecast/exposure":
+            return _json_response(start_response, 200, api.forecast_exposure(req, body))
+        if method == "POST" and path.startswith("/miniapp/api/forecast/") and path.endswith("/feedback"):
+            fingerprint = path.strip("/").split("/")[3]
+            return _json_response(start_response, 200, api.forecast_feedback(req, fingerprint, body))
         if method == "GET" and path == "/miniapp/api/profile/home":
             return _json_response(start_response, 200, api.home_preferences(req))
         if method == "POST" and path == "/miniapp/api/profile/home":

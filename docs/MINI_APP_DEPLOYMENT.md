@@ -169,3 +169,19 @@ Menu-button smoke:
 - open the bot chat and press the persistent menu button;
 - confirm the persistent menu button label is `Открыть`;
 - confirm `/app` still renders the inline WebApp button and command list still includes `/start`, `/settings`, `/help`, `/app` when the Mini App URL is configured.
+
+## Advanced Forecasting Release
+
+Before deploying Advanced Forecasting & Home Intelligence:
+
+1. Confirm the release commit and review `docs/FORECAST_INTELLIGENCE.md`.
+2. Back up PostgreSQL using the normal production runbook.
+3. Apply `migrations/20260813_024_advanced_forecasting_home.sql` with `ON_ERROR_STOP=1` before restarting application code.
+4. Do not run production forecast training during this release. The scheduler only finalizes bounded outcomes.
+5. Confirm `forecast_outcomes` is registered and Telegram/Mini App startup remains healthy.
+6. Verify concrete-workspace/current-period Spendable, aggregate unavailable state, can-spend, fixed Home settings, category-limit edit and goal archive/restore.
+7. Confirm `advanced-forecasting-home-v1.released_on` matches the actual production release date before restart.
+
+No new Python or npm production dependency is introduced. Model artifacts are not part of the repository or frontend bundle. A future artifact deployment must use a trusted local model directory, registry checksum and matching `forecast-features-v1` metadata.
+
+Rollback application code first and leave the additive migration in place. Dropping forecast tables or category-limit columns is a separate destructive operation and must use the migration's manual rollback notes only after retention review. Invalidated/deleted-history snapshots must not be restored as authoritative outcomes.

@@ -53,7 +53,8 @@ function initialGlobalFilters(persisted: PersistedState): GlobalFinancialFilters
   return {
     ...period,
     operation_type: normalizeOperationType(source.operation_type),
-    category: typeof source.category === 'string' && source.category.trim() ? source.category.trim() : 'all'
+    category: typeof source.category === 'string' && source.category.trim() ? source.category.trim() : 'all',
+    currency: typeof source.currency === 'string' && source.currency.trim() ? source.currency.trim() : undefined,
   };
 }
 
