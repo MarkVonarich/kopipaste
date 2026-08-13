@@ -910,6 +910,36 @@ def test_home_focus_priority_is_stable(monkeypatch):
     assert item["target_mode"] == "limits"
 
 
+def test_home_goal_marks_next_day_contribution_for_visual_urgency(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr(api, "goals", lambda _req, _params: {"data": {"items": [{
+        "id": 2,
+        "title": "Trip",
+        "percent": 20,
+        "next_contribution_date": "2026-08-05",
+        "next_action": "Пополнить",
+    }]}})
+    monkeypatch.setattr(api, "limits", lambda _req, _params: {"data": {"items": []}})
+
+    item = api._home_focus(api.request(42), {"workspace_id": 10}, _focus_tx())
+
+    assert item["kind"] == "goal"
+    assert item["due_within_one_day"] is True
+
+
+def test_home_reminder_marks_today_and_tomorrow_for_visual_urgency(monkeypatch):
+    api = _api(monkeypatch)
+    monkeypatch.setattr("miniapp.api.list_reminders", lambda *_args, **_kwargs: [
+        {"id": 1, "title": "Today", "event_date": date(2026, 8, 4), "status": "today", "amount": "10", "currency": "RUB", "category": "Other", "repeat_rule": "none"},
+        {"id": 2, "title": "Tomorrow", "event_date": date(2026, 8, 5), "status": "upcoming", "amount": "20", "currency": "RUB", "category": "Other", "repeat_rule": "none"},
+        {"id": 3, "title": "Later", "event_date": date(2026, 8, 7), "status": "upcoming", "amount": "30", "currency": "RUB", "category": "Other", "repeat_rule": "none"},
+    ])
+
+    items = api._home_reminders(api.request(42))
+
+    assert [item["due_within_one_day"] for item in items] == [True, True, False]
+
+
 def _focus_tx(category=None):
     return TransactionFilters([10], False, date(2026, 8, 1), date(2026, 8, 7), "current_week", "all", category, "", ())
 

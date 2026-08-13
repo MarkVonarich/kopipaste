@@ -317,6 +317,7 @@ export type HomeReminderSummary = {
   next_event_date?: string | null;
   status_text: string;
   overdue_days: number;
+  due_within_one_day?: boolean;
   repeat_rule?: string | null;
 };
 

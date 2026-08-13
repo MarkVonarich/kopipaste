@@ -1841,12 +1841,15 @@ function wireEvents(): void {
       render();
     }
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-focus"]')?.addEventListener('click', async (event) => {
-    const mode = (event.currentTarget as HTMLButtonElement).dataset.mode === 'limits' ? 'limits' : 'goals';
-    await api.track('mini_app_home_focus_opened', { kind: mode, source: 'mini_app' });
-    state.tab = 'plans';
-    state.plansMode = mode;
-    await loadScreen();
+  app.querySelectorAll<HTMLButtonElement>('[data-action="home-focus"]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+      if (button.closest<HTMLElement>('[data-carousel]')?.dataset.suppressClick === 'true') return;
+      const mode = (event.currentTarget as HTMLButtonElement).dataset.mode === 'limits' ? 'limits' : 'goals';
+      await api.track('mini_app_home_focus_opened', { kind: mode, source: 'mini_app' });
+      state.tab = 'plans';
+      state.plansMode = mode;
+      await loadScreen();
+    });
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="home-insight"]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -1908,7 +1911,7 @@ function wireEvents(): void {
         await api.insightFeedback(insightId, state.workspaceId, feedback);
         if (feedback === 'not_useful') rejectedInsightIds.add(`${state.workspaceId ?? 'personal'}:${insightId}`);
         if (overview) {
-          const updated: Insight[] = (overview.insights || []).filter((item) => feedback !== 'not_useful' || item.id !== insightId).map((item) => item.id === insightId ? { ...item, feedback: feedback as Insight['feedback'] } : item);
+          const updated: Insight[] = (overview.insights || []).map((item) => item.id === insightId ? { ...item, feedback: feedback as Insight['feedback'] } : item);
           overview = { ...overview, insights: updated, insight: updated[0] || null };
         }
         state.saving = false;
@@ -1923,6 +1926,7 @@ function wireEvents(): void {
   });
   app.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.addEventListener('click', async (event) => {
     const button = event.currentTarget as HTMLButtonElement;
+    if (button.closest<HTMLElement>('[data-carousel]')?.dataset.suppressClick === 'true') return;
     const reminderId = Number(button.dataset.id || 0);
     await api.track('mini_app_home_reminder_opened', { result: button.dataset.state || 'empty', source: 'mini_app' });
     if (!reminderId) {

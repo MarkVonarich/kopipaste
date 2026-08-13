@@ -246,6 +246,9 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     dismissAnnouncement: vi.fn(async (id) => ({ dismissed: true, candidate_id: id })),
     insightImpression: vi.fn(async () => ({ recorded: true })),
     insightFeedback: vi.fn(async (_id, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
+    forecastFeedback: vi.fn(async (_fingerprint, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
+    forecastExposure: vi.fn(async () => ({ recorded: true })),
+    spendableForecast: vi.fn(async () => ({})),
     track: vi.fn(async (_name: string, _properties: Record<string, any> = {}) => undefined),
     exportInfo: vi.fn(async () => ({ available: true, status: 'ready', presets: [], privacy_note: '' })),
     setVacation: vi.fn(async (payload) => ({ vacation_mode: { ...payload, active: true, status: 'active' } })),
@@ -598,6 +601,98 @@ describe('main plan handlers', () => {
     dispatchPointer(card, 'pointerup', 20, 10);
     expect(document.querySelector('[data-announcement-target]')?.textContent).toContain('Update c');
     expect(api.track).toHaveBeenCalledWith('mini_app_announcement_carousel_changed', expect.objectContaining({ direction: 'next', position: '3', total: '3' }));
+  });
+
+  it('pages each compact planning card by dot and swipe while preserving tap navigation', async () => {
+    const api = installAppMocks();
+    api.overview.mockResolvedValue({
+      period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-31' },
+      workspace_scope: 10,
+      aggregation_available: true,
+      totals_by_currency: {},
+      recent_operations: [],
+      limit_items: [
+        { kind: 'limit', title: 'Food', description: 'Норма', percent: 20, target_mode: 'limits' },
+        { kind: 'limit', title: 'Cafe', description: 'Риск', percent: 90, target_mode: 'limits' },
+      ],
+      goal_items: [
+        { kind: 'goal', title: 'Trip', description: 'В плане', percent: 20, target_mode: 'goals' },
+        { kind: 'goal', title: 'Laptop', description: 'В плане', percent: 30, target_mode: 'goals' },
+      ],
+      reminders: [
+        { state: 'upcoming', id: 10, title: 'Internet', status_text: 'Скоро', overdue_days: 0 },
+        { state: 'upcoming', id: 20, title: 'Phone', status_text: 'Позже', overdue_days: 0 },
+      ],
+    });
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="limit"][data-index="1"]')?.click();
+    expect(document.querySelector('[data-carousel="limit"]')?.textContent).toContain('Cafe');
+
+    const goal = document.querySelector<HTMLElement>('[data-carousel="goal"]')!;
+    dispatchPointer(goal, 'pointerdown', 120, 10);
+    dispatchPointer(goal, 'pointerup', 20, 10);
+    expect(document.querySelector('[data-carousel="goal"]')?.textContent).toContain('Laptop');
+
+    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="reminder"][data-index="1"]')?.click();
+    expect(document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.dataset.id).toBe('20');
+
+    document.querySelector<HTMLButtonElement>('[data-action="home-focus"][data-mode="limits"]')?.click();
+    await flush(8);
+    expect(api.plans).toHaveBeenCalled();
+    expect(document.querySelector('[data-action="plans-mode"][data-mode="limits"]')?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('keeps feedback acknowledgement on revisit and prompts for a new fingerprint', async () => {
+    const oldFingerprint = 'f'.repeat(64);
+    const newFingerprint = 'e'.repeat(64);
+    let resolved = false;
+    let currentFingerprint = oldFingerprint;
+    const api = installAppMocks();
+    api.overview.mockImplementation(async () => ({
+      period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-31' },
+      workspace_scope: 10,
+      aggregation_available: true,
+      totals_by_currency: {},
+      recent_operations: [],
+      spendable: {
+        available: true,
+        amount: '12000.00',
+        currency: 'RUB',
+        approximate: true,
+        period_label: 'до конца месяца',
+        quality_label: 'По истории',
+        quality_tier: 'personal',
+        risk_state: 'normal',
+        fingerprint: currentFingerprint,
+        feedback: currentFingerprint === oldFingerprint && resolved ? 'useful' : null,
+        experiment: { enabled: true, variant: 'compact' },
+      },
+    }));
+    api.forecastFeedback.mockImplementation(async (_fingerprint, _workspace, feedbackType) => {
+      resolved = true;
+      return { recorded: true, feedback_type: feedbackType };
+    });
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="forecast-feedback"][data-feedback="useful"]')?.click();
+    await flush();
+    expect(document.body.textContent).toContain('Спасибо');
+    expect(document.querySelector('[data-action="forecast-feedback"]')).toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-tab="operations"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-tab="home"]')?.click();
+    await flush(8);
+    expect(document.body.textContent).toContain('Спасибо');
+    expect(document.querySelector('[data-action="forecast-feedback"]')).toBeNull();
+
+    currentFingerprint = newFingerprint;
+    document.querySelector<HTMLSelectElement>('[data-action="period"]')?.dispatchEvent(new Event('change'));
+    await flush(8);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="forecast-feedback"]')?.dataset.fingerprint).toBe(newFingerprint);
   });
 
   it('keeps What’s New fixed even when legacy preferences disabled it', async () => {
@@ -1408,7 +1503,7 @@ describe('main plan handlers', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(document.querySelector('[data-action="carousel-dot"][data-carousel="reminder"]')).toBeNull();
+    expect(document.querySelectorAll('[data-action="carousel-dot"][data-carousel="reminder"]')).toHaveLength(3);
     expect(document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.dataset.id).toBe('10');
     document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.click();
     await Promise.resolve();

@@ -124,6 +124,7 @@ describe('Advanced Forecasting & Home Intelligence', () => {
     expect(html).toContain('<span>Итог</span>');
     expect(html).toContain('~22 000 ₽');
     expect(html).toContain('data-action="spendable-open"');
+    expect(html.match(/class="home-primary-amount"/g)).toHaveLength(2);
   });
 
   it('rounds Home money, hides unavailable comparison, and preserves amount nodes', () => {
@@ -158,9 +159,29 @@ describe('Advanced Forecasting & Home Intelligence', () => {
     expect(html).not.toContain('variant');
   });
 
+  it('replaces resolved forecast and insight feedback with Спасибо by fingerprint', () => {
+    const resolved = HomeScreen({
+      ...overview,
+      spendable: { ...spendable, feedback: 'useful' },
+      insights: [{ ...insight, feedback: 'not_useful' }],
+    }, [], 'RUB', true);
+    const fresh = HomeScreen({
+      ...overview,
+      spendable: { ...spendable, fingerprint: 'b'.repeat(64), feedback: null },
+      insights: [{ ...insight, id: 'c'.repeat(64), feedback: null }],
+    }, [], 'RUB', true);
+
+    expect(resolved.match(/Спасибо/g)).toHaveLength(2);
+    expect(resolved).not.toContain('data-action="forecast-feedback"');
+    expect(resolved).not.toContain('data-action="home-insight-feedback"');
+    expect(fresh).toContain(`data-fingerprint="${'b'.repeat(64)}"`);
+    expect(fresh).toContain(`data-insight-id="${'c'.repeat(64)}"`);
+  });
+
   it('renders compact clickable What’s New without a large CTA', () => {
     const html = HomeScreen(overview, [], 'RUB', true);
     expect(html).toContain('announcement-card compact');
+    expect(html).toContain('announcement-highlight');
     expect(html).toContain('data-action="announcement-open"');
     expect(html).toContain('announcement-dots');
     expect(html).toContain('data-action="carousel-dot"');
@@ -225,5 +246,44 @@ describe('Advanced Forecasting & Home Intelligence', () => {
       expect.stringContaining('Цели'),
       expect.stringContaining('Напоминания'),
     ]));
+  });
+
+  it('renders independent compact paging for Limits, Goals, and Reminders', () => {
+    const html = HomeScreen({
+      ...overview,
+      limit_items: [
+        { kind: 'limit', title: 'Food', description: 'Норма', percent: 30, target_mode: 'limits' },
+        { kind: 'limit', title: 'Cafe', description: 'Риск', percent: 90, target_mode: 'limits' },
+      ],
+      goal_items: [
+        { kind: 'goal', title: 'Trip', description: 'В плане', percent: 20, target_mode: 'goals' },
+        { kind: 'goal', title: 'Laptop', description: 'В плане', percent: 40, target_mode: 'goals' },
+      ],
+      reminders: [
+        { state: 'upcoming', id: 1, title: 'Internet', status_text: 'Скоро', overdue_days: 0 },
+        { state: 'upcoming', id: 2, title: 'Phone', status_text: 'Позже', overdue_days: 0 },
+      ],
+    }, [], 'RUB', true, undefined, { limit: 1, goal: 1, reminder: 1 });
+
+    expect(html).toContain('data-carousel="limit" data-index="1"');
+    expect(html).toContain('data-carousel="goal" data-index="1"');
+    expect(html).toContain('data-carousel="reminder" data-index="1"');
+    expect(html.match(/class="carousel-dots plan-carousel-dots"/g)).toHaveLength(3);
+    expect(html).toContain('<strong>Cafe</strong>');
+    expect(html).toContain('<strong>Laptop</strong>');
+    expect(html).toContain('<strong>Phone</strong>');
+  });
+
+  it('adds visual state classes for risky limits and due goals and reminders', () => {
+    const html = HomeScreen({
+      ...overview,
+      limit_items: [{ kind: 'limit', title: 'Food', description: 'Риск', percent: 92, severity: 'high', status: 'warning', target_mode: 'limits' }],
+      goal_items: [{ kind: 'goal', title: 'Trip', description: 'Взнос завтра', percent: 20, due_within_one_day: true, target_mode: 'goals' }],
+      reminders: [{ state: 'upcoming', id: 1, title: 'Internet', status_text: 'Завтра', overdue_days: 0, due_within_one_day: true }],
+    }, [], 'RUB', true);
+
+    expect(html).toMatch(/plan-home-card is-warning[^>]*data-carousel="limit"/);
+    expect(html).toMatch(/plan-home-card is-urgent[^>]*data-carousel="goal"/);
+    expect(html).toMatch(/plan-home-card is-urgent[^>]*data-carousel="reminder"/);
   });
 });

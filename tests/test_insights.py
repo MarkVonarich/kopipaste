@@ -542,6 +542,20 @@ def test_negative_feedback_suppresses_only_same_detector_in_same_scope():
     assert InsightEngine(store).generate(acceptance_snapshot(workspace_id=11), today=date(2026, 8, 10), now=NOW + timedelta(minutes=1))
 
 
+def test_useful_feedback_is_presented_for_same_insight_fingerprint():
+    store = MemoryStore()
+    engine = InsightEngine(store)
+    value = acceptance_snapshot()
+    first = engine.generate(value, today=date(2026, 8, 10), now=NOW)
+    fingerprint = first[0]["id"]
+
+    assert engine.feedback(42, 10, fingerprint, "useful") is not None
+
+    repeated = engine.generate(value, today=date(2026, 8, 10), now=NOW + timedelta(minutes=1))
+    assert repeated[0]["id"] == fingerprint
+    assert repeated[0]["feedback"] == "useful"
+
+
 def test_negative_feedback_does_not_suppress_unrelated_detector():
     spending = detect_spending_change(acceptance_snapshot())[0]
     frequency = detect_frequency_change(acceptance_snapshot())[0]

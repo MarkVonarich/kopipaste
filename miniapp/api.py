@@ -88,6 +88,7 @@ from services.forecasting import (
     calculate_spendable,
     can_spend as calculate_can_spend,
     explain_forecast_change,
+    get_forecast_feedback,
     record_forecast_feedback,
     unavailable as forecast_unavailable,
 )
@@ -1107,6 +1108,7 @@ class MiniAppAPI:
         try:
             _inputs, forecast = self._forecast_data(req, params)
             change = explain_forecast_change(forecast, ForecastRepository().previous_prediction(_inputs, forecast))
+            feedback = get_forecast_feedback(req.user_id, tx.workspace_ids[0], forecast.fingerprint)
             recurring_commitments = [item for item in _inputs.commitments if item.source == "recurring"]
             return {
                 "available": True,
@@ -1134,7 +1136,7 @@ class MiniAppAPI:
                 "expected_end_result": forecast.expected_end_result,
                 "change": change,
                 "fingerprint": forecast.fingerprint,
-                "feedback": forecast.feedback,
+                "feedback": feedback,
                 "experiment": {
                     "enabled": True,
                     "variant": exposure_properties("spendable-explanation-v1", req.user_id, "home_spendable", forecast.quality_tier)["variant"],
@@ -1404,6 +1406,7 @@ class MiniAppAPI:
                 severity = "normal"
                 reason = goal.get("next_action") or "Проверьте план цели."
                 days_left: int | None = None
+                contribution_days: int | None = None
                 if goal.get("deadline"):
                     try:
                         days_left = (date.fromisoformat(str(goal["deadline"])) - today).days
@@ -1415,12 +1418,12 @@ class MiniAppAPI:
                     try:
                         contribution_days = (date.fromisoformat(str(goal["next_contribution_date"])) - today).days
                     except ValueError:
-                        contribution_days = 999
-                    if contribution_days < 0:
+                        contribution_days = None
+                    if contribution_days is not None and contribution_days < 0:
                         severity, reason = "critical", "Плановый взнос просрочен."
-                    elif contribution_days <= 2:
+                    elif contribution_days is not None and contribution_days <= 2:
                         severity, reason = "high", "Ближайший взнос уже рядом."
-                    elif contribution_days <= 7:
+                    elif contribution_days is not None and contribution_days <= 7:
                         severity, reason = "medium", "Скоро плановый взнос."
                 if goal.get("projected_completion_date") and goal.get("deadline") and goal.get("strategy") == STRATEGY_DEADLINE:
                     try:
@@ -1440,6 +1443,7 @@ class MiniAppAPI:
                     "description": reason,
                     "percent": percent,
                     "status": severity if severity != "normal" else goal.get("status") or "active",
+                    "due_within_one_day": contribution_days is not None and 0 <= contribution_days <= 1,
                     "cta_label": "Открыть цели",
                     "target_mode": "goals",
                 })
@@ -3112,6 +3116,7 @@ class MiniAppAPI:
                 "next_event_date": None,
                 "status_text": status,
                 "overdue_days": max(0, -days),
+                "due_within_one_day": 0 <= days <= 1,
                 "repeat_rule": item["repeat_rule"],
             })
         return result
