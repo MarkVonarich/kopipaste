@@ -603,7 +603,7 @@ async def _process_group_text(update, context: ContextTypes.DEFAULT_TYPE, input_
     merch = norm_text(merch_display)
     amt_final, note = convert_amount_if_needed(actor_user_id, amt_raw, src_curr or detect_currency_token(text))
     op_type = _guess_operation_type_from_text(text, merch)
-    top2, sugg_meta = get_top2_suggestions(actor_user_id, normalize_for_ml(text), op_type)
+    top2, sugg_meta = get_top2_suggestions(actor_user_id, normalize_for_ml(text), op_type, workspace.workspace_id)
     if len(top2) < 2:
         top2 = [{'cat': 'Продукты', 'score': 0.6}, {'cat': 'Другое', 'score': 0.4}]
     cats = [top2[0]['cat'], top2[1]['cat']]

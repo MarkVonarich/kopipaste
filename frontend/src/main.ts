@@ -15,7 +15,7 @@ import { OperationsScreen } from './components/OperationsScreen';
 import { AnalyticsScreen } from './components/AnalyticsScreen';
 import { ReportsScreen } from './components/ReportsScreen';
 import { CategoryBudgetForm, CategoryDeleteForm, CategoryDetail, CategoryForm, GoalContributionForm, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
-import { AdditionalMenu, CurrencyForm, ExportForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, WorkspaceForm } from './components/ProfileScreen';
+import { AccountDeletionForm, AdditionalMenu, CurrencyForm, ExportForm, HistoryDeletionForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, VacationForm, WorkspaceForm } from './components/ProfileScreen';
 import { HomeSettingsForm } from './components/HomeSettings';
 import { ShoppingList } from './components/ShoppingList';
 import { LoadingState, ErrorState } from './components/States';
@@ -617,6 +617,24 @@ function renderSheet(): string {
   if (state.sheet === 'quiet-hours') {
     return BottomSheet('Тихие часы', QuietHoursForm(profile?.notifications, state.saving, state.saveError));
   }
+  if (state.sheet === 'vacation') {
+    return BottomSheet('Режим отпуска', VacationForm(profile?.vacation_mode, state.saving, state.saveError));
+  }
+  if (state.sheet === 'privacy-history') {
+    return BottomSheet('Удалить финансовую историю', HistoryDeletionForm(
+      (state.privacyStage === 'preview' || state.privacyStage === 'confirm') ? state.privacyStage : 'select',
+      state.privacyPeriod || 'this_month',
+      state.privacyPreview,
+      state.saving,
+      state.saveError,
+    ));
+  }
+  if (state.sheet === 'privacy-account') {
+    const stage = ['account-info', 'account-preview', 'account-confirm', 'deleted'].includes(state.privacyStage || '')
+      ? state.privacyStage as 'account-info' | 'account-preview' | 'account-confirm' | 'deleted'
+      : 'account-info';
+    return BottomSheet('Удалить аккаунт и мои данные', AccountDeletionForm(stage, state.accountPreview, state.saving, state.saveError, state.accountDeletedMessage));
+  }
   if (state.sheet === 'menu') {
     return BottomSheet('Меню', AdditionalMenu(profile, state.homeScreenStatus || 'unknown', getTelegramWebApp()?.platform || ''));
   }
@@ -935,6 +953,10 @@ async function bootstrap(): Promise<void> {
 }
 
 function closeSheet(): void {
+  if (state.privacyStage === 'deleted') {
+    getTelegramWebApp()?.close?.();
+    return;
+  }
   if (state.confirmDeleteId) {
     state.confirmDeleteId = undefined;
     render();
@@ -981,10 +1003,35 @@ function closeSheet(): void {
   state.formDraft = undefined;
   state.shoppingEditId = undefined;
   state.shoppingEditText = undefined;
+  state.privacyStage = undefined;
+  state.privacyPeriod = undefined;
+  state.privacyPreview = undefined;
+  state.accountPreview = undefined;
+  state.accountDeletedMessage = undefined;
   render();
 }
 
 function navigateBack(): void {
+  if (state.sheet === 'privacy-history' && state.privacyStage === 'confirm') {
+    state.privacyStage = 'preview';
+    render();
+    return;
+  }
+  if (state.sheet === 'privacy-history' && state.privacyStage === 'preview') {
+    state.privacyStage = 'select';
+    render();
+    return;
+  }
+  if (state.sheet === 'privacy-account' && state.privacyStage === 'account-confirm') {
+    state.privacyStage = 'account-preview';
+    render();
+    return;
+  }
+  if (state.sheet === 'privacy-account' && state.privacyStage === 'account-preview') {
+    state.privacyStage = 'account-info';
+    render();
+    return;
+  }
   if (state.confirmDeleteId || state.confirmLimitDeleteId || state.confirmGoalDeleteId || state.sheet || selectedOperation) {
     closeSheet();
     return;
@@ -1165,9 +1212,9 @@ function limitPayload(form: HTMLFormElement): LimitPayload {
   };
 }
 
-async function loadCategoriesFor(type: 'expense' | 'income' | 'Расходы' | 'Доходы'): Promise<void> {
+async function loadCategoriesFor(type: 'expense' | 'income' | 'Расходы' | 'Доходы', currentCategory?: string): Promise<void> {
   try {
-    const response = await api.categories(state.workspaceId, type);
+    const response = await api.categories(state.workspaceId, type, currentCategory);
     categoryOptions = response.items;
   } catch {
     categoryOptions = [];
@@ -2148,6 +2195,48 @@ function wireEvents(): void {
       render();
     });
   });
+  app.querySelector<HTMLButtonElement>('[data-action="category-preference-priority"]')?.addEventListener('click', async () => {
+    if (!selectedCategory) return;
+    state.saving = true;
+    render();
+    try {
+      const response = await api.updateCategoryPreference(selectedCategory.token || selectedCategory.normalized_name, {
+        workspace_id: state.workspaceId,
+        type: state.categoryType || 'expense',
+        priority: selectedCategory.priority === 'high' ? 'normal' : 'high',
+        relevant: selectedCategory.relevant !== false,
+      });
+      selectedCategory = response.category;
+      if (plans?.categories) plans = { ...plans, categories: plans.categories.map((item) => item.normalized_name === response.category.normalized_name ? response.category : item) };
+      hapticSelection();
+    } catch (error) {
+      state.saveError = safeError(error);
+    } finally {
+      state.saving = false;
+      render();
+    }
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="category-preference-relevance"]')?.addEventListener('click', async () => {
+    if (!selectedCategory) return;
+    state.saving = true;
+    render();
+    try {
+      const response = await api.updateCategoryPreference(selectedCategory.token || selectedCategory.normalized_name, {
+        workspace_id: state.workspaceId,
+        type: state.categoryType || 'expense',
+        priority: selectedCategory.priority || 'normal',
+        relevant: selectedCategory.relevant === false,
+      });
+      selectedCategory = response.category;
+      if (plans?.categories) plans = { ...plans, categories: plans.categories.map((item) => item.normalized_name === response.category.normalized_name ? response.category : item) };
+      hapticSelection();
+    } catch (error) {
+      state.saveError = safeError(error);
+    } finally {
+      state.saving = false;
+      render();
+    }
+  });
   app.querySelector<HTMLButtonElement>('[data-action="open-menu"]')?.addEventListener('click', () => {
     registerHomeScreenEvents();
     state.sheet = 'menu';
@@ -2174,6 +2263,26 @@ function wireEvents(): void {
     state.exportDraft = state.exportDraft || { preset: 'month' };
     state.exportPreview = undefined;
     state.exportSent = false;
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="vacation-open"]')?.addEventListener('click', () => {
+    state.sheet = 'vacation';
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-history-open"]')?.addEventListener('click', () => {
+    state.sheet = 'privacy-history';
+    state.privacyStage = 'select';
+    state.privacyPeriod = 'this_month';
+    state.privacyPreview = undefined;
+    state.saveError = undefined;
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-account-open"]')?.addEventListener('click', () => {
+    state.sheet = 'privacy-account';
+    state.privacyStage = 'account-info';
+    state.accountPreview = undefined;
     state.saveError = undefined;
     render();
   });
@@ -2350,7 +2459,7 @@ function wireEvents(): void {
     button.addEventListener('click', async () => {
       const id = Number(button.dataset.id);
       selectedOperation = await api.operationDetail(id);
-      await loadCategoriesFor(selectedOperation.type);
+      await loadCategoriesFor(selectedOperation.type, selectedOperation.category);
       state.sheet = null;
       state.saveError = undefined;
       state.dirty = false;
@@ -3147,6 +3256,142 @@ function wireEvents(): void {
       render();
     }
   });
+
+  app.querySelector<HTMLFormElement>('form[data-action="vacation-save"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const data = new FormData(event.currentTarget as HTMLFormElement);
+    const enabled = data.get('enabled') === 'on';
+    const start_date = String(data.get('start_date') || '') || null;
+    const end_date = String(data.get('end_date') || '') || null;
+    if (enabled && (!start_date || !end_date || end_date < start_date)) {
+      state.saveError = !start_date || !end_date ? 'Укажите дату начала и окончания.' : 'Дата окончания не может быть раньше даты начала.';
+      render();
+      return;
+    }
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const response = await api.setVacation({ enabled, start_date, end_date });
+      if (profile) profile = { ...profile, vacation_mode: response.vacation_mode };
+      closeSheet();
+      showToast('Режим отпуска сохранён');
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="privacy-history-preview"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const period = String(new FormData(event.currentTarget as HTMLFormElement).get('period') || 'this_month') as AppState['privacyPeriod'];
+    state.privacyPeriod = period;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      state.privacyPreview = await api.previewHistoryDeletion(period || 'this_month');
+      state.privacyStage = 'preview';
+      state.saving = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-history-confirm"]')?.addEventListener('click', () => {
+    state.privacyStage = 'confirm';
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-history-back"]')?.addEventListener('click', () => {
+    state.privacyStage = state.privacyStage === 'confirm' ? 'preview' : 'select';
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-history-delete"]')?.addEventListener('click', async () => {
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      await api.deleteHistory(state.privacyPeriod || 'this_month');
+      overview = null;
+      operations = null;
+      analytics = null;
+      report = null;
+      plans = null;
+      closeSheet();
+      showToast('Финансовая история удалена');
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-account-preview"]')?.addEventListener('click', async () => {
+    if (state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      state.accountPreview = await api.previewAccountDeletion();
+      state.privacyStage = 'account-preview';
+      state.saving = false;
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-account-confirm"]')?.addEventListener('click', () => {
+    state.privacyStage = 'account-confirm';
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="privacy-account-back"]')?.addEventListener('click', () => {
+    state.privacyStage = state.privacyStage === 'account-confirm' ? 'account-preview' : 'account-info';
+    render();
+  });
+  app.querySelector<HTMLFormElement>('form[data-action="privacy-account-delete"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const confirmation = String(new FormData(event.currentTarget as HTMLFormElement).get('confirmation_text') || '');
+    if (confirmation !== 'УДАЛИТЬ') {
+      state.saveError = 'Введите УДАЛИТЬ без изменений.';
+      render();
+      return;
+    }
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const response = await api.deleteAccount(confirmation);
+      overview = null;
+      operations = null;
+      analytics = null;
+      report = null;
+      plans = null;
+      profile = null;
+      shoppingItems = [];
+      categoryOptions = [];
+      globalCategoryOptions = [];
+      state.boot = undefined;
+      state.accountDeletedMessage = response.message;
+      state.privacyStage = 'deleted';
+      state.saving = false;
+      window.localStorage.clear();
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="close-miniapp"]')?.addEventListener('click', () => getTelegramWebApp()?.close?.());
 }
 
 void bootstrap();

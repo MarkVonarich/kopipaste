@@ -30,6 +30,7 @@ PERSONAL_TABLES = {
     "insight_states": "user_id=%s OR workspace_id = ANY(%s)",
     "user_home_preferences": "user_id=%s",
     "user_announcement_state": "user_id=%s",
+    "user_category_preferences": "user_id=%s OR workspace_id = ANY(%s)",
     "action_tokens": "user_id=%s",
     "user_workspace_settings": "user_id=%s",
     "workspace_members": "user_id=%s",
@@ -180,13 +181,70 @@ def _operation_ids_for_period(cur, user_id: int, workspace_ids: list[int], start
     return [int(r[0]) for r in cur.fetchall()]
 
 
+def _draft_period_clause(cur, user_id: int, workspace_ids: list[int], start_date: date | None, end_date: date | None) -> tuple[str | None, tuple]:
+    columns = _table_columns(cur, "operation_drafts")
+    if not {"actor_user_id", "payload"} <= columns:
+        return None, ()
+    scope_sql = ""
+    params: list = [user_id]
+    if "workspace_id" in columns:
+        if workspace_ids:
+            scope_sql = "AND (workspace_id = ANY(%s) OR workspace_id IS NULL)"
+            params.append(workspace_ids)
+        else:
+            scope_sql = "AND workspace_id IS NULL"
+    params.extend([start_date, start_date, end_date, end_date])
+    return f"""
+        actor_user_id=%s
+        {scope_sql}
+        AND COALESCE(payload->>'op_date', payload->>'operation_date') IS NOT NULL
+        AND (%s::date IS NULL OR (COALESCE(payload->>'op_date', payload->>'operation_date'))::date >= %s)
+        AND (%s::date IS NULL OR (COALESCE(payload->>'op_date', payload->>'operation_date'))::date <= %s)
+    """, tuple(params)
+
+
+def _history_counts(cur, user_id: int, workspace_ids: list[int], operation_ids: list[int], start_date: date | None, end_date: date | None) -> dict[str, int]:
+    counts = {"operations": len(operation_ids)}
+    for table, column in (
+        ("financial_activity_events", "operation_id"),
+        ("notification_events", "operation_id"),
+        ("ml_observations", "operation_id"),
+        ("operation_versions", "operation_id"),
+        ("operations_history", "operation_id"),
+    ):
+        columns = _table_columns(cur, table)
+        if column not in columns or not operation_ids:
+            counts[table] = 0
+            continue
+        cur.execute(f"SELECT COUNT(*) FROM public.{table} WHERE {column}=ANY(%s)", (operation_ids,))
+        counts[table] = int(cur.fetchone()[0])
+    draft_where, draft_params = _draft_period_clause(cur, user_id, workspace_ids, start_date, end_date)
+    if draft_where:
+        cur.execute(f"SELECT COUNT(*) FROM public.operation_drafts WHERE {draft_where}", draft_params)
+        counts["operation_drafts"] = int(cur.fetchone()[0])
+    else:
+        counts["operation_drafts"] = 0
+    counts["financial_goals"] = 0
+    if start_date is None and end_date is None:
+        goal_columns = _table_columns(cur, "financial_goals")
+        if {"owner_user_id", "workspace_id"} <= goal_columns:
+            params: list = [user_id]
+            scope = "owner_user_id=%s"
+            if workspace_ids:
+                scope += " OR workspace_id = ANY(%s)"
+                params.append(workspace_ids)
+            cur.execute(f"SELECT COUNT(*) FROM public.financial_goals WHERE {scope}", tuple(params))
+            counts["financial_goals"] = int(cur.fetchone()[0])
+    return counts
+
+
 def preview_delete_financial_history(user_id: int, start_date: date | None, end_date: date | None) -> HistoryDeletionPreview:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             workspace_ids = _personal_workspace_ids(cur, user_id)
             operation_ids = _operation_ids_for_period(cur, user_id, workspace_ids, start_date, end_date)
-            counts = {"operations": len(operation_ids)}
+            counts = _history_counts(cur, user_id, workspace_ids, operation_ids, start_date, end_date)
         conn.rollback()
         return HistoryDeletionPreview(user_id, start_date, end_date, len(operation_ids), counts)
     finally:
@@ -200,13 +258,13 @@ def delete_financial_history(user_id: int, start_date: date | None, end_date: da
         with conn.cursor() as cur:
             workspace_ids = _personal_workspace_ids(cur, user_id)
             operation_ids = _operation_ids_for_period(cur, user_id, workspace_ids, start_date, end_date)
-            counts["operations"] = len(operation_ids)
-            if not operation_ids:
-                conn.rollback()
-                return HistoryDeletionResult(user_id, start_date, end_date, 0, counts, deleted=True)
-            try:
-                counts["analytics_product_event_links"] = apply_history_deletion(operation_ids)
-            except Exception:
+            counts.update(_history_counts(cur, user_id, workspace_ids, operation_ids, start_date, end_date))
+            if operation_ids:
+                try:
+                    counts["analytics_product_event_links"] = apply_history_deletion(operation_ids)
+                except Exception:
+                    counts["analytics_product_event_links"] = 0
+            else:
                 counts["analytics_product_event_links"] = 0
 
             related_tables = [
@@ -224,28 +282,9 @@ def delete_financial_history(user_id: int, start_date: date | None, end_date: da
                 cur.execute(f"DELETE FROM public.{table} WHERE {column}=ANY(%s)", (operation_ids,))
                 counts[table] = int(cur.rowcount)
 
-            draft_columns = _table_columns(cur, "operation_drafts")
-            if {"actor_user_id", "payload"} <= draft_columns:
-                scope_sql = ""
-                params = [user_id]
-                if "workspace_id" in draft_columns:
-                    if workspace_ids:
-                        scope_sql = "AND (workspace_id = ANY(%s) OR workspace_id IS NULL)"
-                        params.append(workspace_ids)
-                    else:
-                        scope_sql = "AND workspace_id IS NULL"
-                params.extend([start_date, start_date, end_date, end_date])
-                cur.execute(
-                    f"""
-                    DELETE FROM public.operation_drafts
-                     WHERE actor_user_id=%s
-                       {scope_sql}
-                       AND COALESCE(payload->>'op_date', payload->>'operation_date') IS NOT NULL
-                       AND (%s::date IS NULL OR (COALESCE(payload->>'op_date', payload->>'operation_date'))::date >= %s)
-                       AND (%s::date IS NULL OR (COALESCE(payload->>'op_date', payload->>'operation_date'))::date <= %s)
-                    """,
-                    tuple(params),
-                )
+            draft_where, draft_params = _draft_period_clause(cur, user_id, workspace_ids, start_date, end_date)
+            if draft_where:
+                cur.execute(f"DELETE FROM public.operation_drafts WHERE {draft_where}", draft_params)
                 counts["operation_drafts"] = int(cur.rowcount)
             else:
                 counts["operation_drafts"] = 0
@@ -263,8 +302,9 @@ def delete_financial_history(user_id: int, start_date: date | None, end_date: da
                 else:
                     counts["financial_goals"] = 0
 
-            cur.execute("DELETE FROM public.operations WHERE id=ANY(%s)", (operation_ids,))
-            counts["operations"] = int(cur.rowcount)
+            if operation_ids:
+                cur.execute("DELETE FROM public.operations WHERE id=ANY(%s)", (operation_ids,))
+                counts["operations"] = int(cur.rowcount)
         conn.commit()
         return HistoryDeletionResult(user_id, start_date, end_date, counts["operations"], counts, deleted=True)
     except Exception:

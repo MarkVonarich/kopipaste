@@ -98,6 +98,8 @@ PRODUCT_EVENT_GROUPS = {
     "mini_app_activity_opened": "miniapp",
     "mini_app_profile_section_opened": "miniapp",
     "mini_app_profile_setting_changed": "miniapp",
+    "vacation_mode_changed": "settings",
+    "category_preference_changed": "categories",
     "acquisition_payload_rejected": "attribution",
     "posthog_connection_test": "diagnostics",
     "challenge_screen_opened": "challenges",

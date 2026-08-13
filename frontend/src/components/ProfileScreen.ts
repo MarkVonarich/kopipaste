@@ -1,4 +1,4 @@
-import type { CategoryOption, HomePreferences, NotificationPreferences, PremiumInfo, ProfileSection, ThemeMode, Workspace } from '../types';
+import type { CategoryOption, HomePreferences, NotificationPreferences, PremiumInfo, ProfileSection, ThemeMode, VacationMode, Workspace } from '../types';
 import { formatMoneyString } from '../money';
 import { SectionHeader, esc, icon } from './ui';
 
@@ -19,6 +19,7 @@ export type ProfileData = {
   premium?: PremiumInfo;
   export?: { available: boolean; status: string; presets: string[]; privacy_note: string };
   home_preferences?: HomePreferences;
+  vacation_mode?: VacationMode;
 };
 
 const SECTIONS: Array<[ProfileSection, string]> = [
@@ -27,6 +28,8 @@ const SECTIONS: Array<[ProfileSection, string]> = [
   ['home', 'Главная'],
   ['workspaces', 'Пространства'],
   ['notifications', 'Уведомления'],
+  ['behaviour', 'Поведение'],
+  ['privacy', 'Данные и приватность'],
   ['premium', 'Premium'],
   ['help', 'Помощь'],
   ['legal', 'Правовая информация'],
@@ -77,6 +80,14 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
   const prefs = profile?.notifications;
   const visibleWorkspaces = profile?.workspaces || workspaces.filter((item) => item.workspace_id !== 'all');
   const activeWorkspace = visibleWorkspaces.find((workspace) => workspace.active);
+  const vacation = profile?.vacation_mode;
+  const vacationStatus = vacation?.status === 'active'
+    ? `Активен до ${vacation.end_date || ''}`
+    : vacation?.status === 'scheduled'
+      ? 'Запланирован'
+      : vacation?.status === 'completed'
+        ? 'Завершён'
+        : 'Выключен';
   return `
     <section class="screen profile-screen">
       ${SectionHeader('Настройки', 'Профиль, данные и внешний вид')}
@@ -102,6 +113,7 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
         `)}
         ${panel('notifications', activeSection, `
           <div class="settings-list">
+            ${vacation?.active ? '<p class="caption vacation-notice">Уведомления временно приостановлены режимом отпуска. Сохранённые настройки не изменены.</p>' : ''}
             ${prefs ? `
               ${notificationBlock('Ежедневные уведомления', 'daily', prefs.daily_notifications?.enabled ?? prefs.evening_enabled, 'Короткое вечернее сообщение помогает не забывать записывать операции.', `Вечер ${prefs.daily_notifications?.evening_time || prefs.evening_time}`)}
               ${notificationBlock('Планы и контроль', 'plans', prefs.plans_control?.enabled ?? (prefs.limit_alerts_enabled || prefs.budget_alerts_enabled || prefs.goal_notifications_enabled || (prefs.subscription_alerts_enabled ?? true) || (prefs.recurring_spend_alerts_enabled ?? true)), 'Предупреждает о лимитах, бюджетах, целях и важных регулярных расходах.')}
@@ -110,6 +122,12 @@ export function ProfileScreen(profile: ProfileData | null, workspaces: Workspace
             ` : '<p class="caption">Настройки недоступны.</p>'}
           </div>
         `)}
+        ${panel('behaviour', activeSection, `<div class="settings-list">${row('Режим отпуска', vacationStatus, 'Приостанавливает автоматические финансовые уведомления, но не ваши напоминания.', 'vacation-open')}</div>`)}
+        ${panel('privacy', activeSection, `<div class="settings-list">
+          ${row('Экспорт финансовых данных', '', 'Операции за выбранный период в XLSX', 'export-open')}
+          ${row('Удалить финансовую историю', '', 'Выберите период и проверьте состав перед удалением', 'privacy-history-open')}
+          ${row('Удалить аккаунт и мои данные', '', 'Требует отдельного подтверждения', 'privacy-account-open')}
+        </div>`)}
         ${panel('premium', activeSection, row(profile?.premium?.title || 'Premium', profile?.premium?.status || 'info', profile?.premium?.description || 'Информационный раздел.', 'premium-open'))}
         ${panel('help', activeSection, `
           ${profile?.help_url ? `<a class="settings-row" href="${esc(profile.help_url)}" target="_blank" rel="noreferrer"><span><strong>Помощь</strong></span><em>${icon('chevron')}</em></a>` : ''}
@@ -172,6 +190,76 @@ export function QuietHoursForm(prefs: NotificationPreferences | undefined, savin
     ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
     <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
   </form>`;
+}
+
+export function VacationForm(vacation: VacationMode | undefined, saving: boolean, error = ''): string {
+  return `<form class="form-grid" data-action="vacation-save">
+    <label class="checkbox-row"><input type="checkbox" name="enabled" ${vacation?.enabled ? 'checked' : ''} /> Включить режим отпуска</label>
+    <label>Дата начала<input class="input" type="date" name="start_date" value="${esc(vacation?.start_date || '')}" /></label>
+    <label>Дата окончания<input class="input" type="date" name="end_date" value="${esc(vacation?.end_date || '')}" /></label>
+    <p class="caption">Автоматические финансовые уведомления будут приостановлены. Созданные вами напоминания продолжат приходить.</p>
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    <button class="button primary" ${saving ? 'disabled' : ''}>Сохранить</button>
+  </form>`;
+}
+
+type HistoryPreview = { period?: string; start_date?: string | null; end_date?: string | null; summary: { operations: number; drafts: number; goals: number; related_records: number } };
+
+export function HistoryDeletionForm(stage: 'select' | 'preview' | 'confirm', period: string, preview: HistoryPreview | undefined, saving: boolean, error = ''): string {
+  const labels: Array<[string, string]> = [['today', 'Сегодня'], ['last7', 'Последние 7 дней'], ['this_month', 'Этот месяц'], ['prev_month', 'Прошлый месяц'], ['this_year', 'Этот год'], ['all', 'Вся история']];
+  if (stage === 'confirm' && preview) {
+    return `<div class="form-grid destructive-panel">
+      <strong>Удалить выбранные данные без возможности восстановления?</strong>
+      <p class="caption">Операции: ${preview.summary.operations}. Черновики: ${preview.summary.drafts}. Цели: ${preview.summary.goals}.</p>
+      <button class="button danger" data-action="privacy-history-delete" ${saving ? 'disabled' : ''}>Удалить навсегда</button>
+      <button class="button secondary" data-action="privacy-history-back">Назад</button>
+      ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    </div>`;
+  }
+  return `<div class="form-grid">
+    ${stage === 'select' ? `<form class="form-grid" data-action="privacy-history-preview">
+      <label>Период<select class="select" name="period">${labels.map(([key, label]) => `<option value="${key}" ${period === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      <button class="button secondary" ${saving ? 'disabled' : ''}>Показать, что будет удалено</button>
+    </form>` : ''}
+    ${stage === 'preview' && preview ? `<div class="preview-panel">
+      <strong>Будет удалено</strong>
+      <div class="detail-row light"><span>Операции</span><strong>${preview.summary.operations}</strong></div>
+      <div class="detail-row light"><span>Черновики</span><strong>${preview.summary.drafts}</strong></div>
+      <div class="detail-row light"><span>Цели</span><strong>${preview.summary.goals}</strong></div>
+      <button class="button danger" data-action="privacy-history-confirm">Продолжить удаление</button>
+      <button class="button secondary" data-action="privacy-history-back">Изменить период</button>
+    </div>` : ''}
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+  </div>`;
+}
+
+type AccountPreview = { summary: { financial_records: number; preferences: number; personal_workspaces: number }; confirmation_text: string; shared_workspace_note: string };
+
+export function AccountDeletionForm(stage: 'account-info' | 'account-preview' | 'account-confirm' | 'deleted', preview: AccountPreview | undefined, saving: boolean, error = '', deletedMessage = ''): string {
+  if (stage === 'deleted') {
+    return `<div class="success-panel terminal-state"><strong>${esc(deletedMessage || 'Данные удалены. Вы можете закрыть КопиPaste.')}</strong><button class="button primary" data-action="close-miniapp">Закрыть</button></div>`;
+  }
+  if (stage === 'account-confirm' && preview) {
+    return `<form class="form-grid destructive-panel" data-action="privacy-account-delete">
+      <strong>Последнее подтверждение</strong>
+      <label>Введите УДАЛИТЬ<input class="input" name="confirmation_text" autocomplete="off" /></label>
+      <button class="button danger" ${saving ? 'disabled' : ''}>Удалить аккаунт и мои данные</button>
+      <button class="button secondary" type="button" data-action="privacy-account-back">Назад</button>
+      ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+    </form>`;
+  }
+  return `<div class="form-grid">
+    ${stage === 'account-info' ? `<p class="caption">Личный аккаунт, финансовые данные и настройки будут удалены. Данные других участников общих пространств сохранятся.</p><button class="button danger" data-action="privacy-account-preview" ${saving ? 'disabled' : ''}>Проверить состав удаления</button>` : ''}
+    ${stage === 'account-preview' && preview ? `<div class="preview-panel">
+      <div class="detail-row light"><span>Финансовые записи</span><strong>${preview.summary.financial_records}</strong></div>
+      <div class="detail-row light"><span>Настройки</span><strong>${preview.summary.preferences}</strong></div>
+      <div class="detail-row light"><span>Личные пространства</span><strong>${preview.summary.personal_workspaces}</strong></div>
+      <p class="caption">${esc(preview.shared_workspace_note)}</p>
+      <button class="button danger" data-action="privacy-account-confirm">Продолжить</button>
+      <button class="button secondary" data-action="privacy-account-back">Назад</button>
+    </div>` : ''}
+    ${error ? `<p class="form-error">${esc(error)}</p>` : ''}
+  </div>`;
 }
 
 function addToHomeUnsupportedText(platform = ''): string {

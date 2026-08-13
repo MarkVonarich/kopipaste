@@ -8,6 +8,7 @@ export type TelegramWebApp = {
   themeParams?: TelegramThemeParams;
   ready: () => void;
   expand: () => void;
+  close?: () => void;
   onEvent?: (event: 'themeChanged' | 'backButtonClicked' | 'homeScreenAdded' | 'homeScreenChecked', callback: (eventData?: { status?: HomeScreenStatus }) => void) => void;
   offEvent?: (event: 'themeChanged' | 'backButtonClicked' | 'homeScreenAdded' | 'homeScreenChecked', callback: (eventData?: { status?: HomeScreenStatus }) => void) => void;
   addToHomeScreen?: () => void;

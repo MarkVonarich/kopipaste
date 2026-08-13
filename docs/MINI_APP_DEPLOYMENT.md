@@ -12,6 +12,9 @@ psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_017_miniapp_ac
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260804_018_miniapp_transactional_idempotency.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260806_019_user_preferred_name.sql
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260806_020_quiet_hours_enabled.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260811_021_insight_engine_state.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260811_022_custom_home_shopping_announcements.sql
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/20260813_023_profile_behaviour_controls.sql
 ```
 
 Rollback for the new Mini App tables only:
@@ -69,6 +72,8 @@ Do not modify PostHog, systemd unit files or production secrets as part of PR 1.
 Do not modify PostHog, systemd unit files or production secrets as part of PR 2.
 
 Apply migration `20260806_020_quiet_hours_enabled.sql` before deploying the quiet-hours editor code. It backfills `quiet_hours_enabled` from existing start/end values and preserves saved times when users disable quiet hours.
+
+Apply additive migration `20260813_023_profile_behaviour_controls.sql` before deploying Profile & Behaviour Controls. It adds Vacation fields and user-scoped category preferences. This feature PR does not apply it. Rollback instructions are included in the migration; rolling application code back before dropping the additive objects is preferred.
 
 ## Release Checks
 

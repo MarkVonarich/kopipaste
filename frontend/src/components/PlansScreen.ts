@@ -140,10 +140,15 @@ function reminderCard(reminder: Reminder): string {
 }
 
 function categoryRow(category: CategoryOption): string {
+  const markers = [
+    category.priority === 'high' ? '<small class="category-marker">Приоритет</small>' : '',
+    category.relevant === false ? '<small class="category-marker muted">Скрыта из подсказок</small>' : '',
+    category.protected ? '<small>системная</small>' : '',
+  ].join('');
   return `
     <button class="settings-row category-row" data-action="category-open" data-token="${esc(category.token || category.normalized_name)}">
-      <span><strong>${esc(category.name)}</strong></span>
-      <em>${category.protected ? '<small>системная</small>' : ''}${icon('chevron')}</em>
+      <span><strong>${esc(category.name)}</strong>${markers}</span>
+      <em>${icon('chevron')}</em>
     </button>
   `;
 }
@@ -203,6 +208,16 @@ export function CategoryDetail(category: CategoryOption, type: 'expense' | 'inco
       <div class="detail-row"><span>Напоминания</span><strong>${refs?.reminders || 0}</strong></div>
       <div class="detail-row"><span>Автокатегоризация</span><strong>${auto}</strong></div>
     </div>
+    ${canWrite ? `<div class="settings-list category-preferences">
+      <button class="settings-row switch-row" type="button" data-action="category-preference-priority" role="switch" aria-checked="${category.priority === 'high'}">
+        <span><strong>Приоритетная категория</strong><small>Показывать раньше среди равных подсказок</small></span>
+        <em><span class="switch-control ${category.priority === 'high' ? 'on' : ''}" aria-hidden="true"></span></em>
+      </button>
+      <button class="settings-row switch-row" type="button" data-action="category-preference-relevance" role="switch" aria-checked="${category.relevant !== false}">
+        <span><strong>Показывать в подсказках</strong><small>История и отчёты останутся без изменений</small></span>
+        <em><span class="switch-control ${category.relevant !== false ? 'on' : ''}" aria-hidden="true"></span></em>
+      </button>
+    </div>` : ''}
     ${category.protected ? '<p class="caption">Системную категорию нельзя переименовать или удалить.</p>' : ''}
     ${canWrite && !category.protected ? `<div class="actions">
       <button class="button secondary" data-action="category-rename" data-token="${esc(category.token || category.normalized_name)}">Переименовать</button>
