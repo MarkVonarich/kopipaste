@@ -6,6 +6,7 @@ from db.queries import get_personal_category_suggestion, get_global_category_sug
 from services.ml_prep import normalize_alias_text
 from services.ml_bias import apply_user_bias
 from services.ml_infer import model_is_fresh, predict_top2
+from services.category_preferences import apply_suggestion_preferences, get_category_preferences
 
 
 def _pack(cat1: str, cat2: str, s1: float = 0.6, s2: float = 0.4) -> List[Dict]:
@@ -64,12 +65,35 @@ def _baseline_top2(user_id: int, alias_norm: str, detected_type: str) -> Tuple[L
     return [], 'fallback'
 
 
-def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str) -> Tuple[List[Dict], Dict]:
+def _apply_preferences(
+    user_id: int,
+    workspace_id: int | None,
+    detected_type: str,
+    suggestions: List[Dict],
+    *,
+    preserve_source_order: bool,
+) -> List[Dict]:
+    try:
+        from services.categories import list_managed_categories
+
+        managed = list_managed_categories(user_id=user_id, workspace_id=workspace_id, op_type=detected_type, limit=100)
+        keys = [item.normalized_name for item in managed]
+        preferences = get_category_preferences(user_id, workspace_id, detected_type, keys)
+        visible = apply_suggestion_preferences(suggestions, preferences, preserve_source_order=preserve_source_order)
+        known = {str(item.get("cat") or "") for item in visible}
+        fallback = [{"cat": item.name, "score": 0.0} for item in managed if item.name not in known]
+        visible.extend(apply_suggestion_preferences(fallback, preferences, preserve_source_order=False))
+        return visible[:2]
+    except Exception:
+        return suggestions[:2]
+
+
+def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str, workspace_id: int | None = None) -> Tuple[List[Dict], Dict]:
     alias_norm = normalize_alias_text(normalized_text)
     top2, baseline_reason = _baseline_top2(user_id, alias_norm, detected_type)
     if baseline_reason in ('personal_exact', 'personal_fuzzy', 'global_alias_exact', 'global_high'):
         biased, bias_meta = apply_user_bias(user_id, normalized_text, top2)
-        return biased, {
+        return _apply_preferences(user_id, workspace_id, detected_type, biased, preserve_source_order=True), {
             'reason': baseline_reason,
             'source': 'baseline',
             'stage': '2.5.4',
@@ -86,7 +110,7 @@ def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str)
                     raise ValueError('model_low_confidence')
                 source = 'model'
                 biased, bias_meta = apply_user_bias(user_id, normalized_text, model_top2)
-                return biased, {
+                return _apply_preferences(user_id, workspace_id, detected_type, biased, preserve_source_order=True), {
                     'reason': 'model_predict',
                     'source': source,
                     'stage': '2.5.4',
@@ -98,7 +122,7 @@ def get_top2_suggestions(user_id: int, normalized_text: str, detected_type: str)
         source = 'baseline'
 
     biased, bias_meta = apply_user_bias(user_id, normalized_text, top2)
-    return biased, {
+    return _apply_preferences(user_id, workspace_id, detected_type, biased, preserve_source_order=False), {
         'reason': baseline_reason,
         'source': source,
         'stage': '2.3',

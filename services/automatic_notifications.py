@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import socket
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -250,6 +250,74 @@ def _notification_preference_group(notification_type: str) -> str | None:
     return None
 
 
+def _vacation_pauses_notification(notification_type: str) -> bool:
+    return _notification_preference_group(notification_type) in {"daily", "plans", "reports"}
+
+
+def _vacation_active(user_id: int) -> bool:
+    try:
+        from services.notification_preferences import get_vacation_mode
+
+        return bool(get_vacation_mode(int(user_id)).get("active"))
+    except Exception as exc:
+        log.info("vacation_mode_check_failed reason=%s", type(exc).__name__)
+        return False
+
+
+def _vacation_delivery_skip_reason(row: dict[str, Any]) -> str | None:
+    notification_type = str(row.get("notification_type") or "")
+    if not _vacation_pauses_notification(notification_type):
+        return None
+    try:
+        from services.notification_preferences import get_vacation_mode
+
+        state = get_vacation_mode(int(row["user_id"]))
+        if state.get("active"):
+            return "vacation_mode"
+        if state.get("status") != "completed" or not state.get("start_date") or not state.get("end_date"):
+            return None
+        original = row.get("original_scheduled_at")
+        if not isinstance(original, datetime):
+            return None
+        if original.tzinfo is None:
+            original = original.replace(tzinfo=timezone.utc)
+        local_date = original.astimezone(ZoneInfo(resolve_user_timezone(int(row["user_id"])).timezone_name)).date()
+        start = date.fromisoformat(str(state["start_date"]))
+        end = date.fromisoformat(str(state["end_date"]))
+        return "vacation_mode_stale" if start <= local_date <= end else None
+    except Exception as exc:
+        log.info("vacation_delivery_check_failed reason=%s", type(exc).__name__)
+        return None
+
+
+def suppress_pending_vacation_notifications(user_id: int, *, reason: str = "vacation_mode") -> int:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE public.automatic_notifications
+                   SET status='skipped', skip_reason=%s,
+                       locked_at=NULL, locked_by=NULL, updated_at=now()
+                 WHERE user_id=%s
+                   AND status IN ('pending','claimed')
+                   AND notification_type <> ALL(%s)
+                """,
+                (reason, int(user_id), list(INDEPENDENT_NOTIFICATION_TYPES)),
+            )
+            changed = int(cur.rowcount or 0)
+        conn.commit()
+        return changed
+    except (errors.UndefinedTable, errors.UndefinedColumn):
+        conn.rollback()
+        return 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _notification_group_enabled(notification_type: str, prefs: dict) -> bool:
     group = _notification_preference_group(notification_type)
     if group == "retired":
@@ -326,6 +394,9 @@ def _automatic_delivery_skip_reason(row: dict[str, Any], *, now_utc: datetime | 
     if group in {None, "independent"}:
         return None
     user_id = int(row["user_id"])
+    vacation_reason = _vacation_delivery_skip_reason(row)
+    if vacation_reason:
+        return vacation_reason
     kind = _daily_delivery_kind(notification_type)
     try:
         from jobs.daily import is_notification_due
@@ -540,6 +611,11 @@ def queue_automatic_notification(
     payload: dict[str, Any] | None = None,
     original_scheduled_at: datetime | None = None,
 ) -> DispatchResult:
+    if _vacation_pauses_notification(notification_type) and _vacation_active(user_id):
+        created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="vacation_mode")
+        if created is False:
+            return DispatchResult("duplicate", reason="dedupe")
+        return DispatchResult("skipped", reason="vacation_mode")
     window, now_utc, quiet = quiet_context(user_id, now_utc=original_scheduled_at)
     if quiet and policy == DeliveryPolicy.SKIP:
         created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="quiet_hours")
@@ -611,6 +687,11 @@ async def dispatch_automatic_notification(
     disable_web_page_preview: bool | None = None,
     force_immediate: bool = False,
 ) -> DispatchResult:
+    if not force_immediate and _vacation_pauses_notification(notification_type) and _vacation_active(user_id):
+        created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="vacation_mode")
+        if created is False:
+            return DispatchResult("duplicate", reason="dedupe")
+        return DispatchResult("skipped", reason="vacation_mode")
     if not _automatic_type_preference_enabled(user_id, notification_type):
         created = _mark_skip(user_id=user_id, notification_type=notification_type, dedupe_key=dedupe_key, reason="preference_disabled")
         if created is False:

@@ -3,7 +3,15 @@ export type ThemeMode = 'telegram' | 'light' | 'dark';
 export type PeriodKey = 'current_week' | 'current_month' | 'previous_month' | 'custom';
 export type GlobalOperationType = 'all' | 'expense' | 'income';
 export type OperationType = 'Расходы' | 'Доходы';
-export type ProfileSection = 'user' | 'appearance' | 'home' | 'workspaces' | 'notifications' | 'premium' | 'help' | 'legal';
+export type ProfileSection = 'user' | 'appearance' | 'home' | 'workspaces' | 'notifications' | 'behaviour' | 'privacy' | 'premium' | 'help' | 'legal';
+
+export type VacationMode = {
+  enabled: boolean;
+  active: boolean;
+  status: 'disabled' | 'scheduled' | 'active' | 'completed';
+  start_date?: string | null;
+  end_date?: string | null;
+};
 
 export type HomeWidgetKey = 'financial_result' | 'activity' | 'income_expense' | 'challenges' | 'goals' | 'limits' | 'reminders' | 'insights' | 'shopping_list' | 'recent_operations' | 'whats_new';
 export type HomeWidget = { key: HomeWidgetKey; title: string; description: string; layout: 'compact' | 'wide'; default_enabled: boolean; default_order: number };
@@ -472,6 +480,8 @@ export type CategoryOption = {
   has_budget: boolean;
   token?: string;
   protected?: boolean;
+  priority?: 'normal' | 'high';
+  relevant?: boolean;
   references?: {
     operations: number;
     drafts: number;
@@ -531,7 +541,7 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'home-settings' | 'shopping-list';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'vacation' | 'privacy-history' | 'privacy-account' | 'home-settings' | 'shopping-list';
   profileAccordion?: ProfileSection | null;
   selectedWorkspaceId?: number;
   plansMode?: 'goals' | 'limits' | 'reminders' | 'categories';
@@ -585,5 +595,10 @@ export type AppState = {
     totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
   };
   exportSent?: boolean;
+  privacyStage?: 'select' | 'preview' | 'confirm' | 'account-info' | 'account-preview' | 'account-confirm' | 'deleted';
+  privacyPeriod?: 'today' | 'last7' | 'this_month' | 'prev_month' | 'this_year' | 'all';
+  privacyPreview?: { period?: string; start_date?: string | null; end_date?: string | null; summary: { operations: number; drafts: number; goals: number; related_records: number } };
+  accountPreview?: { summary: { financial_records: number; preferences: number; personal_workspaces: number }; confirmation_text: string; shared_workspace_note: string };
+  accountDeletedMessage?: string;
   homeScreenStatus?: 'unsupported' | 'unknown' | 'added' | 'missed' | 'pending';
 };

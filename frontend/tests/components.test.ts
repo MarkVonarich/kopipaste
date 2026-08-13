@@ -8,7 +8,7 @@ import { ErrorState, LoadingState, EmptyState, AccessDeniedState } from '../src/
 import { CategoryBudgetForm, CategoryDetail, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from '../src/components/PlansScreen';
 import { AnalyticsScreen, contributionRows, deltaText } from '../src/components/AnalyticsScreen';
 import { ActivityCalendarView } from '../src/components/ActivityCalendar';
-import { AdditionalMenu, ExportForm, ProfileScreen, QuietHoursForm } from '../src/components/ProfileScreen';
+import { AccountDeletionForm, AdditionalMenu, ExportForm, HistoryDeletionForm, ProfileScreen, QuietHoursForm, VacationForm } from '../src/components/ProfileScreen';
 
 const overview = {
   period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-04' },
@@ -428,6 +428,23 @@ describe('acceptance components', () => {
     expect(CategoryDetail(category, 'expense', false)).not.toContain('data-action="category-delete"');
   });
 
+  it('keeps hidden categories manageable and exposes compact preference controls', () => {
+    const hidden = {
+      name: 'Такси', normalized_name: 'такси', token: 'такси', type: 'Расходы' as const,
+      source: 'custom', operation_count: 2, has_budget: false, protected: false,
+      priority: 'high' as const, relevant: false,
+      references: { operations: 2, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 2 },
+    };
+    const list = PlansScreen({ goals: [], limits: [], categories: [hidden], category_type: 'expense' }, 'categories', true);
+    const detail = CategoryDetail(hidden, 'expense', true);
+    expect(list).toContain('Такси');
+    expect(list).toContain('Приоритет');
+    expect(list).toContain('Скрыта из подсказок');
+    expect(detail).toContain('data-action="category-preference-priority"');
+    expect(detail).toContain('data-action="category-preference-relevance"');
+    expect(detail).toContain('aria-checked="false"');
+  });
+
   it('renders a goal archive entry, archived goals, and protected destructive actions', () => {
     const archived = {
       id: 7, title: 'Отпуск', target: '100000.00', current: '25000.00', remaining: '75000.00', percent: 25,
@@ -837,6 +854,60 @@ describe('acceptance components', () => {
     const html = ProfileScreen({ theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test', links: { privacy: null, terms: null } }, [], 'telegram', 'legal');
     expect(html).toContain('Документ пока недоступен');
     expect(html).not.toContain('docs/MINI_APP_AUTH.md');
+  });
+
+  it('renders Behaviour and Data & Privacy without moving Home settings', () => {
+    const html = ProfileScreen({
+      theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test',
+      vacation_mode: { enabled: true, active: true, status: 'active', start_date: '2026-08-10', end_date: '2026-08-20' },
+    }, [], 'telegram', 'behaviour');
+    expect(html).toContain('Поведение');
+    expect(html).toContain('Данные и приватность');
+    expect(html).toContain('Активен до 2026-08-20');
+    expect(html).toContain('data-action="home-settings-open"');
+    expect(html).not.toContain('data-action="home-settings-open" class="home');
+  });
+
+  it('keeps notification switches visually enabled during active vacation', () => {
+    const html = ProfileScreen({
+      theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test',
+      vacation_mode: { enabled: true, active: true, status: 'active', start_date: '2026-08-10', end_date: '2026-08-20' },
+      notifications: {
+        morning_enabled: true, evening_enabled: true, limit_alerts_enabled: true, budget_alerts_enabled: true,
+        weekly_reports_enabled: true, monthly_reports_enabled: true, challenge_notifications_enabled: false,
+        goal_notifications_enabled: true, morning_time: '08:30', evening_time: '20:30', quiet_hours_enabled: false,
+        timezone: 'Europe/Moscow', daily_notifications: { enabled: true, evening_time: '20:30' },
+        plans_control: { enabled: true }, reports: { enabled: true },
+      },
+    }, [], 'telegram', 'notifications');
+    expect(html).toContain('временно приостановлены режимом отпуска');
+    expect(html.match(/aria-checked="true"/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('renders vacation validation fields and explicit reminder contract', () => {
+    const html = VacationForm({ enabled: true, active: false, status: 'scheduled', start_date: '2026-08-15', end_date: '2026-08-20' }, false);
+    expect(html).toContain('type="date" name="start_date"');
+    expect(html).toContain('type="date" name="end_date"');
+    expect(html).toContain('Созданные вами напоминания продолжат приходить');
+  });
+
+  it('renders history preview before a separate destructive confirmation', () => {
+    const preview = { period: 'all', summary: { operations: 12, drafts: 2, goals: 3, related_records: 4 } };
+    const first = HistoryDeletionForm('preview', 'all', preview, false);
+    const confirm = HistoryDeletionForm('confirm', 'all', preview, false);
+    expect(first).toContain('Операции');
+    expect(first).toContain('Цели');
+    expect(first).not.toContain('Удалить навсегда');
+    expect(confirm).toContain('Удалить навсегда');
+  });
+
+  it('requires typed account confirmation and renders terminal close action', () => {
+    const preview = { summary: { financial_records: 10, preferences: 4, personal_workspaces: 1 }, confirmation_text: 'УДАЛИТЬ', shared_workspace_note: 'Общие данные сохранятся.' };
+    const confirm = AccountDeletionForm('account-confirm', preview, false);
+    const terminal = AccountDeletionForm('deleted', preview, false, '', 'Данные удалены. Вы можете закрыть КопиPaste.');
+    expect(confirm).toContain('Введите УДАЛИТЬ');
+    expect(confirm).toContain('name="confirmation_text"');
+    expect(terminal).toContain('data-action="close-miniapp"');
   });
 
   it('renders accordion profile sections and hides closed controls', () => {

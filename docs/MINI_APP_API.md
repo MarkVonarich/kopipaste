@@ -122,9 +122,11 @@ The `idempotency_key` must be generated when the form opens and reused for retry
 
 ## Categories
 
-`GET /miniapp/api/categories` accepts `workspace_id` and `type`. It returns existing managed categories available to the authenticated user for the selected workspace and operation type.
+`GET /miniapp/api/categories` accepts `workspace_id`, `type`, and optional `current_category`. Categories with the authenticated user's `relevant=false` preference are excluded from new selection by default; an existing hidden `current_category` remains available while editing.
 
 Category lifecycle management lives under `GET /miniapp/api/categories/manage`, `POST /miniapp/api/categories`, `PATCH /miniapp/api/categories/{token}` and `DELETE /miniapp/api/categories/{token}`. Writes require one concrete writable workspace; aggregate `workspace_id=all` is read-only. Delete returns reference counts and requires a transfer target when operations or related limits, budgets, reminders, aliases or ML observations still point to the category. Protected system categories cannot be renamed or deleted.
+
+`POST /miniapp/api/categories/{token}/preferences` accepts strict `priority=normal|high` and boolean `relevant`. Preference identity is authenticated user + nullable workspace + operation type + canonical category key. The management response always includes hidden categories so the user can restore them.
 
 Categories are managed from Plans in the Mini App. Profile no longer shows category chips.
 
@@ -167,7 +169,7 @@ General-limit and category-limit creation require an `idempotency_key`. Limit cr
 
 ## Profile
 
-Profile returns theme, spaces, notification preferences, Premium info-only data, export entry metadata, help/privacy/terms links and version. Notification updates persist one setting at a time and emit sanitized product analytics only after backend confirmation.
+Profile returns theme, spaces, notification preferences, authoritative `vacation_mode`, Premium info-only data, export entry metadata, help/privacy/terms links and version. Notification updates persist one setting at a time and emit sanitized product analytics only after backend confirmation.
 
 Notification preferences expose grouped controls:
 
@@ -177,6 +179,10 @@ Notification preferences expose grouped controls:
 - `quiet_hours`: quiet-hour enabled/start/end state.
 
 Challenge notifications are retired from Telegram delivery and are not exposed as a live Profile toggle.
+
+`GET /miniapp/api/profile/behaviour` and `POST /miniapp/api/profile/vacation` read and update global Vacation Mode. Enabled mode requires valid ISO calendar start/end dates with `end >= start`; active/scheduled/completed status is resolved from the user's local date. Vacation skips proactive financial notifications without changing notification or Quiet Hours preferences. Explicit `user_reminder` delivery is unaffected.
+
+`GET /miniapp/api/profile/privacy` exposes financial-export metadata, supported history periods, and shared-workspace semantics. `POST /profile/privacy/history/preview` must precede the confirmed `DELETE /profile/privacy/history` UX. Relative periods use the user-local date and all-history preview includes goals and drafts. Account preview uses `POST /profile/privacy/account/preview`; `DELETE /profile/privacy/account` requires `confirmed=true` and exact `confirmation_text=УДАЛИТЬ`. Successful account deletion is terminal and must not be followed by bootstrap or product-event writes.
 
 `POST /miniapp/api/profile/export` supports `action=preview` and `action=send`. `send` builds an XLSX with the existing export builder and delivers it to the authenticated user's Telegram chat; no direct browser file download is returned. The shared XLSX builder separates every monetary total by currency across summary, operation, category, month and week sheets.
 

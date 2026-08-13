@@ -163,7 +163,19 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     analytics: vi.fn(async (_workspaceId: any, _filters: any) => analyticsData(['RUB'], 'RUB')),
     report: vi.fn(async (_workspaceId: any, filters: any) => ({ report: reportData(filters.report_kind, filters.currency || 'RUB') })),
     plans: vi.fn(async () => plansData),
-    profile: vi.fn(),
+    profile: vi.fn(async () => ({
+      theme: 'telegram', currency: 'RUB', timezone: 'Europe/Moscow', version: 'test', workspaces,
+      notifications: {
+        morning_enabled: true, evening_enabled: true, limit_alerts_enabled: true, budget_alerts_enabled: true,
+        weekly_reports_enabled: true, monthly_reports_enabled: true, challenge_notifications_enabled: false,
+        goal_notifications_enabled: true, morning_time: '08:30', evening_time: '20:30', quiet_hours_enabled: false,
+        timezone: 'Europe/Moscow', daily_notifications: { enabled: true, evening_time: '20:30' }, plans_control: { enabled: true }, reports: { enabled: true },
+      },
+      vacation_mode: { enabled: false, active: false, status: 'disabled', start_date: null, end_date: null },
+      premium: { available: false, title: 'Premium', status: 'info', description: '', features: [] },
+      export: { available: true, status: 'ready', presets: [], privacy_note: '' },
+      categories: { expense: [], income: [] }, home_preferences: { widgets: [], order: [], enabled: [] }, links: {}, help_url: '',
+    })),
     categories: vi.fn(async (_workspaceId, type) => ({
       items: type === 'income'
         ? [{ name: 'Salary', normalized_name: 'salary', type: 'Доходы', source: 'custom', operation_count: 0, has_budget: false }]
@@ -178,6 +190,7 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
       read_only: false,
     })),
     deleteCategory: vi.fn(async () => ({ deleted: true, references: {} })),
+    updateCategoryPreference: vi.fn(async (_token, payload) => ({ category: { name: 'Food', normalized_name: 'food', token: 'food', type: 'Расходы', source: 'custom', operation_count: 2, has_budget: false, protected: false, priority: payload.priority, relevant: payload.relevant, references: { operations: 2, drafts: 0, category_limits: 0, category_budget_groups: 0, reminders: 0, aliases: 0, ml_observations: 0, total: 2 } } })),
     renameCategory: vi.fn(),
     createCategory: vi.fn(),
     goalPlanPreview: vi.fn(async () => ({ plan_preview: { strategy: 'deadline', frequency: 'monthly', remaining_amount: '950.00', occurrence_count: 5, recommended_amount: '190.00', next_occurrence: '2026-09-05', projected_completion_date: '2026-12-05', required_contributions: null, feasible: true, reason: null, schedule_config: { day: 5 }, preview_payload_hash: 'preview-hash' } })),
@@ -235,6 +248,11 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     insightFeedback: vi.fn(async (_id, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
     track: vi.fn(async (_name: string, _properties: Record<string, any> = {}) => undefined),
     exportInfo: vi.fn(async () => ({ available: true, status: 'ready', presets: [], privacy_note: '' })),
+    setVacation: vi.fn(async (payload) => ({ vacation_mode: { ...payload, active: true, status: 'active' } })),
+    previewHistoryDeletion: vi.fn(async (period) => ({ period, start_date: '2026-08-01', end_date: '2026-08-13', summary: { operations: 3, drafts: 1, goals: period === 'all' ? 2 : 0, related_records: 1 } })),
+    deleteHistory: vi.fn(async (period) => ({ deleted: true, period, summary: { operations: 3, drafts: 1, goals: 0, related_records: 1 } })),
+    previewAccountDeletion: vi.fn(async () => ({ summary: { financial_records: 3, preferences: 2, personal_workspaces: 1 }, confirmation_text: 'УДАЛИТЬ', shared_workspace_note: 'Общие данные сохранятся.' })),
+    deleteAccount: vi.fn(async () => ({ deleted: true, terminal: true, message: 'Данные удалены. Вы можете закрыть КопиPaste.' })),
   };
   vi.doMock('../src/api', () => ({ api, requestId: () => 'request-id' }));
   return api;
@@ -1635,5 +1653,66 @@ describe('main plan handlers', () => {
     expect(api.analytics.mock.calls.slice(beforeSwitch)).toHaveLength(1);
     expect(document.body.textContent).toContain('Нет структуры');
     expect(document.body.textContent).not.toContain('Не получилось выполнить действие');
+  });
+
+  it('saves Vacation Mode without changing notification switches', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="profile"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="profile-section"][data-section="behaviour"]')?.click();
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="vacation-open"]')?.click();
+    const form = document.querySelector<HTMLFormElement>('form[data-action="vacation-save"]')!;
+    form.querySelector<HTMLInputElement>('[name="enabled"]')!.checked = true;
+    form.querySelector<HTMLInputElement>('[name="start_date"]')!.value = '2026-08-13';
+    form.querySelector<HTMLInputElement>('[name="end_date"]')!.value = '2026-08-20';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush(8);
+
+    expect(api.setVacation).toHaveBeenCalledWith({ enabled: true, start_date: '2026-08-13', end_date: '2026-08-20' });
+    expect(document.querySelector('form[data-action="vacation-save"]')).toBeNull();
+    expect('updateNotificationPreferences' in api).toBe(false);
+  });
+
+  it('walks history deletion back from confirmation to preview and period selection', async () => {
+    let backHandler: (() => void) | undefined;
+    window.Telegram!.WebApp!.BackButton!.onClick = vi.fn((callback: () => void) => { backHandler = callback; });
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="profile"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="profile-section"][data-section="privacy"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="privacy-history-open"]')?.click();
+    const form = document.querySelector<HTMLFormElement>('form[data-action="privacy-history-preview"]')!;
+    form.querySelector<HTMLSelectElement>('[name="period"]')!.value = 'all';
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await flush(8);
+    expect(api.previewHistoryDeletion).toHaveBeenCalledWith('all');
+    document.querySelector<HTMLButtonElement>('[data-action="privacy-history-confirm"]')?.click();
+    expect(document.body.textContent).toContain('Удалить выбранные данные');
+    backHandler?.();
+    expect(document.body.textContent).toContain('Будет удалено');
+    backHandler?.();
+    expect(document.querySelector('form[data-action="privacy-history-preview"]')).not.toBeNull();
+  });
+
+  it('updates category relevance and stays in the same category mode', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="plans-mode"][data-mode="categories"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="category-open"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="category-preference-relevance"]')?.click();
+    await flush(8);
+
+    expect(api.updateCategoryPreference).toHaveBeenCalledWith('food', { workspace_id: 10, type: 'expense', priority: 'normal', relevant: false });
+    window.Telegram!.WebApp!.BackButton!.onClick;
+    expect(document.body.textContent).toContain('Категории');
   });
 });

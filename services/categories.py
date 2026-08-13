@@ -872,6 +872,31 @@ def _update_derived_expense_categories(
     return changed
 
 
+def _migrate_user_category_preferences(
+    cur,
+    *,
+    user_id: int,
+    workspace_id: int | None,
+    op_type: str,
+    source_key: str,
+    destination_key: str | None,
+    shared_workspace: bool | None,
+) -> int:
+    if not _table_columns(cur, "user_category_preferences"):
+        return 0
+    from services.category_preferences import migrate_category_preferences_cur
+
+    return migrate_category_preferences_cur(
+        cur,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        operation_type=op_type,
+        source_key=source_key,
+        destination_key=destination_key,
+        shared_workspace=_is_shared_scope(workspace_id, shared_workspace),
+    )
+
+
 def transfer_category(
     *,
     user_id: int,
@@ -1118,6 +1143,15 @@ def transfer_category(
                 destination_name=destination_name,
                 shared_workspace=shared_workspace,
             )
+            _migrate_user_category_preferences(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                source_key=source_key,
+                destination_key=destination_key,
+                shared_workspace=shared_workspace,
+            )
 
             archived_category_id = None
             custom_columns = _table_columns(cur, "custom_categories")
@@ -1343,6 +1377,15 @@ def rename_category(
                 destination_name=destination_name,
                 shared_workspace=shared_workspace,
             )
+            _migrate_user_category_preferences(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                source_key=source_key,
+                destination_key=destination_key,
+                shared_workspace=shared_workspace,
+            )
 
             category_id = None
             custom_columns = _table_columns(cur, "custom_categories")
@@ -1505,6 +1548,15 @@ def hard_delete_category_with_operations(
                     cur.execute(f"UPDATE public.ml_observations SET chosen_category=NULL WHERE {' AND '.join(ml_filters)}", tuple(ml_params))
 
             _update_draft_category(cur, user_id=user_id, workspace_id=workspace_id, op_type=op_type, source_key=key, destination_name=None)
+            _migrate_user_category_preferences(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                source_key=key,
+                destination_key=None,
+                shared_workspace=False,
+            )
 
             archived_category_id = None
             if _table_columns(cur, "custom_categories"):
@@ -1574,6 +1626,15 @@ def archive_empty_category(
             )
             if counts.total:
                 raise ValueError("category_has_references")
+            _migrate_user_category_preferences(
+                cur,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                op_type=op_type,
+                source_key=key,
+                destination_key=None,
+                shared_workspace=shared_workspace,
+            )
             archived_category_id = None
             if _table_columns(cur, "custom_categories"):
                 scope, params = _scope_clause(workspace_id)

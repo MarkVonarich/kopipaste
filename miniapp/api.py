@@ -39,6 +39,7 @@ from services.categories import (
     rename_category,
     transfer_category,
 )
+from services.category_preferences import apply_category_preferences, get_category_preferences, set_category_preference
 from services.challenges import ChallengeCard, upsert_assignments
 from services.goal_planning import (
     FREQUENCY_MONTHLY,
@@ -125,6 +126,7 @@ from services.miniapp_limits import (
 )
 from services.notification_preferences import (
     TOGGLE_FIELDS,
+    get_vacation_mode,
     get_notification_preferences,
     grouped_notification_preferences,
     set_daily_notification_time,
@@ -132,8 +134,17 @@ from services.notification_preferences import (
     set_notification_timezone,
     set_quiet_hours,
     set_quiet_hours_time,
+    set_vacation_mode,
     toggle_notification_preference,
     toggle_quiet_hours,
+)
+from services.analytics_privacy import apply_account_deletion
+from services.personal_data_deletion import (
+    delete_financial_history,
+    delete_user_data,
+    dry_run_delete_user_data,
+    history_period_bounds,
+    preview_delete_financial_history,
 )
 from services.user_profile import ALLOWED_CURRENCIES, display_name_from_parts, get_user_preferred_name, set_user_currency, set_user_preferred_name
 from services.user_time import TIMEZONE_CHOICES, user_local_date, user_timezone_name
@@ -395,7 +406,16 @@ class MiniAppAPI:
             return WorkspaceContext(None, req.user_id, req.user_id, "legacy_personal", "owner", "Личное", True)
         return self._write_workspace(req, workspace_id)
 
-    def _managed_categories(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, *, include_references: bool = False) -> list[dict]:
+    def _managed_categories(
+        self,
+        req: MiniAppRequest,
+        workspace_id: int | None,
+        op_type: str,
+        *,
+        include_references: bool = False,
+        include_irrelevant: bool = False,
+        preserve_key: str | None = None,
+    ) -> list[dict]:
         items = list_managed_categories(user_id=req.user_id, workspace_id=workspace_id, op_type=op_type, limit=100)
         reference_counts = {}
         if include_references:
@@ -421,7 +441,12 @@ class MiniAppAPI:
                 counts = reference_counts.get(item.normalized_name) or CategoryReferenceCounts()
                 data["references"] = {**counts.as_dict(), "total": counts.total}
             result.append(data)
-        return result
+        try:
+            preferences = get_category_preferences(req.user_id, workspace_id, op_type, [item["normalized_name"] for item in result])
+        except Exception as exc:
+            log.info("miniapp_category_preferences_unavailable reason=%s", type(exc).__name__)
+            preferences = {}
+        return apply_category_preferences(result, preferences, include_irrelevant=include_irrelevant, preserve_key=preserve_key)
 
     def _validate_category(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, category: str) -> str:
         name = str(category or "").strip()[:64]
@@ -440,7 +465,7 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_type", "Invalid operation type.")
         if all_scope:
             return success({"items": [], "read_only": True, "note": "Выберите одно пространство, чтобы увидеть категории."}, request_id=req.request_id)
-        return success({"items": self._managed_categories(req, workspace_ids[0], op_type), "read_only": False}, request_id=req.request_id)
+        return success({"items": self._managed_categories(req, workspace_ids[0], op_type, preserve_key=params.get("current_category")), "read_only": False}, request_id=req.request_id)
 
     def managed_categories(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))
@@ -449,11 +474,11 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_type", "Invalid operation type.")
         if all_scope:
             return success({"items": [], "read_only": True, "note": "Выберите одно пространство, чтобы управлять категориями."}, request_id=req.request_id)
-        return success({"items": self._managed_categories(req, workspace_ids[0], op_type, include_references=True), "read_only": False}, request_id=req.request_id)
+        return success({"items": self._managed_categories(req, workspace_ids[0], op_type, include_references=True, include_irrelevant=True), "read_only": False}, request_id=req.request_id)
 
     def _category_by_token(self, req: MiniAppRequest, workspace_id: int | None, op_type: str, token: str) -> dict:
         token = unquote(str(token or "")).strip()
-        for item in self._managed_categories(req, workspace_id, op_type, include_references=False):
+        for item in self._managed_categories(req, workspace_id, op_type, include_references=False, include_irrelevant=True):
             if item["token"] == token:
                 return item
         raise MiniAppError(404, "category_not_found", "Category was not found.")
@@ -470,6 +495,29 @@ class MiniAppAPI:
             raise MiniAppError(400, "bad_category_name", "Invalid category name.") from exc
         self._track(req, "mini_app_category_created", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense"})
         return success({"category": self._category_by_token(req, ctx.workspace_id, op_type, result.normalized_name), "created": result.created}, request_id=req.request_id)
+
+    def update_category_preference(self, req: MiniAppRequest, token: str, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        ctx = self._write_scope(req, body.get("workspace_id"))
+        op_type = OP_TYPES.get(str(body.get("type") or "expense"))
+        if not op_type:
+            raise MiniAppError(400, "bad_type", "Invalid operation type.")
+        current = self._category_by_token(req, ctx.workspace_id, op_type, token)
+        priority = body.get("priority")
+        relevant = body.get("relevant")
+        try:
+            preference = set_category_preference(
+                req.user_id,
+                ctx.workspace_id,
+                op_type,
+                current["normalized_name"],
+                priority=str(priority or ""),
+                relevant=relevant,
+            )
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_category_preference", "Проверьте настройки категории.") from exc
+        self._track(req, "category_preference_changed", workspace_id=ctx.workspace_id, properties={"priority": preference.priority, "relevant": preference.relevant, "operation_type": "income" if op_type == "Доходы" else "expense"})
+        return success({"category": self._category_by_token(req, ctx.workspace_id, op_type, current["normalized_name"])}, request_id=req.request_id)
 
     def update_category(self, req: MiniAppRequest, token: str, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
@@ -1671,7 +1719,10 @@ class MiniAppAPI:
         if "category" in body:
             category = str(body["category"]).strip()[:64]
             row_type = fields.get("op_type") or row[2]
-            fields["category"] = self._validate_category(req, ctx.workspace_id, row_type, category)
+            if row_type == row[2] and normalized_category_key(category) == normalized_category_key(str(row[3] or "")):
+                fields["category"] = category
+            else:
+                fields["category"] = self._validate_category(req, ctx.workspace_id, row_type, category)
         if "description" in body:
             fields["comment"] = str(body["description"]).strip()[:200]
         if "op_date" in body:
@@ -3775,6 +3826,11 @@ class MiniAppAPI:
         except Exception as exc:
             log.info("miniapp_home_preferences_unavailable reason=%s", type(exc).__name__)
             home_preferences = reconcile_home_preferences(None, None)
+        try:
+            vacation_mode = get_vacation_mode(req.user_id)
+        except Exception as exc:
+            log.info("miniapp_vacation_mode_unavailable reason=%s", type(exc).__name__)
+            vacation_mode = {"enabled": False, "active": False, "status": "disabled", "start_date": None, "end_date": None}
         return success({
             "theme": self._profile_theme(req.user_id),
             "preferred_name": preferred_name,
@@ -3786,6 +3842,7 @@ class MiniAppAPI:
             "workspaces": self._workspace_rows(req.user_id),
             "categories": categories,
             "notifications": notifications,
+            "vacation_mode": vacation_mode,
             "home_preferences": {"widgets": home_widget_registry(), **home_preferences},
             "premium": self._premium_info(),
             "export": self._export_info(req),
@@ -3796,6 +3853,92 @@ class MiniAppAPI:
             },
             "version": self.version,
         }, request_id=req.request_id)
+
+    def profile_behaviour(self, req: MiniAppRequest) -> dict:
+        return success({"vacation_mode": get_vacation_mode(req.user_id)}, request_id=req.request_id)
+
+    def set_profile_vacation(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        if "enabled" not in body or not isinstance(body.get("enabled"), bool):
+            raise MiniAppError(400, "bad_vacation_enabled", "Проверьте состояние режима отпуска.")
+        try:
+            vacation = set_vacation_mode(
+                req.user_id,
+                enabled=body["enabled"],
+                start_date=body.get("start_date"),
+                end_date=body.get("end_date"),
+            )
+        except ValueError as exc:
+            code = str(exc)
+            message = {
+                "vacation_dates_required": "Укажите дату начала и окончания.",
+                "invalid_vacation_range": "Дата окончания не может быть раньше даты начала.",
+                "invalid_vacation_date": "Проверьте даты режима отпуска.",
+            }.get(code, "Проверьте настройки режима отпуска.")
+            raise MiniAppError(400, code, message) from exc
+        self._track(req, "vacation_mode_changed", properties={"enabled": vacation["enabled"], "vacation_state": vacation["status"]})
+        return success({"vacation_mode": vacation}, request_id=req.request_id)
+
+    @staticmethod
+    def _history_summary(counts: dict[str, int]) -> dict[str, int]:
+        return {
+            "operations": int(counts.get("operations", 0)),
+            "drafts": int(counts.get("operation_drafts", 0)),
+            "goals": int(counts.get("financial_goals", 0)),
+            "related_records": sum(int(counts.get(key, 0)) for key in ("financial_activity_events", "notification_events", "ml_observations", "operation_versions", "operations_history")),
+        }
+
+    @staticmethod
+    def _account_summary(counts: dict[str, int]) -> dict[str, int]:
+        financial_keys = {"operations", "category_limits", "general_spending_limits", "financial_goals", "goal_drafts", "budgets", "user_reminders"}
+        preference_keys = {"notification_preferences", "user_home_preferences", "user_category_preferences", "user_aliases", "user_announcement_state"}
+        return {
+            "financial_records": sum(int(counts.get(key, 0)) for key in financial_keys),
+            "preferences": sum(int(counts.get(key, 0)) for key in preference_keys),
+            "personal_workspaces": int(counts.get("workspaces", 0)),
+        }
+
+    def profile_privacy(self, req: MiniAppRequest) -> dict:
+        return success({
+            "history_periods": ["today", "last7", "this_month", "prev_month", "this_year", "all"],
+            "export": self._export_info(req),
+            "shared_workspace_note": "Личные данные и личное пространство будут удалены. Данные других участников общих пространств сохранятся, а необходимая общая атрибуция будет обезличена.",
+        }, request_id=req.request_id)
+
+    def preview_profile_history_deletion(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        period = str(body.get("period") or "")
+        try:
+            start_date, end_date = history_period_bounds(period, user_local_date(req.user_id))
+        except ValueError as exc:
+            raise MiniAppError(400, "unsupported_history_period", "Выберите доступный период.") from exc
+        preview = preview_delete_financial_history(req.user_id, start_date, end_date)
+        return success({"period": period, "start_date": start_date, "end_date": end_date, "summary": self._history_summary(preview.counts)}, request_id=req.request_id)
+
+    def delete_profile_history(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        if body.get("confirmed") is not True:
+            raise MiniAppError(400, "history_confirmation_required", "Подтвердите удаление финансовой истории.")
+        period = str(body.get("period") or "")
+        try:
+            start_date, end_date = history_period_bounds(period, user_local_date(req.user_id))
+        except ValueError as exc:
+            raise MiniAppError(400, "unsupported_history_period", "Выберите доступный период.") from exc
+        result = delete_financial_history(req.user_id, start_date, end_date)
+        return success({"deleted": result.deleted, "period": period, "summary": self._history_summary(result.counts)}, request_id=req.request_id)
+
+    def preview_profile_account_deletion(self, req: MiniAppRequest) -> dict:
+        self._check_write_rate(req)
+        preview = dry_run_delete_user_data(req.user_id)
+        return success({"summary": self._account_summary(preview.counts), "confirmation_text": "УДАЛИТЬ", "shared_workspace_note": "Личные данные и личное пространство будут удалены. Данные других участников общих пространств сохранятся; необходимая общая атрибуция будет обезличена."}, request_id=req.request_id)
+
+    def delete_profile_account(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        if body.get("confirmed") is not True or body.get("confirmation_text") != "УДАЛИТЬ":
+            raise MiniAppError(400, "account_confirmation_required", "Введите УДАЛИТЬ и подтвердите удаление.")
+        apply_account_deletion(req.user_id, strict=True)
+        result = delete_user_data(req.user_id)
+        return success({"deleted": result.deleted, "terminal": True, "message": "Данные удалены. Вы можете закрыть КопиPaste."}, request_id=req.request_id)
 
     def profile_categories(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         workspace_ids, all_scope = self._read_scope(req, params.get("workspace_id"))

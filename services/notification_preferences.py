@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import time
+from datetime import date, time
 
 from psycopg2 import errors
 
 from db.database import get_conn, pg_fetchall
 from services.user_time import DEFAULT_TIMEZONE, is_valid_timezone_name
+from services.user_time import user_local_date
 
 TOGGLE_FIELDS = {
     "morning": "morning_enabled",
@@ -31,6 +32,105 @@ GROUPED_NOTIFICATION_FIELDS = {
     ),
     "reports": ("weekly_reports_enabled", "monthly_reports_enabled"),
 }
+
+
+def vacation_mode_state(*, enabled: bool, start_date: date | None, end_date: date | None, today: date) -> dict:
+    if not enabled:
+        status = "disabled"
+        active = False
+    elif start_date is None or end_date is None:
+        status = "disabled"
+        active = False
+    elif today < start_date:
+        status = "scheduled"
+        active = False
+    elif today <= end_date:
+        status = "active"
+        active = True
+    else:
+        status = "completed"
+        active = False
+    return {
+        "enabled": bool(enabled),
+        "active": active,
+        "status": status,
+        "start_date": start_date.isoformat() if start_date else None,
+        "end_date": end_date.isoformat() if end_date else None,
+    }
+
+
+def get_vacation_mode(user_id: int, *, today: date | None = None) -> dict:
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT COALESCE(vacation_enabled, false), vacation_start, vacation_end
+              FROM public.notification_preferences
+             WHERE user_id=%s
+             LIMIT 1
+            """,
+            (int(user_id),),
+        )
+    except (errors.UndefinedTable, errors.UndefinedColumn):
+        rows = []
+    enabled, start_date, end_date = rows[0] if rows else (False, None, None)
+    return vacation_mode_state(
+        enabled=bool(enabled),
+        start_date=start_date,
+        end_date=end_date,
+        today=today or user_local_date(int(user_id)),
+    )
+
+
+def set_vacation_mode(user_id: int, *, enabled: bool, start_date: str | None, end_date: str | None) -> dict:
+    if not isinstance(enabled, bool):
+        raise ValueError("invalid_enabled")
+    try:
+        parsed_start = date.fromisoformat(start_date) if start_date else None
+        parsed_end = date.fromisoformat(end_date) if end_date else None
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_vacation_date") from exc
+    if enabled and (parsed_start is None or parsed_end is None):
+        raise ValueError("vacation_dates_required")
+    if parsed_start and parsed_end and parsed_end < parsed_start:
+        raise ValueError("invalid_vacation_range")
+    today = user_local_date(int(user_id))
+    active_now = bool(enabled and parsed_start and parsed_end and parsed_start <= today <= parsed_end)
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.notification_preferences
+                    (user_id, vacation_enabled, vacation_start, vacation_end)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET vacation_enabled=EXCLUDED.vacation_enabled,
+                       vacation_start=CASE WHEN EXCLUDED.vacation_enabled THEN EXCLUDED.vacation_start ELSE public.notification_preferences.vacation_start END,
+                       vacation_end=CASE WHEN EXCLUDED.vacation_enabled THEN EXCLUDED.vacation_end ELSE public.notification_preferences.vacation_end END,
+                       updated_at=now()
+                """,
+                (int(user_id), enabled, parsed_start, parsed_end),
+            )
+            if active_now:
+                cur.execute(
+                    """
+                    UPDATE public.automatic_notifications
+                       SET status='skipped', skip_reason='vacation_mode',
+                           locked_at=NULL, locked_by=NULL, updated_at=now()
+                     WHERE user_id=%s
+                       AND status IN ('pending','claimed')
+                       AND notification_type <> 'user_reminder'
+                    """,
+                    (int(user_id),),
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_vacation_mode(int(user_id), today=today)
 
 
 def _preferences_rows(user_id: int):
@@ -136,6 +236,7 @@ def grouped_notification_preferences(user_id: int) -> dict:
     reports_enabled = bool(prefs.get("weekly_reports_enabled", True) or prefs.get("monthly_reports_enabled", True))
     return {
         **prefs,
+        "vacation_mode": get_vacation_mode(user_id),
         "daily_notifications": {
             "enabled": daily_enabled,
             "evening_time": prefs.get("evening_time") or "20:30",

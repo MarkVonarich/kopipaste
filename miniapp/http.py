@@ -92,6 +92,9 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.managed_categories(req, params))
         if method == "POST" and path == "/miniapp/api/categories":
             return _json_response(start_response, 200, api.create_category(req, body))
+        if method == "POST" and path.startswith("/miniapp/api/categories/") and path.endswith("/preferences"):
+            token = path.strip("/").split("/")[3]
+            return _json_response(start_response, 200, api.update_category_preference(req, token, body))
         if path.startswith("/miniapp/api/categories/"):
             token = path.rsplit("/", 1)[-1]
             if method == "PATCH":
@@ -224,6 +227,20 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.notification_preferences(req))
         if method == "POST" and path == "/miniapp/api/profile/notifications":
             return _json_response(start_response, 200, api.update_notification_preferences(req, body))
+        if method == "GET" and path == "/miniapp/api/profile/behaviour":
+            return _json_response(start_response, 200, api.profile_behaviour(req))
+        if method == "POST" and path == "/miniapp/api/profile/vacation":
+            return _json_response(start_response, 200, api.set_profile_vacation(req, body))
+        if method == "GET" and path == "/miniapp/api/profile/privacy":
+            return _json_response(start_response, 200, api.profile_privacy(req))
+        if method == "POST" and path == "/miniapp/api/profile/privacy/history/preview":
+            return _json_response(start_response, 200, api.preview_profile_history_deletion(req, body))
+        if method == "DELETE" and path == "/miniapp/api/profile/privacy/history":
+            return _json_response(start_response, 200, api.delete_profile_history(req, body))
+        if method == "POST" and path == "/miniapp/api/profile/privacy/account/preview":
+            return _json_response(start_response, 200, api.preview_profile_account_deletion(req))
+        if method == "DELETE" and path == "/miniapp/api/profile/privacy/account":
+            return _json_response(start_response, 200, api.delete_profile_account(req, body))
         if method == "POST" and path == "/miniapp/api/profile/preferred-name":
             return _json_response(start_response, 200, api.set_profile_preferred_name(req, body))
         if method == "POST" and path == "/miniapp/api/profile/currency":

@@ -13,6 +13,7 @@ import type {
   PlanningEstimate,
   GlobalFinancialFilters,
   NotificationPreferences,
+  VacationMode,
   Operation,
   PremiumInfo,
   RadarMoneyAxis,
@@ -296,8 +297,8 @@ export const api = {
     apiFetch<{ recorded: boolean; feedback_type: 'useful' | 'not_useful'; suppressed_until?: string | null }>(`/miniapp/api/insights/${encodeURIComponent(id)}/feedback`, { method: 'POST', body: JSON.stringify({ workspace_id: workspaceId, feedback_type: feedbackType }) }),
   operations: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters & { currency?: string; merchant?: string; merchant_key?: string; category_key?: string; scope_category?: string }, offset = 0, search = '') =>
     apiFetch<OperationsResponse>(`/miniapp/api/operations${query({ workspace_id: workspaceId, ...filters, offset, search })}`),
-  categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы') =>
-    apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type })}`),
+  categories: (workspaceId: number | 'all' | null, type: 'expense' | 'income' | 'Расходы' | 'Доходы', currentCategory?: string) =>
+    apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type, current_category: currentCategory })}`),
   managedCategories: (workspaceId: number | 'all' | null, type: 'expense' | 'income') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories/manage${query({ workspace_id: workspaceId, type })}`),
   createCategory: (payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
@@ -369,7 +370,7 @@ export const api = {
     apiFetch<{ budget: CategoryBudgetGroup }>(`/miniapp/api/category-budgets/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCategoryBudget: (id: number, workspaceId: number | 'all' | null) =>
     apiFetch<{ deleted: boolean; budget_id: number }>(`/miniapp/api/category-budgets/${id}`, { method: 'DELETE', body: JSON.stringify({ workspace_id: workspaceId }) }),
-  profile: () => apiFetch<{ theme: ThemeMode; preferred_name?: string | null; display_name?: string; currency: string; available_currencies?: string[]; timezone: string; timezone_options?: Array<{ label: string; value: string }>; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] }; home_preferences: HomePreferences }>('/miniapp/api/profile'),
+  profile: () => apiFetch<{ theme: ThemeMode; preferred_name?: string | null; display_name?: string; currency: string; available_currencies?: string[]; timezone: string; timezone_options?: Array<{ label: string; value: string }>; workspaces: Workspace[]; version: string; links?: { privacy?: string | null; terms?: string | null }; help_url: string; notifications: NotificationPreferences; vacation_mode: VacationMode; premium: PremiumInfo; export: { available: boolean; status: string; presets: string[]; privacy_note: string }; categories: { expense: CategoryOption[]; income: CategoryOption[] }; home_preferences: HomePreferences }>('/miniapp/api/profile'),
   setTheme: (theme: ThemeMode) => apiFetch<{ theme: ThemeMode }>('/miniapp/api/profile/theme', { method: 'POST', body: JSON.stringify({ theme }) }),
   setPreferredName: (preferred_name: string) => apiFetch<{ preferred_name?: string | null; display_name: string }>('/miniapp/api/profile/preferred-name', { method: 'POST', body: JSON.stringify({ preferred_name }) }),
   setCurrency: (currency: string) => apiFetch<{ currency: string }>('/miniapp/api/profile/currency', { method: 'POST', body: JSON.stringify({ currency }) }),
@@ -379,6 +380,15 @@ export const api = {
   notificationPreferences: () => apiFetch<NotificationPreferences>('/miniapp/api/profile/notifications'),
   updateNotificationPreferences: (payload: Record<string, unknown>) =>
     apiFetch<NotificationPreferences>('/miniapp/api/profile/notifications', { method: 'POST', body: JSON.stringify(payload) }),
+  setVacation: (payload: { enabled: boolean; start_date?: string | null; end_date?: string | null }) =>
+    apiFetch<{ vacation_mode: VacationMode }>('/miniapp/api/profile/vacation', { method: 'POST', body: JSON.stringify(payload) }),
+  privacy: () => apiFetch<{ history_periods: string[]; export: Record<string, unknown>; shared_workspace_note: string }>('/miniapp/api/profile/privacy'),
+  previewHistoryDeletion: (period: string) => apiFetch<{ period: string; start_date?: string | null; end_date?: string | null; summary: { operations: number; drafts: number; goals: number; related_records: number } }>('/miniapp/api/profile/privacy/history/preview', { method: 'POST', body: JSON.stringify({ period }) }),
+  deleteHistory: (period: string) => apiFetch<{ deleted: boolean; period: string; summary: { operations: number; drafts: number; goals: number; related_records: number } }>('/miniapp/api/profile/privacy/history', { method: 'DELETE', body: JSON.stringify({ period, confirmed: true }) }),
+  previewAccountDeletion: () => apiFetch<{ summary: { financial_records: number; preferences: number; personal_workspaces: number }; confirmation_text: string; shared_workspace_note: string }>('/miniapp/api/profile/privacy/account/preview', { method: 'POST', body: '{}' }),
+  deleteAccount: (confirmation_text: string) => apiFetch<{ deleted: boolean; terminal: boolean; message: string }>('/miniapp/api/profile/privacy/account', { method: 'DELETE', body: JSON.stringify({ confirmed: true, confirmation_text }) }),
+  updateCategoryPreference: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; priority: 'normal' | 'high'; relevant: boolean }) =>
+    apiFetch<{ category: CategoryOption }>(`/miniapp/api/categories/${categoryPathToken(token)}/preferences`, { method: 'POST', body: JSON.stringify(payload) }),
   premium: () => apiFetch<PremiumInfo>('/miniapp/api/profile/premium'),
   exportInfo: () => apiFetch<{ available: boolean; status: string; presets: string[]; privacy_note: string }>('/miniapp/api/profile/export'),
   exportPreview: (payload: Record<string, unknown>) =>
