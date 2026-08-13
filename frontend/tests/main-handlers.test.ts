@@ -352,6 +352,42 @@ describe('main plan handlers', () => {
     delete window.Telegram;
   });
 
+  it('keeps only three primary Home filters and applies secondary filters from Еще', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+
+    const primary = document.querySelector('.home-primary-filters');
+    expect(primary?.children).toHaveLength(3);
+    expect(primary?.querySelector('[aria-label="Пространство"]')).not.toBeNull();
+    expect(primary?.querySelector('[aria-label="Период"]')).not.toBeNull();
+    expect(primary?.querySelector('[data-action="home-filters-open"]')?.textContent).toContain('Еще');
+    expect(primary?.querySelector('[data-action="global-currency"]')).toBeNull();
+    expect(primary?.querySelector('[data-action="operation-type"]')).toBeNull();
+    expect(primary?.querySelector('[data-action="category-filter"]')).toBeNull();
+
+    document.querySelector<HTMLButtonElement>('[data-action="home-filters-open"]')?.click();
+    expect(document.querySelector('[data-sheet]')?.getAttribute('aria-label')).toBe('Еще');
+    expect(document.querySelector('[data-action="global-currency"]')).not.toBeNull();
+    expect(document.querySelector('[data-action="operation-type"]')).not.toBeNull();
+    expect(document.querySelector('[data-action="category-filter"]')).not.toBeNull();
+
+    const currency = document.querySelector<HTMLSelectElement>('[data-action="global-currency"]')!;
+    currency.value = 'EUR';
+    currency.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush(8);
+
+    expect(api.overview).toHaveBeenLastCalledWith(10, expect.objectContaining({ currency: 'EUR' }));
+    expect(document.querySelector<HTMLSelectElement>('[data-action="global-currency"]')?.value).toBe('EUR');
+    expect(document.querySelector('[data-sheet]')?.getAttribute('aria-label')).toBe('Еще');
+
+    const back = (window.Telegram!.WebApp!.BackButton!.onClick as any).mock.calls[0][0];
+    back();
+    expect(document.querySelector('[data-sheet]')).toBeNull();
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="Пространство"]')?.value).toBe('10');
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="Период"]')?.value).toBe('current_month');
+  });
+
   it('opens escaped OPEN_DETAIL copy in a sheet, stays on Home, and closes with Telegram Back', async () => {
     let backHandler: (() => void) | undefined;
     window.Telegram!.WebApp!.BackButton!.onClick = vi.fn((callback: () => void) => {
@@ -544,9 +580,24 @@ describe('main plan handlers', () => {
       .map(([, properties]) => properties?.update_key);
 
     expect(impressionIds()).toEqual(['a']);
-    expect(document.querySelector('[data-action="carousel-dot"]')).toBeNull();
+    expect(document.querySelectorAll('[data-action="carousel-dot"]')).toHaveLength(3);
     document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.dispatchEvent(new Event('focus'));
     expect(impressionIds()).toEqual(['a']);
+  });
+
+  it('browses compact announcements with dots and swipe', async () => {
+    const api = installAppMocks([], undefined, [announcement('a'), announcement('b'), announcement('c')]);
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-index="1"]')?.click();
+    expect(document.querySelector('[data-announcement-target]')?.textContent).toContain('Update b');
+
+    const card = document.querySelector<HTMLElement>('[data-carousel="announcement"]')!;
+    dispatchPointer(card, 'pointerdown', 120, 10);
+    dispatchPointer(card, 'pointerup', 20, 10);
+    expect(document.querySelector('[data-announcement-target]')?.textContent).toContain('Update c');
+    expect(api.track).toHaveBeenCalledWith('mini_app_announcement_carousel_changed', expect.objectContaining({ direction: 'next', position: '3', total: '3' }));
   });
 
   it('keeps What’s New fixed even when legacy preferences disabled it', async () => {
@@ -877,6 +928,7 @@ describe('main plan handlers', () => {
     await import('../src/main');
     await flush();
 
+    document.querySelector<HTMLButtonElement>('[data-action="home-filters-open"]')?.click();
     const categoryFilter = document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')!;
     categoryFilter.value = 'Food';
     categoryFilter.dispatchEvent(new Event('change', { bubbles: true }));

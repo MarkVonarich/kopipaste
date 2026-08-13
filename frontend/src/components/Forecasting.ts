@@ -1,4 +1,4 @@
-import { formatMoneyString } from '../money';
+import { formatMoneyString, formatWholeMoneyString } from '../money';
 import type { CanSpendResult, SpendableForecast, SpendableSummary } from '../types';
 import { esc } from './ui';
 
@@ -13,7 +13,7 @@ export function SpendableCard(summary?: SpendableSummary, feedbackSaving = false
   return `<article class="summary-card spendable-card ${esc(summary.risk_state)}" data-testid="home-spendable-card">
     <button class="summary-card-action" type="button" data-action="spendable-open">
       <span>Свободно</span>
-      <strong>~${esc(formatMoneyString(summary.amount, summary.currency))}</strong>
+      <strong class="home-primary-amount">~${esc(formatWholeMoneyString(summary.amount, summary.currency))}</strong>
       <small>${esc(summary.period_label)}</small>
     </button>
     ${summary.experiment?.enabled ? InlineForecastFeedback(summary.fingerprint, summary.feedback, feedbackSaving) : ''}

@@ -25,6 +25,17 @@ export function formatMoneyString(value: string | number, currency = 'RUB'): str
   return `${negative ? '-' : ''}${grouped}${fraction} ${symbol}`.trim();
 }
 
+export function formatWholeMoneyString(value: string | number, currency = 'RUB'): string {
+  const normalized = normalizeMoneyText(value);
+  const negative = normalized.startsWith('-');
+  const [wholeRaw, fractionRaw = '00'] = (negative ? normalized.slice(1) : normalized).split('.');
+  let whole = BigInt(wholeRaw || '0');
+  if (Number(fractionRaw) >= 50) whole += 1n;
+  const grouped = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const symbol = CURRENCY_SYMBOLS[currency.toUpperCase()] ?? currency.toUpperCase();
+  return `${negative && whole !== 0n ? '-' : ''}${grouped} ${symbol}`.trim();
+}
+
 export function subtractMoneyStrings(income: string | number, expense: string | number): string {
   const toCents = (value: string | number) => {
     const normalized = normalizeMoneyText(value);

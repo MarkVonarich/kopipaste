@@ -253,6 +253,32 @@ function planningPayload(form: HTMLFormElement, kind: PlanningPayload['kind']): 
   };
 }
 
+function renderSecondaryFilters(surface: 'toolbar' | 'sheet'): string {
+  const filters = activeFilters();
+  const currencies = Array.from(new Set([state.boot?.user.currency || 'RUB', ...(profile?.available_currencies || []), 'RUB', 'USD', 'EUR']));
+  const categoryOptionsHtml = [
+    `<option value="all" ${filters.category === 'all' ? 'selected' : ''}>Все категории</option>`,
+    ...globalCategoryOptions.map((category) => `<option value="${esc(category.name)}" ${filters.category === category.name ? 'selected' : ''}>${esc(category.name)}</option>`)
+  ].join('');
+  const fieldClass = surface === 'sheet' ? 'field' : 'toolbar-field';
+  const controlClass = surface === 'sheet' ? 'select' : 'select compact';
+  return `
+      <label class="${fieldClass}"><span>Валюта</span><select class="${controlClass}" data-action="global-currency" aria-label="Валюта">
+        ${currencies.map((currency) => `<option value="${esc(currency)}" ${filters.currency === currency || (!filters.currency && state.boot?.user.currency === currency) ? 'selected' : ''}>${esc(currency)}</option>`).join('')}
+      </select></label>
+      <label class="${fieldClass}"><span>Тип</span><select class="${controlClass}" data-action="operation-type" aria-label="Тип операции">
+        <option value="all" ${filters.operation_type === 'all' ? 'selected' : ''}>Все операции</option>
+        <option value="expense" ${filters.operation_type === 'expense' ? 'selected' : ''}>Расходы</option>
+        <option value="income" ${filters.operation_type === 'income' ? 'selected' : ''}>Доходы</option>
+      </select></label>
+      <label class="${fieldClass}"><span>Категория</span><select class="${controlClass}" data-action="category-filter" aria-label="Категория">${categoryOptionsHtml}</select></label>
+      ${surface === 'sheet' && filters.period === 'custom' ? `
+        <label class="field"><span>Начало</span><input class="input" type="date" data-action="start-date" value="${esc(filters.start_date || '')}" /></label>
+        <label class="field"><span>Конец</span><input class="input" type="date" data-action="end-date" value="${esc(filters.end_date || '')}" /></label>
+      ` : ''}
+  `;
+}
+
 function renderTopbar(): string {
   const workspaceOptions = (state.boot?.workspaces || [])
     .map((workspace) => `<option value="${esc(workspace.workspace_id)}" ${workspace.workspace_id === state.workspaceId ? 'selected' : ''}>${esc(workspaceLabel(workspace))}</option>`)
@@ -264,27 +290,20 @@ function renderTopbar(): string {
     ['custom', 'Период']
   ];
   const filters = activeFilters();
-  const currencies = Array.from(new Set([state.boot?.user.currency || 'RUB', ...(profile?.available_currencies || []), 'RUB', 'USD', 'EUR']));
-  const categoryOptionsHtml = [
-    `<option value="all" ${filters.category === 'all' ? 'selected' : ''}>Все категории</option>`,
-    ...globalCategoryOptions.map((category) => `<option value="${esc(category.name)}" ${filters.category === category.name ? 'selected' : ''}>${esc(category.name)}</option>`)
-  ].join('');
+  const primary = `
+    <label class="toolbar-field"><span>Пространство</span><select class="select compact" data-action="workspace" aria-label="Пространство">${workspaceOptions}</select></label>
+    <label class="toolbar-field"><span>Период</span><select class="select compact" data-action="period" aria-label="Период">
+      ${periodOptions.map(([key, label]) => `<option value="${key}" ${filters.period === key ? 'selected' : ''}>${label}</option>`).join('')}
+    </select></label>`;
+
+  if (state.tab === 'home') {
+    return `<div class="toolbar global-filter-strip home-primary-filters" aria-label="Фильтры">${primary}
+      <button class="toolbar-more-filter" type="button" data-action="home-filters-open" aria-label="Еще"><span>Еще</span><span aria-hidden="true">•••</span></button>
+    </div>`;
+  }
+
   return `
-    <div class="toolbar global-filter-strip" aria-label="Фильтры">
-      <label class="toolbar-field"><span>Пространство</span><select class="select compact" data-action="workspace" aria-label="Пространство">${workspaceOptions}</select></label>
-      <label class="toolbar-field"><span>Период</span><select class="select compact" data-action="period" aria-label="Период">
-        ${periodOptions.map(([key, label]) => `<option value="${key}" ${filters.period === key ? 'selected' : ''}>${label}</option>`).join('')}
-      </select></label>
-      <label class="toolbar-field"><span>Валюта</span><select class="select compact" data-action="global-currency" aria-label="Валюта">
-        ${currencies.map((currency) => `<option value="${esc(currency)}" ${filters.currency === currency || (!filters.currency && state.boot?.user.currency === currency) ? 'selected' : ''}>${esc(currency)}</option>`).join('')}
-      </select></label>
-      <label class="toolbar-field"><span>Тип</span><select class="select compact" data-action="operation-type" aria-label="Тип операции">
-        <option value="all" ${filters.operation_type === 'all' ? 'selected' : ''}>Все операции</option>
-        <option value="expense" ${filters.operation_type === 'expense' ? 'selected' : ''}>Расходы</option>
-        <option value="income" ${filters.operation_type === 'income' ? 'selected' : ''}>Доходы</option>
-      </select></label>
-      <label class="toolbar-field"><span>Категория</span><select class="select compact" data-action="category-filter" aria-label="Категория">${categoryOptionsHtml}</select></label>
-    </div>
+    <div class="toolbar global-filter-strip" aria-label="Фильтры">${primary}${renderSecondaryFilters('toolbar')}</div>
     ${filters.period === 'custom' ? `
       <div class="toolbar custom-period">
         <label class="toolbar-field"><span>Начало</span><input class="input compact" type="date" data-action="start-date" value="${esc(filters.start_date || '')}" /></label>
@@ -525,6 +544,9 @@ function renderSheet(): string {
   }
   if (state.sheet === 'can-spend-result' && state.canSpendResult && state.spendableForecast) {
     return BottomSheet('Сколько я могу потратить?', CanSpendView(state.canSpendResult, state.spendableForecast.currency));
+  }
+  if (state.sheet === 'home-filters') {
+    return BottomSheet('Еще', `<div class="form-grid home-filter-sheet">${renderSecondaryFilters('sheet')}</div>`);
   }
   if (state.sheet === 'home-settings') {
     const preferences = profile?.home_preferences || (overview?.home_widgets && overview.home_preferences ? { widgets: overview.home_widgets, ...overview.home_preferences } : null);
@@ -1397,6 +1419,10 @@ function wireEvents(): void {
     await loadFilterCategories();
     await api.track('mini_app_workspace_changed', { scope: String(state.workspaceId) });
     await loadScreen();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="home-filters-open"]')?.addEventListener('click', () => {
+    state.sheet = 'home-filters';
+    render();
   });
   app.querySelector<HTMLSelectElement>('[data-action="global-currency"]')?.addEventListener('change', async (event) => {
     setGlobalFilters({ ...activeFilters(), currency: (event.currentTarget as HTMLSelectElement).value });
