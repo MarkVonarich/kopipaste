@@ -163,11 +163,20 @@ class _IdemCursor:
                 row["enabled"] = bool(enabled)
                 self._next = (int(limit_id), row["name"], row["amount"], row["currency"], row["period"], workspace_id, row["enabled"], row["alerts_enabled"])
             return
-        if compact.startswith("SELECT currency FROM public.category_limits"):
+        if compact.startswith("SELECT currency, COALESCE(display_name, category), alerts_enabled"):
             user_id, workspace_id, period, category = params
             row = self.conn.category_limits.get((int(user_id), workspace_id, period, category))
             if row:
-                self._next = (row["currency"],)
+                self._next = (row["currency"], row.get("title", category), row.get("alerts_enabled", True))
+            return
+        if compact.startswith("SELECT pg_advisory_xact_lock"):
+            return
+        if compact.startswith("SELECT 1 FROM public.category_limits"):
+            user_id, workspace_id, period, category = params[:4]
+            key = (int(user_id), workspace_id, period, category)
+            old_key = (int(user_id), workspace_id, params[4], params[5]) if len(params) == 6 else None
+            if key in self.conn.category_limits and key != old_key:
+                self._next = (1,)
             return
         if compact.startswith("DELETE FROM public.category_limits"):
             user_id, workspace_id, period, category = params
@@ -175,9 +184,11 @@ class _IdemCursor:
             self.rowcount = 1
             return
         if compact.startswith("INSERT INTO public.category_limits"):
-            user_id, workspace_id, period, category, amount, currency = params
-            self.conn.category_limits[(int(user_id), workspace_id, period, category)] = {"amount": amount, "currency": currency}
-            self._next = (period, category, amount, currency, workspace_id)
+            user_id, workspace_id, period, category, amount, currency, title, alerts_enabled = params
+            self.conn.category_limits[(int(user_id), workspace_id, period, category)] = {
+                "amount": amount, "currency": currency, "title": title, "alerts_enabled": bool(alerts_enabled),
+            }
+            self._next = (period, category, amount, currency, workspace_id, title, bool(alerts_enabled))
             return
         raise AssertionError(compact)
 

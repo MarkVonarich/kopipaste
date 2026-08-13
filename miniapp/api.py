@@ -81,6 +81,16 @@ from services.planning import PlanningError, PlanningRequest, calculate_planning
 from services.announcements import announcement_candidate, dismiss_announcement, report_ready_announcements, resolve_announcements
 from services.reports import ReportBuildRequest, build_report, comparable_period, completed_report_period, report_ready_kinds
 from services.home_preferences import get_home_preferences, home_widget_registry, reconcile_home_preferences, save_home_preferences
+from services.experiments import exposure_properties
+from services.forecasting import (
+    ForecastPeriod,
+    ForecastRepository,
+    calculate_spendable,
+    can_spend as calculate_can_spend,
+    explain_forecast_change,
+    record_forecast_feedback,
+    unavailable as forecast_unavailable,
+)
 from services.shopping import (
     ShoppingError,
     clear_completed_shopping_items,
@@ -1054,6 +1064,163 @@ class MiniAppAPI:
             return "Активность · Доходы"
         return "Активность · Все операции"
 
+    def _forecast_context(self, req: MiniAppRequest, params: dict[str, Any]) -> tuple[TransactionFilters, int | None, str, str, ForecastPeriod]:
+        tx = self._transaction_filters(req, params)
+        if tx.all_scope:
+            raise MiniAppError(400, "forecast_workspace_required", "Выберите пространство для прогноза.")
+        workspace_id = tx.workspace_ids[0]
+        workspace = next((item for item in self._workspace_rows(req.user_id) if item["workspace_id"] == workspace_id), None)
+        workspace_kind = str((workspace or {}).get("kind") or "legacy_personal")
+        requested_currency = str(params.get("currency") or "").strip().upper()
+        currency = self._validated_currency(requested_currency or get_user_currency(req.user_id))
+        today = user_local_date(req.user_id, workspace_id)
+        if tx.end < today:
+            raise MiniAppError(400, "forecast_period_completed", "Период уже завершён.")
+        if tx.start > today:
+            raise MiniAppError(400, "forecast_period_future", "Период ещё не начался.")
+        period = ForecastPeriod(tx.period_key, tx.start, tx.end, today)
+        return tx, workspace_id, workspace_kind, currency, period
+
+    def _forecast_data(self, req: MiniAppRequest, params: dict[str, Any], *, persist: bool = True) -> tuple[Any, Any]:
+        _tx, workspace_id, workspace_kind, currency, period = self._forecast_context(req, params)
+        repository = ForecastRepository()
+        inputs = repository.load_inputs(
+            user_id=req.user_id,
+            workspace_id=workspace_id,
+            workspace_kind=workspace_kind,
+            currency=currency,
+            period=period,
+            default_currency=get_user_currency(req.user_id),
+            timezone_name=user_timezone_name(req.user_id, workspace_id)[0],
+        )
+        forecast = calculate_spendable(inputs)
+        if persist:
+            repository.persist_prediction(inputs, forecast)
+        return inputs, forecast
+
+    def _overview_spendable(self, req: MiniAppRequest, params: dict[str, Any], tx: TransactionFilters) -> dict[str, Any]:
+        if tx.all_scope:
+            return forecast_unavailable("workspace_all").as_dict()
+        today = user_local_date(req.user_id, tx.workspace_ids[0])
+        if tx.end < today:
+            return forecast_unavailable("period_completed").as_dict()
+        try:
+            _inputs, forecast = self._forecast_data(req, params)
+            change = explain_forecast_change(forecast, ForecastRepository().previous_prediction(_inputs, forecast))
+            recurring_commitments = [item for item in _inputs.commitments if item.source == "recurring"]
+            return {
+                "available": True,
+                "amount": forecast.amount,
+                "currency": forecast.currency,
+                "approximate": forecast.approximate,
+                "period_label": forecast.period_label,
+                "quality_label": forecast.quality_label,
+                "quality_tier": forecast.quality_tier,
+                "risk_state": forecast.risk_state,
+                "current_result": forecast.current_result,
+                "known_commitments": forecast.known_commitments,
+                "known_commitment_count": forecast.known_commitment_count,
+                "goal_reserve": forecast.goal_reserve,
+                "variable_reserve": forecast.variable_reserve,
+                "variable_q50": forecast.variable_q50,
+                "variable_q80": forecast.variable_q80,
+                "variable_q90": forecast.variable_q90,
+                "general_budget_remaining": forecast.general_budget_remaining,
+                "general_budget_current_remaining": forecast.general_budget_current_remaining,
+                "general_budget_projected_remaining": forecast.general_budget_projected_remaining,
+                "reason_codes": [str(item.get("code")) for item in forecast.reasons if item.get("code")],
+                "recurring_commitment_count": len(recurring_commitments),
+                "recurring_commitments": sum((item.amount for item in recurring_commitments), Decimal("0.00")),
+                "expected_end_result": forecast.expected_end_result,
+                "change": change,
+                "fingerprint": forecast.fingerprint,
+                "feedback": forecast.feedback,
+                "experiment": {
+                    "enabled": True,
+                    "variant": exposure_properties("spendable-explanation-v1", req.user_id, "home_spendable", forecast.quality_tier)["variant"],
+                },
+            }
+        except MiniAppError as exc:
+            if exc.code == "forecast_period_future":
+                return forecast_unavailable("period_future").as_dict()
+            raise
+        except Exception as exc:
+            log.info("miniapp_forecast_overview_unavailable reason=%s", type(exc).__name__)
+            return {"available": False, "code": "temporarily_unavailable", "title": "Прогноз пока недоступен", "description": "Попробуйте обновить экран позже."}
+
+    def spendable_forecast(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
+        try:
+            _inputs, forecast = self._forecast_data(req, params)
+        except MiniAppError:
+            raise
+        self._track(req, "spendable_opened", workspace_id=_inputs.workspace_id, properties={
+            "surface": "forecast_detail",
+            "quality_tier": forecast.quality_tier,
+            "risk_bucket": forecast.risk_state,
+            "model_family": forecast.model_family,
+            "model_version": forecast.model_version,
+        })
+        return success(forecast.as_dict(), request_id=req.request_id)
+
+    def forecast_can_spend(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        if "purchase_date" in body:
+            raise MiniAppError(400, "unsupported_forecast_purchase_date", "Дата покупки пока не используется в расчёте.")
+        params = {
+            "workspace_id": body.get("workspace_id"),
+            "period": body.get("period") or "current_month",
+            "start_date": body.get("start_date"),
+            "end_date": body.get("end_date"),
+            "currency": body.get("currency"),
+            "operation_type": "all",
+            "category": "all",
+        }
+        try:
+            amount = to_decimal_money(body.get("amount"), positive=True)
+            inputs, forecast = self._forecast_data(req, params, persist=False)
+            category = str(body.get("category") or "").strip() or None
+            if category:
+                category = self._validate_category(req, inputs.workspace_id, "Расходы", category)
+            result = calculate_can_spend(inputs, forecast, amount, category)
+        except MoneyParseError as exc:
+            raise MiniAppError(400, "bad_forecast_amount", "Проверьте сумму покупки.") from exc
+        self._track(req, "spendable_can_spend_checked", workspace_id=inputs.workspace_id, properties={
+            "surface": "forecast_detail",
+            "quality_tier": forecast.quality_tier,
+            "risk_bucket": result["risk_state_after"],
+            "verdict": result["verdict"],
+        })
+        return success(result, request_id=req.request_id)
+
+    def forecast_feedback(self, req: MiniAppRequest, fingerprint: str, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        workspace_ids, all_scope = self._read_scope(req, body.get("workspace_id"))
+        if all_scope:
+            raise MiniAppError(400, "forecast_workspace_required", "Выберите пространство для прогноза.")
+        feedback_type = str(body.get("feedback_type") or "")
+        try:
+            created = record_forecast_feedback(req.user_id, workspace_ids[0], fingerprint, feedback_type)
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_forecast_feedback", "Проверьте оценку прогноза.") from exc
+        if created:
+            self._track(req, "spendable_feedback", workspace_id=workspace_ids[0], properties={"surface": "home_spendable", "verdict": feedback_type})
+        return success({"recorded": created, "feedback_type": feedback_type}, request_id=req.request_id)
+
+    def forecast_exposure(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        workspace_ids, all_scope = self._read_scope(req, body.get("workspace_id"))
+        if all_scope:
+            raise MiniAppError(400, "forecast_workspace_required", "Выберите пространство для прогноза.")
+        surface = str(body.get("surface") or "")
+        quality_tier = str(body.get("quality_tier") or "known_only")
+        if quality_tier not in {"known_only", "limited", "personal", "strong", "calibrated"}:
+            raise MiniAppError(400, "bad_forecast_exposure", "Invalid forecast exposure.")
+        try:
+            properties = exposure_properties("spendable-explanation-v1", req.user_id, surface, quality_tier)
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_forecast_exposure", "Invalid forecast exposure.") from exc
+        self._track(req, "experiment_exposure", workspace_id=workspace_ids[0], properties=properties)
+        return success({"recorded": True}, request_id=req.request_id)
+
     def overview(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         tx = self._transaction_filters(req, params)
         rows = pg_fetchall(
@@ -1074,6 +1241,15 @@ class MiniAppAPI:
                 bucket["expense"] = to_decimal_money(total)
             bucket["count"] = int(bucket["count"]) + int(count or 0)
         aggregation_available = len(totals) <= 1
+        result_comparison = None
+        if not params.get("_skip_comparison"):
+            try:
+                prev_start, prev_end, prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
+                previous = self._totals_for_tx(req, self._tx_for_period(req, tx, prev_start, prev_end, prev_key))
+                selected = str(params.get("currency") or get_user_currency(req.user_id)).strip().upper()
+                result_comparison = self._overview_metrics(totals, previous, currencies=[selected]).get(selected, {}).get("result")
+            except Exception as exc:
+                log.info("miniapp_home_comparison_unavailable reason=%s", type(exc).__name__)
         recent = self.operations(req, {**params, "limit": 3, "offset": 0})["data"]["items"][:3]
         info = None
         if not totals:
@@ -1082,7 +1258,7 @@ class MiniAppAPI:
             info = {"kind": "period", "text": "Показаны подтверждённые операции за выбранный период."}
         else:
             info = {"kind": "currencies", "text": "Валюты различаются, поэтому суммы сгруппированы без автоматической конвертации."}
-        challenges = self._home_challenges(req)
+        challenges = []
         focus_items = self._home_focus_items(req, params, tx)
         if tx.all_scope:
             scope_marker = focus_items[0]
@@ -1092,7 +1268,12 @@ class MiniAppAPI:
             goal_items = [item for item in focus_items if item.get("kind") in {"goal", "empty"}]
             limit_items = [item for item in focus_items if item.get("kind") == "limit"]
         reminders = self._home_reminders(req)
-        insights = [] if params.get("_skip_insights") else self._home_insights(req, tx, totals, focus_items)
+        spendable = (
+            {"available": False, "code": "not_requested"}
+            if params.get("_skip_forecast")
+            else self._overview_spendable(req, params, tx)
+        )
+        insights = [] if params.get("_skip_insights") else self._home_insights(req, tx, totals, focus_items, spendable)
         try:
             home_preferences = get_home_preferences(req.user_id)
         except Exception as exc:
@@ -1137,6 +1318,7 @@ class MiniAppAPI:
             "workspace_scope": "all" if tx.all_scope else tx.workspace_ids[0],
             "aggregation_available": aggregation_available,
             "totals_by_currency": totals,
+            "result_comparison": result_comparison,
             "recent_operations": recent,
             "info": info,
             "challenges": challenges,
@@ -1154,6 +1336,7 @@ class MiniAppAPI:
             "home_preferences": home_preferences,
             "shopping": shopping,
             "announcements": announcements,
+            "spendable": spendable,
         }, request_id=req.request_id)
 
     def _home_challenge(self, req: MiniAppRequest) -> dict | None:
@@ -1395,10 +1578,12 @@ class MiniAppAPI:
         tx: TransactionFilters,
         totals: dict[str, dict[str, Decimal | int]],
         focus_items: list[dict],
+        spendable: dict[str, Any] | None = None,
     ) -> list[dict]:
         if not totals or tx.all_scope or tx.operation_type == "income":
             return []
-        preferred_currency = str(get_user_currency(req.user_id) or "").upper()
+        forecast_currency = str((spendable or {}).get("currency") or "").upper()
+        preferred_currency = forecast_currency or str(get_user_currency(req.user_id) or "").upper()
         if preferred_currency in totals:
             currency = preferred_currency
         elif len(totals) == 1:
@@ -1427,6 +1612,7 @@ class MiniAppAPI:
                 limits=limits,
                 scope_category=tx.category,
                 can_write=bool(workspace_row and workspace_row.get("role") in WRITE_ROLES),
+                forecast=spendable,
             )
             return insight_engine.generate(
                 snapshot,
@@ -1762,7 +1948,7 @@ class MiniAppAPI:
 
     def analytics(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         tx = self._transaction_filters(req, params)
-        overview = self.overview(req, {**params, "_skip_insights": True, "_skip_announcements": True})["data"]
+        overview = self.overview(req, {**params, "_skip_insights": True, "_skip_announcements": True, "_skip_forecast": True})["data"]
         available_currencies = sorted(str(currency) for currency in overview["totals_by_currency"].keys())
         requested_currency = str(params.get("currency") or "").strip().upper()
         prev_start, prev_end, _prev_key = self._previous_period(tx.start, tx.end, tx.period_key)
@@ -3533,7 +3719,7 @@ class MiniAppAPI:
         if workspace_id is None:
             rows = pg_fetchall(
                 """
-                SELECT period, category, amount, currency
+                SELECT period, category, amount, currency, COALESCE(display_name, category), alerts_enabled
                   FROM public.category_limits
                  WHERE user_id=%s AND workspace_id IS NULL
                  ORDER BY period, category
@@ -3543,25 +3729,28 @@ class MiniAppAPI:
         else:
             rows = pg_fetchall(
                 """
-                SELECT period, category, amount, currency
+                SELECT period, category, amount, currency, COALESCE(display_name, category), alerts_enabled
                   FROM public.category_limits
                  WHERE user_id=%s AND workspace_id=%s
                  ORDER BY period, category
                 """,
                 (req.user_id, workspace_id),
             )
-        for period, category, amount_raw, currency in rows:
+        for row in rows:
+            period, category, amount_raw, currency = row[:4]
+            display_name = row[4] if len(row) > 4 else category
+            alerts_enabled = row[5] if len(row) > 5 else True
             items.append(self._limit_dict(
                 user_id=req.user_id,
                 kind="category",
                 identifier=f"category:{period}:{category}",
-                title=str(category),
+                title=str(display_name or category),
                 category=str(category),
                 amount=to_decimal_money(amount_raw),
                 currency=currency,
                 period=period,
                 workspace_id=workspace_id,
-                alerts_enabled=True,
+                alerts_enabled=bool(alerts_enabled),
             ))
         try:
             general_limits = list_general_limits(req.user_id, workspace_id)
@@ -3620,9 +3809,10 @@ class MiniAppAPI:
                 stored = create_or_update_general_limit_tx(cur, user_id=req.user_id, workspace_id=ctx.workspace_id, name=str(body.get("title") or "Все расходы")[:80], amount=amount, period=period, currency=currency, alerts_enabled=bool(body.get("alerts_enabled", True)))
             else:
                 category = self._validate_category(req, ctx.workspace_id, "Расходы", str(body.get("category") or ""))
-                stored = replace_category_limit_tx(cur, user_id=req.user_id, workspace_id=ctx.workspace_id, old_period=None, old_category=None, period=period, category=category, amount=amount, currency=currency)
+                stored = replace_category_limit_tx(cur, user_id=req.user_id, workspace_id=ctx.workspace_id, old_period=None, old_category=None, period=period, category=category, amount=amount, currency=currency, title=str(body.get("title") or category), alerts_enabled=bool(body.get("alerts_enabled", True)))
         except MiniAppLimitError as exc:
-            raise MiniAppError(400, exc.code, "Limit could not be created.") from exc
+            status = 409 if exc.code == "limit_conflict" else 400
+            raise MiniAppError(status, exc.code, "Limit could not be created.") from exc
         return {"limit": self._stored_limit_dict(req, stored)}
 
     def update_limit(self, req: MiniAppRequest, limit_id: str, body: dict[str, Any]) -> dict:
@@ -3643,7 +3833,8 @@ class MiniAppAPI:
                 raise MiniAppError(404 if exc.code == "limit_not_found" else 400, exc.code, "Limit could not be updated.") from exc
             self._track(req, "mini_app_budget_limit_updated", workspace_id=ctx.workspace_id, properties={"action": "toggle", "source": "mini_app"})
             return success({"limit": self._stored_limit_dict(req, stored), "id": decoded}, request_id=req.request_id)
-        period = str(body.get("period") or "month")
+        category_old_period = decoded.split(":", 2)[1] if decoded.startswith("category:") else None
+        period = str(body.get("period") or category_old_period or "month")
         if period not in LIMIT_PERIODS:
             raise MiniAppError(400, "bad_limit_period", "Only week and month limits are supported.")
         amount = to_decimal_money(body.get("amount"), positive=True)
@@ -3668,10 +3859,13 @@ class MiniAppAPI:
                     category=category,
                     amount=amount,
                     currency=currency,
+                    title=str(body.get("title") or "").strip() or None,
+                    alerts_enabled=bool(body["alerts_enabled"]) if "alerts_enabled" in body else None,
                     require_existing=True,
                 )
             except MiniAppLimitError as exc:
-                raise MiniAppError(404 if exc.code == "limit_not_found" else 400, exc.code, "Limit could not be updated.") from exc
+                status = 404 if exc.code == "limit_not_found" else 409 if exc.code == "limit_conflict" else 400
+                raise MiniAppError(status, exc.code, "A limit already exists for this category and period." if exc.code == "limit_conflict" else "Limit could not be updated.") from exc
             lookup = f"category:{period}:{category}"
         self._track(req, "mini_app_budget_limit_updated", workspace_id=ctx.workspace_id, properties={"period_kind": period, "action": "update", "source": "mini_app"})
         return success({"limit": self._stored_limit_dict(req, stored), "id": lookup}, request_id=req.request_id)

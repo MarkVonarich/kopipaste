@@ -216,3 +216,17 @@ Allowed client events:
 - `mini_app_profile_setting_changed`
 
 Only safe coarse properties are accepted: `tab`, `period`, `scope`, `action`, `chart_type`, `filter_kind`, `period_kind`, `operation_type`, `has_category_filter`, `grouping`, `result`, `source`, `kind`, `setting`, `section`, `reminder_state`, `budget_kind`, `direction`, `position`, `total`.
+
+## Advanced Forecasting
+
+`GET /miniapp/api/overview` includes a compact `spendable` read model. A concrete scope returns approximate amount, currency, period/quality labels, risk state, fingerprint and feedback/experiment presentation state. `workspace_id=all`, completed periods and future-only periods return explicit unavailable objects and never a fake zero. Overview also returns separate `goal_items` and `limit_items`; aggregate scope receives an explicit `Выберите пространство` marker for each.
+
+`GET /miniapp/api/forecast/spendable` accepts the normal workspace, period/custom dates and currency filters. It returns the authoritative breakdown, q50/q80/q90 variable forecast, current and projected general-budget headroom, expected period-end result, forecast band, reason codes, model/risk-policy versions and quality/calibration state. Projected headroom reserves future commitments and q80 variable spend and is the budget constraint used by Spendable and Can-Spend. Expected future income is explanatory only and is excluded from the primary number.
+
+`POST /miniapp/api/forecast/can-spend` accepts `workspace_id`, `currency`, period fields, positive `amount`, and optional `category`. Purchase date is not accepted because this release has no defensible date-sensitive decision policy. The server returns `fits`, `borderline`, `does_not_fit` or `insufficient_data` and the resulting Spendable/control impacts.
+
+`POST /miniapp/api/forecast/{fingerprint}/feedback` accepts `workspace_id` and `feedback_type=useful|not_useful`. Duplicate feedback is protected by user/workspace/fingerprint uniqueness. `POST /miniapp/api/forecast/exposure` records only a validated rendered surface and quality tier; it cannot alter forecast policy.
+
+Category-limit edit now locks and updates the original row in one transaction. Title, amount, category, period and alert preference persist in place. A target-key collision returns HTTP 409 `limit_conflict`; wrong scope returns `limit_not_found`.
+
+The complete contract and privacy/model lifecycle are in `docs/FORECAST_INTELLIGENCE.md`.

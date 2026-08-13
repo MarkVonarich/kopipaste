@@ -169,3 +169,19 @@ Menu-button smoke:
 - open the bot chat and press the persistent menu button;
 - confirm the persistent menu button label is `Открыть`;
 - confirm `/app` still renders the inline WebApp button and command list still includes `/start`, `/settings`, `/help`, `/app` when the Mini App URL is configured.
+
+## Advanced Forecasting Release
+
+Before deploying Advanced Forecasting & Home Intelligence:
+
+1. Confirm the release commit and review `docs/FORECAST_INTELLIGENCE.md`.
+2. Back up PostgreSQL using the normal production runbook.
+3. Apply `migrations/20260813_024_advanced_forecasting_home.sql` with `ON_ERROR_STOP=1` before restarting application code.
+4. Do not run production forecast training during this release. The scheduler only finalizes bounded outcomes.
+5. Confirm `forecast_outcomes` is registered and Telegram/Mini App startup remains healthy.
+6. Verify concrete-workspace/current-period Spendable, aggregate unavailable state, can-spend, fixed Home settings, category-limit edit and goal archive/restore.
+7. Confirm `advanced-forecasting-home-v1.released_on` matches the actual production release date before restart.
+
+No new Python or npm production dependency is introduced. Model artifacts are not part of the repository or frontend bundle. Initial production uses the personal fallback with `FORECAST_MODEL_DIR` empty. Set it to an existing trusted local directory only after enough trustworthy finalized snapshots exist and a currency-specific champion has passed offline validation. Offline snapshot training and backtesting require an exact currency, for example `--from-snapshots --currency RUB --execute`; monetary datasets never mix and there is no FX path. Artifacts are dataset-addressed and published immutably before registry promotion, so a failed promotion leaves the previous champion and checksum intact. A non-test DSN additionally requires both `--allow-production` and `FORECAST_PRODUCTION_TRAINING_ENABLED=true`. Training never runs in HTTP handling or the scheduler.
+
+Rollback application code first and leave the additive migration in place. Dropping forecast tables or category-limit columns is a separate destructive operation and must use the migration's manual rollback notes only after retention review. Invalidated/deleted-history snapshots must not be restored as authoritative outcomes.

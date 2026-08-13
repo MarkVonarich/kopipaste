@@ -35,7 +35,10 @@ import type {
   ShoppingItem,
   Announcement,
   FinancialReport,
-  ReportKind
+  ReportKind,
+  SpendableSummary,
+  SpendableForecast,
+  CanSpendResult
 } from './types';
 
 type Envelope<T> = {
@@ -51,6 +54,8 @@ export type Overview = {
   workspace_scope: number | 'all' | null;
   aggregation_available: boolean;
   totals_by_currency: Record<string, { income: string; expense: string; count: number }>;
+  result_comparison?: { current: string; previous: string; delta: string; pct?: string | null; state: string } | null;
+  spendable?: SpendableSummary;
   recent_operations: Operation[];
   info?: { kind: string; text: string } | null;
   challenge?: { key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_type?: string; period_key: string; period_end?: string | null } | null;
@@ -282,6 +287,14 @@ export const api = {
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
   overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
+  spendableForecast: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
+    apiFetch<SpendableForecast>(`/miniapp/api/forecast/spendable${query({ workspace_id: workspaceId, ...filters })}`),
+  canSpend: (payload: { workspace_id: number | 'all' | null; currency: string; period: string; start_date?: string; end_date?: string; amount: string; category?: string }) =>
+    apiFetch<CanSpendResult>('/miniapp/api/forecast/can-spend', { method: 'POST', body: JSON.stringify(payload) }),
+  forecastFeedback: (fingerprint: string, workspace_id: number | 'all' | null, feedback_type: 'useful' | 'not_useful') =>
+    apiFetch<{ recorded: boolean; feedback_type: string }>(`/miniapp/api/forecast/${encodeURIComponent(fingerprint)}/feedback`, { method: 'POST', body: JSON.stringify({ workspace_id, feedback_type }) }),
+  forecastExposure: (workspace_id: number | 'all' | null, surface: 'home_spendable' | 'forecast_detail', quality_tier: string) =>
+    apiFetch<{ recorded: boolean }>('/miniapp/api/forecast/exposure', { method: 'POST', body: JSON.stringify({ workspace_id, surface, quality_tier }) }),
   homePreferences: () => apiFetch<HomePreferences>('/miniapp/api/profile/home'),
   saveHomePreferences: (order: HomePreferences['order'], enabled: HomePreferences['enabled']) =>
     apiFetch<HomePreferences>('/miniapp/api/profile/home', { method: 'POST', body: JSON.stringify({ order, enabled }) }),

@@ -10,6 +10,7 @@ from services.reports import completed_report_period
 ANNOUNCEMENT_TTL_DAYS = 21
 MAX_ANNOUNCEMENTS = 5
 ACTION_TYPES = {
+    "OPEN_HOME",
     "OPEN_HOME_SETTINGS",
     "OPEN_SHOPPING_LIST",
     "OPEN_PLANS",
@@ -48,10 +49,12 @@ class Announcement:
 
 
 ANNOUNCEMENTS = (
+    # released_on must be confirmed against the first production visibility date.
+    Announcement("advanced-forecasting-home-v1", "forecast-intelligence", "feature", date(2026, 8, 13), "Свободно — прогноз денег на период", "КопиPaste теперь учитывает будущие платежи, планы и ваш ритм расходов, чтобы показать, сколько остаётся свободным.", "OPEN_HOME", "Открыть главную"),
     Announcement("profile-controls-v1", "profile-controls", "feature", date(2026, 8, 13), "Больше контроля в Профиле", "Режим отпуска, настройки категорий и управление личными данными теперь собраны в понятных настройках.", "OPEN_PROFILE", "Открыть профиль"),
     Announcement("reports-2-0", "reports", "feature", date(2026, 8, 14), "Финансовые итоги стали подробнее", "Смотрите доходы, расходы, изменения по категориям и магазинам за неделю, месяц или выбранный период.", "OPEN_REPORTS", "Открыть отчёты"),
     Announcement("smart-planning-v1", "smart-planning", "feature", date(2026, 8, 13), "Планируйте суммы по своим данным", "КопиPaste анализирует прошлые расходы и помогает подобрать лимит, общий бюджет или темп для цели.", "OPEN_PLANS", "Открыть планы"),
-    Announcement("custom-home-v1", "home", "feature", date(2026, 8, 11), "Настройте главную под себя", "Выберите нужные виджеты и расположите их в удобном порядке.", "OPEN_HOME_SETTINGS", "Настроить"),
+    Announcement("custom-home-v1", "home", "feature", date(2026, 8, 11), "Настройте главную под себя", "Выберите разделы, которые хотите видеть на главной.", "OPEN_HOME_SETTINGS", "Настроить"),
     Announcement("shopping-list-v1", "shopping", "feature", date(2026, 8, 11), "Список покупок теперь под рукой", "Записывайте, что нужно купить, и отмечайте покупки прямо в КопиPaste.", "OPEN_SHOPPING_LIST", "Открыть список"),
     Announcement("plans-v2", "plans", "improvement", date(2026, 8, 10), "Планы стали удобнее", "Категории стали компактнее, а у целей появился полноценный архив.", "OPEN_PLANS", "Открыть планы"),
 )

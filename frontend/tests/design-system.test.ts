@@ -82,11 +82,11 @@ describe('mini app design system semantics', () => {
     expect(parsed.querySelector('.screen-title p')).toBeFalsy();
   });
 
-  it('renders hero financial result, separate income and expense, multicurrency and quick actions', () => {
+  it('renders compact result and Spendable summaries, separate income and expense, and quick actions', () => {
     const parsed = doc(HomeScreen(overview, [operation], 'RUB', true));
 
-    expect(parsed.querySelector('[data-testid="hero-financial-result"]')?.textContent).toContain('Финансовый результат');
-    expect(parsed.querySelector('[data-testid="hero-financial-result"]')?.textContent).toContain('Валюты показаны отдельно');
+    expect(parsed.querySelector('[data-testid="home-summary-row"]')?.textContent).toContain('Итог');
+    expect(parsed.querySelector('[data-testid="home-summary-row"]')?.textContent).toContain('Свободно');
     expect(parsed.querySelector('[data-testid="income-column"]')?.textContent).toContain('Доходы');
     expect(parsed.querySelector('[data-testid="expense-column"]')?.textContent).toContain('Расходы');
     expect(parsed.querySelector('button[data-kind="expense"]')?.textContent).toContain('Добавить расход');

@@ -39,6 +39,25 @@ MIN_LIMIT_PERIOD_PROGRESS_PERCENT = 20
 NEGATIVE_FEEDBACK_SUPPRESSION_DAYS = 30
 REPEAT_WINDOW_HOURS = 24
 MAX_IMPRESSIONS_IN_REPEAT_WINDOW = 3
+FORECAST_INSIGHT_FAMILIES = {
+    "forecast_end_result",
+    "spendable_change",
+    "spendable_risk",
+    "future_expense_acceleration",
+    "general_budget_breach_risk",
+    "category_limit_breach_risk",
+    "grouped_budget_breach_risk",
+    "goal_affordability",
+    "upcoming_commitment_pressure",
+    "recurring_pressure",
+    "category_projection",
+    "category_mix_shift",
+    "merchant_driver",
+    "frequency_shift",
+    "average_check_shift",
+    "persistent_spending_trend",
+    "unusual_spend_anomaly",
+}
 
 # These are significance floors, not exchange rates. Candidates are never converted
 # or compared by monetary value across currencies.
@@ -116,6 +135,7 @@ class LimitAggregate:
     period: str
     used_percent: int
     enabled: bool = True
+    kind: str = "category_limit"
 
 
 @dataclass(frozen=True)
@@ -137,6 +157,7 @@ class InsightSnapshot:
     scope_category_key: str | None = None
     operation_type: str = "expense"
     can_write: bool = True
+    forecast: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +174,7 @@ class InsightAction:
 @dataclass
 class InsightCandidate:
     detector_type: str
+    family: str
     entity_type: str
     entity_key: str
     currency: str
@@ -416,10 +438,21 @@ def _candidate(
     actionability: int,
     active_control: bool = False,
     impact_amount: Decimal | None = None,
+    family: str | None = None,
 ) -> InsightCandidate:
     threshold = minimum_absolute_delta(snapshot.currency)
+    family_by_detector = {
+        "spending_change": "persistent_spending_trend",
+        "category_contribution": "category_mix_shift",
+        "merchant_contribution": "merchant_driver",
+        "merchant_frequency": "frequency_shift",
+        "average_check_change": "average_check_shift",
+        "limit_pace": "category_limit_breach_risk",
+        "spendable_risk": "spendable_risk",
+    }
     return InsightCandidate(
         detector_type=detector_type,
+        family=family or family_by_detector.get(detector_type, detector_type),
         entity_type=entity_type,
         entity_key=entity_key,
         currency=snapshot.currency,
@@ -862,7 +895,128 @@ def detect_limit_pace(snapshot: InsightSnapshot, *, today: date) -> list[Insight
             actionability=12,
             active_control=True,
             impact_amount=pace_excess,
+            family={
+                "general_limit": "general_budget_breach_risk",
+                "category_budget": "grouped_budget_breach_risk",
+            }.get(limit.kind, "category_limit_breach_risk"),
         ))
+    return candidates
+
+
+def detect_projection_risks(snapshot: InsightSnapshot, *, today: date) -> list[InsightCandidate]:
+    if not (snapshot.period.start <= today <= snapshot.period.end):
+        return []
+    elapsed_days = max(1, (today - snapshot.period.start).days + 1)
+    period_days = max(1, (snapshot.period.end - snapshot.period.start).days + 1)
+    if elapsed_days >= period_days or snapshot.current_count < MIN_OPERATION_COUNT:
+        return []
+    scale = Decimal(period_days) / Decimal(elapsed_days)
+    threshold = minimum_absolute_delta(snapshot.currency)
+    scope = _scope_params(snapshot)
+    candidates: list[InsightCandidate] = []
+    projected_total = to_decimal_money(snapshot.current_total * scale)
+    projected_delta = projected_total - snapshot.previous_total
+    projected_relative = _ratio(projected_delta, snapshot.previous_total)
+    if (
+        snapshot.previous_total > 0
+        and snapshot.previous_count >= MIN_OPERATION_COUNT
+        and projected_delta >= threshold
+        and projected_relative is not None
+        and projected_relative >= MIN_RELATIVE_DELTA
+    ):
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="future_expense_acceleration",
+            family="future_expense_acceleration",
+            entity_type="scope",
+            entity_key="expenses",
+            current_value=projected_total,
+            baseline_value=snapshot.previous_total,
+            absolute_delta=projected_delta,
+            relative_delta=projected_relative,
+            confidence="high" if elapsed_days >= max(7, period_days // 3) else "medium",
+            severity="high" if projected_relative >= Decimal("0.50") else "medium",
+            title_key="future_expense_acceleration",
+            content_data={"projected_total": projected_total},
+            evidence=[{
+                "kind": "projected_amount",
+                "label": "Прогноз расходов к концу периода",
+                "expected_amount": projected_total,
+                "previous_amount": snapshot.previous_total,
+                "currency": snapshot.currency,
+                "history_used": 1,
+            }],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть причины", scope)],
+            group_key=f"forecast:{snapshot.currency}:expense_pace",
+            actionability=15,
+            impact_amount=projected_delta,
+        ))
+
+    for category in snapshot.categories:
+        if category.current_count < MIN_OPERATION_COUNT or category.previous_count < MIN_OPERATION_COUNT or category.previous_total <= 0:
+            continue
+        projected = to_decimal_money(category.current_total * scale)
+        delta = projected - category.previous_total
+        relative = _ratio(delta, category.previous_total)
+        if delta < threshold or relative is None or relative < MIN_CATEGORY_RELATIVE_DELTA:
+            continue
+        params = {**scope, "category_key": category.key, "target_category": category.name}
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="category_projection",
+            family="category_projection",
+            entity_type="category",
+            entity_key=category.key,
+            current_value=projected,
+            baseline_value=category.previous_total,
+            absolute_delta=delta,
+            relative_delta=relative,
+            confidence="high" if elapsed_days >= max(7, period_days // 3) else "medium",
+            severity="high" if relative >= Decimal("0.50") else "medium",
+            title_key="category_projection",
+            content_data={"category": category.name, "projected_total": projected},
+            evidence=[{
+                "kind": "category_projection",
+                "label": category.name,
+                "expected_amount": projected,
+                "previous_amount": category.previous_total,
+                "currency": snapshot.currency,
+            }],
+            actions=[
+                _action("OPEN_CATEGORY", "Посмотреть категорию", params),
+                _action("OPEN_OPERATIONS", "Посмотреть операции", params),
+            ],
+            group_key=f"category-projection:{snapshot.currency}:{category.key}",
+            actionability=14,
+            impact_amount=delta,
+        ))
+        if relative >= Decimal("1.00") and category.current_count >= MIN_OPERATION_COUNT + 1:
+            candidates.append(_candidate(
+                snapshot,
+                detector_type="unusual_spend_anomaly",
+                family="unusual_spend_anomaly",
+                entity_type="category",
+                entity_key=category.key,
+                current_value=category.current_total,
+                baseline_value=category.previous_total,
+                absolute_delta=category.current_total - category.previous_total,
+                relative_delta=_ratio(category.current_total - category.previous_total, category.previous_total),
+                confidence="high",
+                severity="high",
+                title_key="unusual_spend_anomaly",
+                content_data={"category": category.name},
+                evidence=[{
+                    "kind": "unusual_category_spend",
+                    "label": category.name,
+                    "current_amount": category.current_total,
+                    "previous_amount": category.previous_total,
+                    "currency": snapshot.currency,
+                }],
+                actions=[_action("OPEN_CATEGORY", "Проверить категорию", params)],
+                group_key=f"anomaly:{snapshot.currency}:{category.key}",
+                actionability=15,
+                impact_amount=category.current_total - category.previous_total,
+            ))
     return candidates
 
 
@@ -879,6 +1033,197 @@ def detect_candidates(snapshot: InsightSnapshot, *, today: date) -> list[Insight
     ):
         candidates.extend(detector(snapshot))
     candidates.extend(detect_limit_pace(snapshot, today=today))
+    candidates.extend(detect_projection_risks(snapshot, today=today))
+    candidates.extend(detect_forecast_candidates(snapshot))
+    return candidates
+
+
+def detect_forecast_risk(snapshot: InsightSnapshot) -> list[InsightCandidate]:
+    forecast = snapshot.forecast or {}
+    if not forecast.get("available"):
+        return []
+    spendable = to_decimal_money(forecast.get("amount") or 0)
+    risk_state = str(forecast.get("risk_state") or "normal")
+    if risk_state == "normal" and spendable > minimum_absolute_delta(snapshot.currency) * 2:
+        return []
+    params = _scope_params(snapshot)
+    severity = "critical" if spendable <= 0 else "high" if risk_state == "attention" else "medium"
+    return [_candidate(
+        snapshot,
+        detector_type="spendable_risk",
+        entity_type="forecast",
+        entity_key="spendable",
+        current_value=spendable,
+        baseline_value=Decimal("0"),
+        absolute_delta=spendable,
+        relative_delta=None,
+        confidence=str(forecast.get("quality_tier") or "limited"),
+        severity=severity,
+        title_key="spendable_risk",
+        content_data={"amount": spendable, "quality_label": forecast.get("quality_label")},
+        evidence=[{
+            "kind": "amount_comparison",
+            "label": "Свободно до конца периода",
+            "current_amount": spendable,
+            "previous_amount": Decimal("0"),
+            "currency": snapshot.currency,
+        }],
+        actions=[_action("OPEN_ANALYTICS", "Посмотреть причины", params)],
+        group_key=f"forecast:{snapshot.currency}:spendable",
+        actionability=20,
+        active_control=True,
+        impact_amount=max(minimum_absolute_delta(snapshot.currency), abs(spendable)),
+    )]
+
+
+def detect_forecast_candidates(snapshot: InsightSnapshot) -> list[InsightCandidate]:
+    forecast = snapshot.forecast or {}
+    if not forecast.get("available"):
+        return []
+    candidates = detect_forecast_risk(snapshot)
+    threshold = minimum_absolute_delta(snapshot.currency)
+    params = _scope_params(snapshot)
+    current_result = to_decimal_money(forecast.get("current_result") or 0)
+    commitments = to_decimal_money(forecast.get("known_commitments") or 0)
+    goal_reserve = to_decimal_money(forecast.get("goal_reserve") or 0)
+    expected_end = to_decimal_money(forecast.get("expected_end_result") or 0)
+    spendable = to_decimal_money(forecast.get("amount") or 0)
+    quality = str(forecast.get("quality_tier") or "limited")
+    reason_codes = set(forecast.get("reason_codes") or ())
+    general_budget_remaining = forecast.get("general_budget_remaining")
+    if "general_budget_binding" in reason_codes and general_budget_remaining is not None:
+        remaining = to_decimal_money(general_budget_remaining)
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="general_budget_breach_risk",
+            family="general_budget_breach_risk",
+            entity_type="budget",
+            entity_key="general",
+            current_value=remaining,
+            baseline_value=current_result,
+            absolute_delta=max(Decimal("0"), current_result - remaining),
+            relative_delta=None,
+            confidence="high",
+            severity="high" if remaining <= threshold else "medium",
+            title_key="general_budget_breach_risk",
+            content_data={"remaining": remaining},
+            evidence=[{"kind": "general_budget", "label": "Остаток общего бюджета", "amount": remaining, "currency": snapshot.currency}],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть бюджет", params)],
+            group_key=f"budget:{snapshot.currency}:general",
+            actionability=18,
+            active_control=True,
+            impact_amount=max(threshold, current_result - remaining),
+        ))
+    recurring_total = to_decimal_money(forecast.get("recurring_commitments") or 0)
+    recurring_count = int(forecast.get("recurring_commitment_count") or 0)
+    if recurring_count and recurring_total >= threshold:
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="recurring_pressure",
+            family="recurring_pressure",
+            entity_type="forecast",
+            entity_key="recurring",
+            current_value=recurring_total,
+            baseline_value=current_result,
+            absolute_delta=recurring_total,
+            relative_delta=_ratio(recurring_total, current_result),
+            confidence="high",
+            severity="high" if recurring_total >= max(current_result, threshold) * Decimal("0.50") else "medium",
+            title_key="recurring_pressure",
+            content_data={"commitments": recurring_total, "count": recurring_count},
+            evidence=[{"kind": "recurring_commitments", "label": "Регулярные платежи до конца периода", "amount": recurring_total, "count": recurring_count, "currency": snapshot.currency}],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть платежи", params)],
+            group_key=f"forecast:{snapshot.currency}:recurring",
+            actionability=16,
+            impact_amount=recurring_total,
+        ))
+    if expected_end < 0:
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="forecast_end_result",
+            family="forecast_end_result",
+            entity_type="forecast",
+            entity_key="period_end",
+            current_value=expected_end,
+            baseline_value=Decimal("0"),
+            absolute_delta=expected_end,
+            relative_delta=None,
+            confidence=quality,
+            severity="critical",
+            title_key="forecast_end_result",
+            content_data={"expected_end_result": expected_end},
+            evidence=[{"kind": "forecast", "label": "Ожидаемый итог периода", "expected_amount": expected_end, "currency": snapshot.currency}],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть прогноз", params)],
+            group_key=f"forecast:{snapshot.currency}:period_end",
+            actionability=20,
+            active_control=True,
+            impact_amount=abs(expected_end),
+        ))
+    if commitments >= threshold and (current_result <= 0 or commitments >= max(current_result, threshold) * Decimal("0.25")):
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="upcoming_commitment_pressure",
+            family="upcoming_commitment_pressure",
+            entity_type="forecast",
+            entity_key="commitments",
+            current_value=commitments,
+            baseline_value=current_result,
+            absolute_delta=commitments,
+            relative_delta=_ratio(commitments, current_result),
+            confidence="high",
+            severity="high" if commitments >= max(current_result, threshold) * Decimal("0.50") else "medium",
+            title_key="upcoming_commitment_pressure",
+            content_data={"commitments": commitments, "count": int(forecast.get("known_commitment_count") or 0)},
+            evidence=[{"kind": "future_commitments", "label": "Будущие обязательные платежи", "amount": commitments, "count": int(forecast.get("known_commitment_count") or 0), "currency": snapshot.currency}],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть платежи", params)],
+            group_key=f"forecast:{snapshot.currency}:commitments",
+            actionability=16,
+            impact_amount=commitments,
+        ))
+    if goal_reserve >= threshold and spendable <= goal_reserve:
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="goal_affordability",
+            family="goal_affordability",
+            entity_type="forecast",
+            entity_key="goals",
+            current_value=goal_reserve,
+            baseline_value=spendable,
+            absolute_delta=goal_reserve,
+            relative_delta=None,
+            confidence="high",
+            severity="medium",
+            title_key="goal_affordability",
+            content_data={"goal_reserve": goal_reserve, "spendable": spendable},
+            evidence=[{"kind": "goal_reserve", "label": "Защищено на цели", "amount": goal_reserve, "currency": snapshot.currency}],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть расчёт", params)],
+            group_key=f"forecast:{snapshot.currency}:goals",
+            actionability=14,
+            impact_amount=goal_reserve,
+        ))
+    change = forecast.get("change") if isinstance(forecast.get("change"), dict) else None
+    if change and abs(to_decimal_money(change.get("delta") or 0)) >= threshold:
+        delta = to_decimal_money(change.get("delta") or 0)
+        candidates.append(_candidate(
+            snapshot,
+            detector_type="spendable_change",
+            family="spendable_change",
+            entity_type="forecast",
+            entity_key="spendable_change",
+            current_value=spendable,
+            baseline_value=to_decimal_money(change.get("previous_amount") or 0),
+            absolute_delta=delta,
+            relative_delta=_ratio(delta, to_decimal_money(change.get("previous_amount") or 0)),
+            confidence=quality,
+            severity="high" if delta < 0 else "medium",
+            title_key="spendable_change",
+            content_data={"delta": delta, "reason_codes": list(change.get("reason_codes") or [])},
+            evidence=[{"kind": "forecast_change", "label": "Изменение свободной суммы", "delta_amount": delta, "currency": snapshot.currency, "reason_codes": list(change.get("reason_codes") or [])}],
+            actions=[_action("OPEN_ANALYTICS", "Посмотреть причины", params)],
+            group_key=f"forecast:{snapshot.currency}:spendable_change",
+            actionability=18,
+            impact_amount=abs(delta),
+        ))
     return candidates
 
 
@@ -1146,6 +1491,47 @@ def present_candidate(candidate: InsightCandidate) -> dict[str, Any]:
         title = f"{data['title']} близок к лимиту" if data["used_percent"] < 100 else f"{data['title']}: лимит использован"
         summary = f"Использовано {data['used_percent']}% · прошло {data['period_progress']}% периода"
         tone = "warning"
+    elif candidate.title_key == "spendable_risk":
+        title = "Свободная сумма требует внимания" if candidate.current_value > 0 else "Свободной суммы на период не остаётся"
+        summary = f"По текущему прогнозу останется около {format_money(candidate.current_value, candidate.currency)}. Откройте расчёт, чтобы увидеть причины."
+        tone = "warning"
+    elif candidate.title_key == "forecast_end_result":
+        title = "К концу периода итог может стать отрицательным"
+        summary = f"Консервативный прогноз: {format_money(candidate.current_value, candidate.currency)}. Проверьте будущие расходы."
+        tone = "warning"
+    elif candidate.title_key == "upcoming_commitment_pressure":
+        title = "Будущие платежи заметно влияют на период"
+        summary = f"Учтено {data['count']} платежей на {format_money(data['commitments'], candidate.currency)}."
+        tone = "warning"
+    elif candidate.title_key == "goal_affordability":
+        title = "Взносы на цели сокращают свободную сумму"
+        summary = f"На цели защищено {format_money(data['goal_reserve'], candidate.currency)}."
+        tone = "neutral"
+    elif candidate.title_key == "spendable_change":
+        direction = "снизилась" if data["delta"] < 0 else "выросла"
+        title = f"Свободная сумма {direction}"
+        summary = f"Изменение около {format_money(abs(data['delta']), candidate.currency)} по новому прогнозу."
+        tone = "warning" if data["delta"] < 0 else "positive"
+    elif candidate.title_key == "future_expense_acceleration":
+        title = "Текущий темп расходов выше обычного"
+        summary = f"К концу периода расходы могут быть выше примерно на {delta_text}."
+        tone = "warning"
+    elif candidate.title_key == "category_projection":
+        title = f"{data['category']}: расходы могут вырасти"
+        summary = f"Прогноз к концу периода выше обычного примерно на {delta_text}."
+        tone = "warning"
+    elif candidate.title_key == "unusual_spend_anomaly":
+        title = f"Необычный рост в категории {data['category']}"
+        summary = f"Расходы заметно отличаются от сопоставимого периода. Проверьте операции."
+        tone = "warning"
+    elif candidate.title_key == "general_budget_breach_risk":
+        title = "Общий бюджет ограничивает свободную сумму"
+        summary = f"В бюджете осталось {format_money(data['remaining'], candidate.currency)}."
+        tone = "warning"
+    elif candidate.title_key == "recurring_pressure":
+        title = "Регулярные платежи влияют на прогноз"
+        summary = f"До конца периода учтено {data['count']} платежей на {format_money(data['commitments'], candidate.currency)}."
+        tone = "warning"
     else:
         title = "Изменение расходов"
         summary = "Сравнение с сопоставимым периодом"
@@ -1154,6 +1540,7 @@ def present_candidate(candidate: InsightCandidate) -> dict[str, Any]:
         "id": candidate.fingerprint,
         "type": candidate.detector_type,
         "detector": candidate.detector_type,
+        "family": candidate.family,
         "tone": tone,
         "severity": candidate.severity,
         "title": title,
@@ -1217,6 +1604,7 @@ def build_snapshot(
     limits: Iterable[dict[str, Any]] = (),
     scope_category: str | None = None,
     can_write: bool = True,
+    forecast: dict[str, Any] | None = None,
 ) -> InsightSnapshot:
     selected_currency = currency.upper()
     selected_scope_category = str(scope_category or "").strip() or None
@@ -1310,6 +1698,7 @@ def build_snapshot(
             period=str(item.get("period") or "month"),
             used_percent=int(item.get("percent") or 0),
             enabled=bool(item.get("enabled", True)),
+            kind=str(item.get("budget_kind") or item.get("kind") or "category_limit"),
         )
         for item in limits
         if item.get("id") and item.get("amount") is not None
@@ -1333,6 +1722,7 @@ def build_snapshot(
         scope_category=selected_scope_category,
         scope_category_key=selected_scope_category_key,
         can_write=can_write,
+        forecast=forecast,
     )
 
 

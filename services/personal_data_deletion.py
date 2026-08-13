@@ -28,6 +28,8 @@ PERSONAL_TABLES = {
     "user_aliases": "user_id=%s",
     "ml_observations": "user_id=%s",
     "insight_states": "user_id=%s OR workspace_id = ANY(%s)",
+    "forecast_feedback": "user_id=%s OR workspace_id = ANY(%s)",
+    "forecast_snapshots": "user_id=%s OR workspace_id = ANY(%s)",
     "user_home_preferences": "user_id=%s",
     "user_announcement_state": "user_id=%s",
     "user_category_preferences": "user_id=%s OR workspace_id = ANY(%s)",
@@ -225,6 +227,18 @@ def _history_counts(cur, user_id: int, workspace_ids: list[int], operation_ids: 
     else:
         counts["operation_drafts"] = 0
     counts["financial_goals"] = 0
+    counts["forecast_snapshots"] = 0
+    snapshot_columns = _table_columns(cur, "forecast_snapshots")
+    if {"user_id", "period_start", "period_end"} <= snapshot_columns:
+        snapshot_scope = "user_id=%s"
+        snapshot_params: list = [user_id]
+        if workspace_ids and "workspace_id" in snapshot_columns:
+            snapshot_scope = f"({snapshot_scope} OR workspace_id = ANY(%s))"
+            snapshot_params.append(workspace_ids)
+        snapshot_scope += " AND (%s::date IS NULL OR period_end >= %s) AND (%s::date IS NULL OR period_start <= %s)"
+        snapshot_params.extend([start_date, start_date, end_date, end_date])
+        cur.execute(f"SELECT COUNT(*) FROM public.forecast_snapshots WHERE {snapshot_scope}", tuple(snapshot_params))
+        counts["forecast_snapshots"] = int(cur.fetchone()[0])
     if start_date is None and end_date is None:
         goal_columns = _table_columns(cur, "financial_goals")
         if {"owner_user_id", "workspace_id"} <= goal_columns:
@@ -259,6 +273,20 @@ def delete_financial_history(user_id: int, start_date: date | None, end_date: da
             workspace_ids = _personal_workspace_ids(cur, user_id)
             operation_ids = _operation_ids_for_period(cur, user_id, workspace_ids, start_date, end_date)
             counts.update(_history_counts(cur, user_id, workspace_ids, operation_ids, start_date, end_date))
+            snapshot_columns = _table_columns(cur, "forecast_snapshots")
+            if {"user_id", "period_start", "period_end", "invalidated_at"} <= snapshot_columns:
+                snapshot_scope = "user_id=%s"
+                snapshot_params: list = [user_id]
+                if workspace_ids and "workspace_id" in snapshot_columns:
+                    snapshot_scope = f"({snapshot_scope} OR workspace_id = ANY(%s))"
+                    snapshot_params.append(workspace_ids)
+                snapshot_scope += " AND (%s::date IS NULL OR period_end >= %s) AND (%s::date IS NULL OR period_start <= %s)"
+                snapshot_params.extend([start_date, start_date, end_date, end_date])
+                cur.execute(
+                    f"UPDATE public.forecast_snapshots SET invalidated_at=now(), invalidation_reason='financial_history_deleted', updated_at=now() WHERE {snapshot_scope}",
+                    tuple(snapshot_params),
+                )
+                counts["forecast_snapshots"] = int(cur.rowcount)
             if operation_ids:
                 try:
                     counts["analytics_product_event_links"] = apply_history_deletion(operation_ids)

@@ -6,11 +6,11 @@ import mainSource from '../src/main.ts?raw';
 import type { HomePreferences } from '../src/types';
 
 const widgets: HomePreferences['widgets'] = [
-  { key: 'financial_result', title: 'Финансовый результат', description: 'Итог', layout: 'wide', default_enabled: true, default_order: 0 },
+  { key: 'limits', title: 'Лимиты', description: 'Лимиты', layout: 'compact', default_enabled: true, default_order: 0 },
   { key: 'goals', title: 'Цели', description: 'Цели', layout: 'compact', default_enabled: true, default_order: 1 },
-  { key: 'limits', title: 'Лимиты', description: 'Лимиты', layout: 'compact', default_enabled: true, default_order: 2 },
-  { key: 'shopping_list', title: 'Список покупок', description: 'Покупки', layout: 'compact', default_enabled: true, default_order: 3 },
-  { key: 'whats_new', title: 'Новое в КопиPaste', description: 'Новости', layout: 'wide', default_enabled: true, default_order: 4 },
+  { key: 'reminders', title: 'Напоминания', description: 'События', layout: 'compact', default_enabled: true, default_order: 2 },
+  { key: 'insights', title: 'Инсайты', description: 'Изменения', layout: 'compact', default_enabled: true, default_order: 3 },
+  { key: 'shopping_list', title: 'Список покупок', description: 'Покупки', layout: 'compact', default_enabled: true, default_order: 4 },
 ];
 
 const base: any = {
@@ -23,21 +23,26 @@ const base: any = {
 };
 
 describe('Product Evolution v3 PR2', () => {
-  it('renders only enabled widgets in saved order without placeholders', () => {
+  it('ignores legacy saved order while preserving optional visibility', () => {
     const html = HomeScreen({
       ...base,
-      home_preferences: { order: ['limits', 'goals', 'financial_result', 'shopping_list', 'whats_new'], enabled: ['limits', 'financial_result'] },
+      home_preferences: { order: ['goals', 'limits'], enabled: ['limits'] },
       limit_items: [{ kind: 'limit', title: 'Продукты', description: 'Норма', percent: 40 }],
     }, [], 'RUB', true);
-    expect(html.indexOf('data-widget="limits"')).toBeLessThan(html.indexOf('data-widget="financial_result"'));
-    expect(html).not.toContain('data-widget="goals"');
-    expect(html).not.toContain('data-widget="shopping_list"');
+    expect(html.indexOf('Активность')).toBeLessThan(html.indexOf('<span>Итог</span>'));
+    expect(html).toContain('Продукты');
+    expect(html).not.toContain('Нет активных целей');
+    expect(html).not.toContain('Список покупок');
+    expect(html).toContain('Последние операции');
   });
 
-  it('supports an intentionally empty Home', () => {
+  it('keeps fixed Home surfaces visible when all optional widgets are hidden', () => {
     const html = HomeScreen({ ...base, home_preferences: { order: widgets.map((item) => item.key), enabled: [] } }, [], 'RUB', true);
-    expect(html).toContain('Главная настроена минимально');
-    expect(html).toContain('data-action="home-settings-open"');
+    expect(html).toContain('Активность');
+    expect(html).toContain('<span>Итог</span>');
+    expect(html).toContain('Свободно');
+    expect(html).toContain('Последние операции');
+    expect(html).not.toContain('Главная настроена минимально');
   });
 
   it('keeps goals and limits as separate widgets', () => {
@@ -47,10 +52,9 @@ describe('Product Evolution v3 PR2', () => {
       goal_items: [{ kind: 'goal', title: 'Отпуск', description: 'В плане', percent: 20 }],
       limit_items: [{ kind: 'limit', title: 'Кафе', description: 'Норма', percent: 60 }],
     }, [], 'RUB', true);
-    expect(html).toContain('data-widget="goals"');
-    expect(html).toContain('data-widget="limits"');
     expect(html).toContain('Отпуск');
     expect(html).toContain('Кафе');
+    expect(html.indexOf('Кафе')).toBeLessThan(html.indexOf('Отпуск'));
   });
 
   it('shows concrete-workspace selection for both Goals and Limits in all scope', () => {
@@ -92,13 +96,13 @@ describe('Product Evolution v3 PR2', () => {
     expect(html).toContain('Добавьте цель в Планах.');
   });
 
-  it('renders mobile-safe drag handles and keyboard fallback controls', () => {
+  it('renders only five visibility toggles without ordering controls', () => {
     const preferences = { widgets, order: widgets.map((item) => item.key), enabled: widgets.map((item) => item.key) };
     const html = HomeSettingsForm(preferences, preferences.order, preferences.enabled);
-    expect(html).toContain('data-action="home-drag"');
-    expect(html).toContain('data-direction="up"');
-    expect(html).toContain('data-direction="down"');
-    expect(html).toContain('data-action="home-widget-toggle"');
+    expect(html.match(/data-action="home-widget-toggle"/g)).toHaveLength(5);
+    expect(html).not.toContain('data-action="home-drag"');
+    expect(html).not.toContain('data-direction="up"');
+    expect(html).not.toContain('data-direction="down"');
   });
 
   it('renders announcements with dismiss, typed action and manual navigation only', () => {

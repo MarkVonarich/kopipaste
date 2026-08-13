@@ -535,7 +535,7 @@ describe('main plan handlers', () => {
     expect(document.querySelector('[data-sheet]')?.getAttribute('aria-label')).toBe('Список покупок');
   });
 
-  it('tracks only visible announcement slides once per session', async () => {
+  it('tracks only the compact visible announcement once per session', async () => {
     const api = installAppMocks([], undefined, [announcement('a'), announcement('b'), announcement('c')]);
     await import('../src/main');
     await flush();
@@ -544,25 +544,12 @@ describe('main plan handlers', () => {
       .map(([, properties]) => properties?.update_key);
 
     expect(impressionIds()).toEqual(['a']);
-    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="announcement"][data-index="1"]')?.click();
-    expect(impressionIds()).toEqual(['a', 'b']);
-    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="announcement"][data-index="1"]')?.click();
-    expect(impressionIds()).toEqual(['a', 'b']);
-
-    const slide = document.querySelector<HTMLElement>('[data-carousel="announcement"]')!;
-    const pointerDown = new Event('pointerdown', { bubbles: true });
-    const pointerUp = new Event('pointerup', { bubbles: true });
-    Object.defineProperty(pointerDown, 'clientX', { value: 100 });
-    Object.defineProperty(pointerUp, 'clientX', { value: 20 });
-    slide.dispatchEvent(pointerDown);
-    slide.dispatchEvent(pointerUp);
-    expect(impressionIds()).toEqual(['a', 'b', 'c']);
-
-    document.querySelector<HTMLElement>('[data-carousel="announcement"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
-    expect(impressionIds()).toEqual(['a', 'b', 'c']);
+    expect(document.querySelector('[data-action="carousel-dot"]')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.dispatchEvent(new Event('focus'));
+    expect(impressionIds()).toEqual(['a']);
   });
 
-  it('does not track an announcement when the Home widget is disabled', async () => {
+  it('keeps What’s New fixed even when legacy preferences disabled it', async () => {
     const api = installAppMocks([], undefined, [announcement('hidden')]);
     api.overview.mockResolvedValue({
       period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' },
@@ -577,7 +564,8 @@ describe('main plan handlers', () => {
     await import('../src/main');
     await flush();
 
-    expect(api.track.mock.calls.some(([name]) => name === 'mini_app_announcement_impression')).toBe(false);
+    expect(api.track.mock.calls.some(([name]) => name === 'mini_app_announcement_impression')).toBe(true);
+    expect(document.querySelector('[data-action="announcement-open"]')).not.toBeNull();
   });
 
   it('tracks the next visible slide after dismissing the current announcement', async () => {
@@ -675,6 +663,58 @@ describe('main plan handlers', () => {
     await flush(8);
 
     expect(document.querySelector<HTMLInputElement>('form[data-action="save-limit"] input[name="alerts_enabled"]')?.checked).toBe(false);
+  });
+
+  it('persists category limit title, amount, category, period and alerts through reload without a duplicate', async () => {
+    const api = installAppMocks();
+    let stored = { ...plansData.limits[0] };
+    api.categories.mockResolvedValue({
+      items: [
+        { name: 'Food', normalized_name: 'food', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false },
+        { name: 'Cafe', normalized_name: 'cafe', type: 'Расходы', source: 'custom', operation_count: 0, has_budget: false },
+      ],
+      read_only: false,
+    });
+    api.plans.mockImplementation(async () => ({ ...plansData, limits: [stored] }));
+    (api.updateLimit as any).mockImplementation(async (_id: string, payload: any) => {
+      stored = {
+        ...stored,
+        id: `category:${payload.period}:${payload.category}`,
+        title: payload.title,
+        category: payload.category,
+        amount: payload.amount,
+        period: payload.period,
+        alerts_enabled: payload.alerts_enabled,
+      };
+      return { limit: stored };
+    });
+
+    await import('../src/main');
+    await flush();
+    await openPlansLimits();
+    document.querySelector<HTMLButtonElement>('[data-action="limit-edit"][data-id="category:month:Food"]')?.click();
+    await flush(8);
+    const form = document.querySelector<HTMLFormElement>('form[data-action="save-limit"]')!;
+    form.querySelector<HTMLInputElement>('[name="title"]')!.value = 'Coffee out';
+    form.querySelector<HTMLInputElement>('[name="amount"]')!.value = '750';
+    form.querySelector<HTMLSelectElement>('[name="category"]')!.value = 'Cafe';
+    form.querySelector<HTMLSelectElement>('[name="period"]')!.value = 'week';
+    form.querySelector<HTMLInputElement>('[name="alerts_enabled"]')!.checked = false;
+    form.requestSubmit();
+    await flush(12);
+
+    expect(api.updateLimit).toHaveBeenCalledWith('category:month:Food', expect.objectContaining({
+      title: 'Coffee out', amount: '750.00', category: 'Cafe', period: 'week', alerts_enabled: false,
+    }));
+    expect((await api.plans()).limits).toHaveLength(1);
+    document.querySelector<HTMLButtonElement>('[data-action="limit-edit"][data-id="category:week:Cafe"]')?.click();
+    await flush(8);
+    const reloaded = document.querySelector<HTMLFormElement>('form[data-action="save-limit"]')!;
+    expect(reloaded.querySelector<HTMLInputElement>('[name="title"]')?.value).toBe('Coffee out');
+    expect(reloaded.querySelector<HTMLInputElement>('[name="amount"]')?.value).toBe('750.00');
+    expect(reloaded.querySelector<HTMLSelectElement>('[name="category"]')?.value).toBe('Cafe');
+    expect(reloaded.querySelector<HTMLSelectElement>('[name="period"]')?.value).toBe('week');
+    expect(reloaded.querySelector<HTMLInputElement>('[name="alerts_enabled"]')?.checked).toBe(false);
   });
 
   it('implements the complete grouped-budget pointer lifecycle and preserves tap fallback', async () => {
@@ -882,6 +922,40 @@ describe('main plan handlers', () => {
     expect(document.querySelector('[data-action="goal-archive-open"]')).not.toBeNull();
   });
 
+  it('updates active/archive goal collections across archive and restore without restarting', async () => {
+    const api = installAppMocks();
+    let active = [goalData('active')];
+    let archived: any[] = [];
+    api.plans.mockImplementation(async () => ({ ...plansData, goals: active, archived_goals: archived }));
+    api.setGoalStatus.mockImplementation(async (id, _workspace, status) => {
+      const source = [...active, ...archived].find((goal) => goal.id === id)!;
+      const goal = { ...source, status };
+      active = status === 'active' ? [goal] : active.filter((item) => item.id !== id);
+      archived = status === 'archived' ? [goal] : archived.filter((item) => item.id !== id);
+      return { goal };
+    });
+
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="goal-open"][data-id="7"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-status"][data-status="archived"]')?.click();
+    await flush(12);
+
+    expect(document.querySelector('[data-action="goal-open"][data-id="7"]')).toBeNull();
+    expect(document.querySelector('[data-action="goal-archive-open"]')?.textContent).toContain('1 целей');
+    document.querySelector<HTMLButtonElement>('[data-action="goal-archive-open"]')?.click();
+    expect(document.querySelector('[data-action="goal-open"][data-id="7"]')).not.toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-open"][data-id="7"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="goal-status"][data-status="active"]')?.click();
+    await flush(12);
+
+    expect(api.setGoalStatus).toHaveBeenLastCalledWith(7, 10, 'active');
+    expect(document.querySelector('[data-action="goal-open"][data-id="7"]')).not.toBeNull();
+    expect(document.querySelector('[data-action="goal-archive-open"]')?.textContent).toContain('0 целей');
+  });
+
   it('requires explicit confirmation before permanently deleting an archived goal', async () => {
     const api = installAppMocks();
     api.plans.mockResolvedValue({ ...plansData, goals: [], archived_goals: [goalData('archived')] });
@@ -961,7 +1035,7 @@ describe('main plan handlers', () => {
     expect(document.body.textContent).toContain('Яндекс Лавка');
     expect(document.querySelector('[data-action="insight-feedback"]')).not.toBeNull();
 
-    document.querySelector<HTMLButtonElement>('[data-feedback="useful"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="insight-feedback"][data-feedback="useful"]')?.click();
     await flush();
     expect(api.insightFeedback).toHaveBeenCalledWith('a'.repeat(64), 10, 'useful');
     expect(document.body.textContent).toContain('Спасибо, учтём этот выбор.');
@@ -978,7 +1052,7 @@ describe('main plan handlers', () => {
     document.querySelector<HTMLButtonElement>('[data-action="home-insight"]')?.click();
     await flush();
 
-    document.querySelector<HTMLButtonElement>('[data-feedback="not_useful"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="insight-feedback"][data-feedback="not_useful"]')?.click();
     await flush(12);
 
     expect(api.insightFeedback).toHaveBeenCalledWith('a'.repeat(64), 10, 'not_useful');
@@ -1263,7 +1337,7 @@ describe('main plan handlers', () => {
     expect(api.recordReminder).not.toHaveBeenCalled();
   });
 
-  it('opens the current Home reminder carousel slide by id', async () => {
+  it('opens the first fixed Home reminder summary by id', async () => {
     const api = installAppMocks();
     api.overview.mockResolvedValue({
       period: { key: 'current_month', start_date: '2026-08-01', end_date: '2026-08-07' },
@@ -1282,21 +1356,11 @@ describe('main plan handlers', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="reminder"][data-index="1"]')?.click();
-    await Promise.resolve();
-    expect(document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.dataset.id).toBe('20');
+    expect(document.querySelector('[data-action="carousel-dot"][data-carousel="reminder"]')).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.dataset.id).toBe('10');
     document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.click();
     await Promise.resolve();
-    expect(api.reminderDetail).toHaveBeenLastCalledWith(20);
-
-    document.querySelector<HTMLButtonElement>('[data-action="close-sheet"]')?.click();
-    await Promise.resolve();
-    document.querySelector<HTMLButtonElement>('[data-action="carousel-dot"][data-carousel="reminder"][data-index="2"]')?.click();
-    await Promise.resolve();
-    expect(document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.dataset.id).toBe('30');
-    document.querySelector<HTMLButtonElement>('[data-action="home-reminder"]')?.click();
-    await Promise.resolve();
-    expect(api.reminderDetail).toHaveBeenLastCalledWith(30);
+    expect(api.reminderDetail).toHaveBeenLastCalledWith(10);
   });
 
   it('opens the global menu and requests Telegram native add-to-home', async () => {

@@ -15,11 +15,8 @@ def test_home_widget_registry_is_canonical_and_reconciliation_is_forward_compati
         ["activity", "retired_widget", "activity", "financial_result"],
         ["activity", "retired_widget"],
     )
-    assert prefs["order"][:2] == ["activity", "financial_result"]
-    assert "retired_widget" not in prefs["order"]
-    assert prefs["order"][-1] == "recent_operations"
-    assert prefs["enabled"][0] == "activity"
-    assert "whats_new" in prefs["enabled"]
+    assert prefs["order"] == list(HOME_WIDGET_KEYS)
+    assert prefs["enabled"] == []
 
 
 def test_home_preferences_allow_all_widgets_disabled():
@@ -37,16 +34,15 @@ def test_no_saved_home_preferences_uses_registry_defaults(monkeypatch):
     assert prefs["enabled"] == list(HOME_WIDGET_KEYS)
 
 
-def test_home_preference_mutation_rejects_unknown_duplicates_and_partial_order():
+def test_home_preference_mutation_rejects_unknown_and_duplicates_but_accepts_legacy_partial_payloads():
     with pytest.raises(ValueError):
         validate_home_preferences([*HOME_WIDGET_KEYS, HOME_WIDGET_KEYS[0]], list(HOME_WIDGET_KEYS))
     with pytest.raises(ValueError):
         validate_home_preferences([*HOME_WIDGET_KEYS[:-1], "unknown"], list(HOME_WIDGET_KEYS))
-    with pytest.raises(ValueError):
-        validate_home_preferences(list(HOME_WIDGET_KEYS[:-1]), list(HOME_WIDGET_KEYS[:-1]))
+    validate_home_preferences(list(HOME_WIDGET_KEYS[:-1]), list(HOME_WIDGET_KEYS[:-1]))
 
 
-def test_home_preferences_save_and_reload_preserves_order(monkeypatch):
+def test_home_preferences_save_and_reload_preserves_only_fixed_toggle_state(monkeypatch):
     from services.home_preferences import get_home_preferences, save_home_preferences
 
     stored = {}
@@ -80,7 +76,7 @@ def test_home_preferences_save_and_reload_preserves_order(monkeypatch):
     monkeypatch.setattr("services.home_preferences.get_conn", lambda: Connection())
     save_home_preferences(42, order, enabled)
     monkeypatch.setattr("services.home_preferences.pg_fetchall", lambda *_args: [(stored["order"], stored["enabled"])])
-    assert get_home_preferences(42) == {"order": order, "enabled": [key for key in order if key in enabled]}
+    assert get_home_preferences(42) == {"order": list(HOME_WIDGET_KEYS), "enabled": ["goals", "reminders"]}
 
 
 def test_announcement_resolver_applies_ttl_family_and_dismissal(monkeypatch):

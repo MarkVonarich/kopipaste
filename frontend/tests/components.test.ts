@@ -40,7 +40,7 @@ function insight(overrides: Partial<Insight> = {}): Insight {
 describe('acceptance components', () => {
   it('renders Home result card and recent operations controls', () => {
     const html = HomeScreen(overview, [], 'RUB', true);
-    expect(html).toContain('Доходы − Расходы');
+    expect(html).toContain('<span>Итог</span>');
     expect(html).toContain('+649,75 ₽');
     expect(html).toContain('Последние операции');
     expect(html).toContain('data-action="open-actions"');
@@ -64,7 +64,7 @@ describe('acceptance components', () => {
       },
     }, [], 'RUB', true, { period: 'previous_month', operation_type: 'all', category: 'all' });
 
-    expect(html).toContain('Нет серии без пропусков');
+    expect(html).toContain('0 активных дней за период');
     expect(html).not.toContain('Серия начнётся сегодня');
   });
 
@@ -87,22 +87,18 @@ describe('acceptance components', () => {
       insight: insight({ tone: 'positive', title: 'Расходы ниже', summary: 'На 10% меньше' }),
     }, recent, 'RUB', true);
     const incomeColumn = html.slice(html.indexOf('data-testid="income-column"'), html.indexOf('data-testid="expense-column"'));
-    const expenseColumn = html.slice(html.indexOf('data-testid="expense-column"'), html.indexOf('data-testid="smart-home-grid"'));
+    const expenseColumn = html.slice(html.indexOf('data-testid="expense-column"'), html.indexOf('data-testid="home-plans"'));
     expect(incomeColumn).toContain('Доходы');
     expect(incomeColumn).toContain('data-kind="income"');
     expect(expenseColumn).toContain('Расходы');
     expect(expenseColumn).toContain('data-kind="expense"');
-    expect(html).toContain('Челлендж · Сегодня');
-    expect(html).toContain('2 записи за день');
-    expect(html).toContain('1/2');
-    expect(html).toContain('Запишите 2 операции сегодня.');
-    expect(html).not.toContain('реальные операции');
+    expect(html).not.toContain('Челлендж · Сегодня');
     expect(html).toContain('Лимиты');
-    expect(html).toContain('Инсайт периода');
+    expect(html).toContain('Главное');
     expect(html).not.toContain('Food 4');
   });
 
-  it('renders smart Home carousel dots inside card shells without nested buttons', () => {
+  it('renders fixed plan summaries without Home carousels or challenges', () => {
     const html = HomeScreen({
       ...overview,
       challenges: [
@@ -120,11 +116,11 @@ describe('acceptance components', () => {
       insight: insight({ tone: 'neutral', title: 'Период', summary: 'Есть данные' }),
     }, [], 'RUB', true);
 
-    expect(html).toContain('class="smart-card home-carousel"');
-    expect(html.match(/class="smart-card home-carousel"/g)).toHaveLength(4);
+    expect(html).not.toContain('class="smart-card home-carousel"');
     expect(html).toContain('Цели');
     expect(html).toContain('Лимиты');
-    expect(html).toContain('data-action="carousel-dot"');
+    expect(html).not.toContain('data-action="carousel-dot"');
+    expect(html).not.toContain('Сегодня');
     expect(html).toContain('class="smart-card insight-card');
     expect(html).not.toContain('<button class="smart-card"');
   });
@@ -139,13 +135,14 @@ describe('acceptance components', () => {
       reminders: [{ state: 'upcoming', id: 9, title: 'ChatGPT', amount_text: '1 990 ₽', event_date: '19 августа', status_text: 'Через 10 дней', overdue_days: 0 }],
     }, [], 'RUB', true);
 
-    expect(empty).toContain('Напоминание');
+    expect(empty).toContain('Напоминания');
     expect(empty).toContain('Нет событий');
     expect(empty).toContain('Добавьте в Планах.');
     expect(empty).not.toContain('Ближайшее напоминание');
     expect(empty).not.toContain('Нет запланированных событий');
-    expect(active).toContain('Напоминание');
-    expect(active).toContain('ChatGPT · 1 990 ₽');
+    expect(active).toContain('Напоминания');
+    expect(active).toContain('ChatGPT');
+    expect(active).toContain('1 990 ₽');
     expect(active).toContain('19 августа');
     expect(active).toContain('Через 10 дней');
     expect(active).not.toContain('Ближайшее напоминание');
@@ -169,22 +166,22 @@ describe('acceptance components', () => {
       ],
     }, [], 'RUB', true, { period: 'current_month', operation_type: 'all', category: 'all' }, { challenge: 0, focus: 0, reminder: 2 });
 
-    expect(second).toContain('data-action="home-reminder" type="button" data-id="20" data-state="overdue"');
+    expect(second).toMatch(/data-action="home-reminder"[^>]*data-id="20"[^>]*data-state="overdue"/);
     expect(second).toContain('<strong>B</strong>');
     expect(second).not.toContain('<strong>A</strong>');
-    expect(third).toContain('data-action="home-reminder" type="button" data-id="30" data-state="upcoming"');
+    expect(third).toMatch(/data-action="home-reminder"[^>]*data-id="30"[^>]*data-state="upcoming"/);
     expect(third).toContain('<strong>C</strong>');
   });
 
   it('renders focus projected risk without replacing actual progress', () => {
     const html = HomeScreen({
       ...overview,
-      focus: { kind: 'limit', title: 'Food', description: 'При текущем темпе лимит может быть превышен.', target_mode: 'limits', percent: 60, projected_percent: 145, severity: 'high', status: 'warning' },
+      limit_items: [{ kind: 'limit', title: 'Food', description: 'При текущем темпе лимит может быть превышен.', target_mode: 'limits', percent: 60, projected_percent: 145, severity: 'high', status: 'warning' }],
     }, [], 'RUB', true);
 
     expect(html).toContain('aria-valuenow="60"');
     expect(html).toContain('Лимит под риском');
-    expect(html).toContain('Прогноз: 145%');
+    expect(html).not.toContain('Прогноз: 145%');
     expect(html).not.toContain('При текущем темпе лимит может быть превышен.');
     expect(html).not.toContain('Прогноз к концу периода');
   });
@@ -199,7 +196,7 @@ describe('acceptance components', () => {
     expect(html).not.toContain('в прошлом сопоставимом периоде');
   });
 
-  it('renders up to three structured insights and keeps Home clean without them', () => {
+  it('renders at most two structured insights and keeps Home clean without them', () => {
     const clean = HomeScreen(overview, [], 'RUB', true);
     const populated = HomeScreen({
       ...overview,
@@ -207,10 +204,10 @@ describe('acceptance components', () => {
     }, [], 'RUB', true);
 
     expect(clean).not.toContain('Инсайт периода');
-    expect(populated.match(/data-action="home-insight"/g)).toHaveLength(3);
+    expect(populated.match(/data-action="home-insight"/g)).toHaveLength(2);
     expect(populated).toContain('Продукты выросли');
     expect(populated).toContain('Рестораны близки');
-    expect(populated).toContain('12 вместо 7');
+    expect(populated).not.toContain('12 вместо 7');
   });
 
   it('renders insight evidence, contextual actions, and feedback controls', () => {

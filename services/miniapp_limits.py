@@ -208,6 +208,8 @@ def replace_category_limit(
     category: str,
     amount: Decimal | int | str,
     currency: str,
+    title: str | None = None,
+    alerts_enabled: bool | None = True,
     require_existing: bool = False,
 ) -> StoredLimit:
     period = _limit_period(period)
@@ -231,10 +233,15 @@ def replace_category_limit(
                 category=category,
                 amount=amount_dec,
                 currency=currency,
+                title=title,
+                alerts_enabled=alerts_enabled,
                 require_existing=require_existing,
             )
         conn.commit()
         return stored
+    except errors.UniqueViolation as exc:
+        conn.rollback()
+        raise MiniAppLimitError("limit_conflict") from exc
     except Exception:
         conn.rollback()
         raise
@@ -253,6 +260,8 @@ def replace_category_limit_tx(
     category: str,
     amount: Decimal | int | str,
     currency: str,
+    title: str | None = None,
+    alerts_enabled: bool | None = True,
     require_existing: bool = False,
 ) -> StoredLimit:
     period = _limit_period(period)
@@ -263,10 +272,11 @@ def replace_category_limit_tx(
         raise MiniAppLimitError("category_required")
     amount_dec = to_decimal_money(amount, positive=True)
     currency = (currency[:8] if currency else None)
+    display_name = str(title or category).strip()[:80] or category
     if require_existing:
         cur.execute(
             """
-            SELECT currency
+            SELECT currency, COALESCE(display_name, category), alerts_enabled
               FROM public.category_limits
              WHERE user_id=%s
                AND workspace_id IS NOT DISTINCT FROM %s
@@ -280,50 +290,82 @@ def replace_category_limit_tx(
         if not existing:
             raise MiniAppLimitError("limit_not_found")
         currency = currency or existing[0]
+        if title is None:
+            display_name = str(existing[1] or category).strip()[:80] or category
+        if alerts_enabled is None:
+            alerts_enabled = bool(existing[2])
+    if alerts_enabled is None:
+        alerts_enabled = True
     currency = currency or (get_user_currency(user_id) or "RUB")[:8]
-    if old_period is not None and old_category is not None and (old_period != period or old_category != category):
+    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"category-limit:{user_id}:{workspace_id}:{period}:{category.casefold()}",))
+    if require_existing:
         cur.execute(
             """
-            DELETE FROM public.category_limits
+            SELECT 1
+              FROM public.category_limits
              WHERE user_id=%s
                AND workspace_id IS NOT DISTINCT FROM %s
                AND period=%s
                AND category=%s
+               AND NOT (period=%s AND category=%s)
+             LIMIT 1
             """,
-            (user_id, workspace_id, old_period, old_category),
+            (user_id, workspace_id, period, category, old_period, old_category),
         )
-        if require_existing and cur.rowcount != 1:
-            raise MiniAppLimitError("limit_not_found")
-    if old_period is None or old_category is None or old_period == period and old_category == category:
+        if cur.fetchone():
+            raise MiniAppLimitError("limit_conflict")
         cur.execute(
             """
-            DELETE FROM public.category_limits
+            UPDATE public.category_limits
+               SET period=%s,
+                   category=%s,
+                   amount=%s,
+                   currency=%s,
+                   display_name=%s,
+                   alerts_enabled=%s,
+                   updated_at=now()
              WHERE user_id=%s
                AND workspace_id IS NOT DISTINCT FROM %s
                AND period=%s
                AND category=%s
+            RETURNING period, category, amount, currency, workspace_id, COALESCE(display_name, category), alerts_enabled
+            """,
+            (period, category, amount_dec, currency, display_name, bool(alerts_enabled), user_id, workspace_id, old_period, old_category),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise MiniAppLimitError("limit_not_found")
+    else:
+        cur.execute(
+            """
+            SELECT 1 FROM public.category_limits
+             WHERE user_id=%s AND workspace_id IS NOT DISTINCT FROM %s
+               AND period=%s AND category=%s LIMIT 1
             """,
             (user_id, workspace_id, period, category),
         )
-    cur.execute(
-        """
-        INSERT INTO public.category_limits (user_id, workspace_id, period, category, amount, currency, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,now())
-        RETURNING period, category, amount, currency, workspace_id
-        """,
-        (user_id, workspace_id, period, category, amount_dec, currency),
-    )
-    row = cur.fetchone()
+        if cur.fetchone():
+            raise MiniAppLimitError("limit_conflict")
+        cur.execute(
+            """
+            INSERT INTO public.category_limits
+              (user_id, workspace_id, period, category, amount, currency, display_name, alerts_enabled, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,now())
+            RETURNING period, category, amount, currency, workspace_id, COALESCE(display_name, category), alerts_enabled
+            """,
+            (user_id, workspace_id, period, category, amount_dec, currency, display_name, bool(alerts_enabled)),
+        )
+        row = cur.fetchone()
     return StoredLimit(
         kind="category",
         identifier=_category_id(row[0], row[1]),
-        title=row[1],
+        title=row[5],
         category=row[1],
         amount=to_decimal_money(row[2]),
         currency=row[3],
         period=row[0],
         workspace_id=int(row[4]) if row[4] is not None else None,
-        alerts_enabled=True,
+        alerts_enabled=bool(row[6]),
         enabled=True,
     )
 

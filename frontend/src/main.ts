@@ -17,6 +17,8 @@ import { ReportsScreen } from './components/ReportsScreen';
 import { CategoryBudgetForm, CategoryDeleteForm, CategoryDetail, CategoryForm, GoalContributionForm, GoalDetail, GoalForm, LimitForm, PlansScreen, ReminderForm } from './components/PlansScreen';
 import { AccountDeletionForm, AdditionalMenu, CurrencyForm, ExportForm, HistoryDeletionForm, InfoPanel, PreferredNameForm, ProfileScreen, QuietHoursForm, TimezoneForm, VacationForm, WorkspaceForm } from './components/ProfileScreen';
 import { HomeSettingsForm } from './components/HomeSettings';
+import { CanSpendView, SpendableDetail } from './components/Forecasting';
+import { ActivityCalendarView } from './components/ActivityCalendar';
 import { ShoppingList } from './components/ShoppingList';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
@@ -55,6 +57,7 @@ let homeScreenCheckSeq = 0;
 const impressedInsightIds = new Set<string>();
 const impressedAnnouncementIds = new Set<string>();
 const rejectedInsightIds = new Set<string>();
+const impressedForecasts = new Set<string>();
 let suppressPlanningCategoryClick = '';
 let cancelPlanningDrag: (() => void) | null = null;
 
@@ -261,6 +264,7 @@ function renderTopbar(): string {
     ['custom', 'Период']
   ];
   const filters = activeFilters();
+  const currencies = Array.from(new Set([state.boot?.user.currency || 'RUB', ...(profile?.available_currencies || []), 'RUB', 'USD', 'EUR']));
   const categoryOptionsHtml = [
     `<option value="all" ${filters.category === 'all' ? 'selected' : ''}>Все категории</option>`,
     ...globalCategoryOptions.map((category) => `<option value="${esc(category.name)}" ${filters.category === category.name ? 'selected' : ''}>${esc(category.name)}</option>`)
@@ -270,6 +274,9 @@ function renderTopbar(): string {
       <label class="toolbar-field"><span>Пространство</span><select class="select compact" data-action="workspace" aria-label="Пространство">${workspaceOptions}</select></label>
       <label class="toolbar-field"><span>Период</span><select class="select compact" data-action="period" aria-label="Период">
         ${periodOptions.map(([key, label]) => `<option value="${key}" ${filters.period === key ? 'selected' : ''}>${label}</option>`).join('')}
+      </select></label>
+      <label class="toolbar-field"><span>Валюта</span><select class="select compact" data-action="global-currency" aria-label="Валюта">
+        ${currencies.map((currency) => `<option value="${esc(currency)}" ${filters.currency === currency || (!filters.currency && state.boot?.user.currency === currency) ? 'selected' : ''}>${esc(currency)}</option>`).join('')}
       </select></label>
       <label class="toolbar-field"><span>Тип</span><select class="select compact" data-action="operation-type" aria-label="Тип операции">
         <option value="all" ${filters.operation_type === 'all' ? 'selected' : ''}>Все операции</option>
@@ -293,7 +300,6 @@ function renderNav(): string {
 
 function renderHome(): string {
   return HomeScreen(overview, overview?.recent_operations || [], state.boot?.user.currency || 'RUB', canWrite(), activeFilters(), {
-    challenge: state.homeChallengeIndex || 0,
     goal: state.homeGoalIndex || 0,
     limit: state.homeLimitIndex || 0,
     reminder: state.homeReminderIndex || 0,
@@ -333,18 +339,16 @@ function renderProfile(): string {
   return ProfileScreen(profile, state.boot?.workspaces || [], state.theme, state.profileAccordion);
 }
 
-function carouselTotal(kind: 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement'): number {
-  if (kind === 'challenge') return Math.max(1, overview?.challenges?.length || (overview?.challenge ? 1 : 0));
+function carouselTotal(kind: 'goal' | 'limit' | 'reminder' | 'announcement'): number {
   if (kind === 'goal') return Math.max(1, overview?.goal_items?.length || 0);
   if (kind === 'limit') return Math.max(1, overview?.limit_items?.length || 0);
   if (kind === 'announcement') return Math.max(1, overview?.announcements?.length || 0);
   return Math.max(1, overview?.reminders?.length || (overview?.reminder ? 1 : 0));
 }
 
-function setHomeCarouselIndex(kind: 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement', index: number, direction: string): void {
+function setHomeCarouselIndex(kind: 'goal' | 'limit' | 'reminder' | 'announcement', index: number, direction: string): void {
   const total = carouselTotal(kind);
   const clamped = Math.max(0, Math.min(index, total - 1));
-  if (kind === 'challenge') state.homeChallengeIndex = clamped;
   if (kind === 'goal') state.homeGoalIndex = clamped;
   if (kind === 'limit') state.homeLimitIndex = clamped;
   if (kind === 'reminder') state.homeReminderIndex = clamped;
@@ -451,6 +455,12 @@ async function openAnnouncementTarget(announcement: Announcement): Promise<void>
     await openShoppingList();
     return;
   }
+  if (target === 'OPEN_HOME') {
+    state.sheet = null;
+    state.tab = 'home';
+    await loadScreen();
+    return;
+  }
   state.sheet = null;
   if (target === 'OPEN_PROFILE') state.tab = 'profile';
   else if (target === 'OPEN_ANALYTICS') state.tab = 'analytics';
@@ -506,6 +516,15 @@ function renderSheet(): string {
   }
   if (state.sheet === 'announcement-detail' && selectedAnnouncement?.detail?.trim()) {
     return BottomSheet(selectedAnnouncement.title, `<div class="detail-grid announcement-detail"><span class="eyebrow">${esc(announcementKindLabel(selectedAnnouncement.kind))}</span><p>${esc(selectedAnnouncement.detail)}</p></div>`);
+  }
+  if (state.sheet === 'activity-detail') {
+    return BottomSheet('Активность', ActivityCalendarView(overview?.activity, false));
+  }
+  if (state.sheet === 'spendable-detail' && state.spendableForecast) {
+    return BottomSheet('Свободно', SpendableDetail(state.spendableForecast, categoryOptions, state.saving, state.saveError));
+  }
+  if (state.sheet === 'can-spend-result' && state.canSpendResult && state.spendableForecast) {
+    return BottomSheet('Сколько я могу потратить?', CanSpendView(state.canSpendResult, state.spendableForecast.currency));
   }
   if (state.sheet === 'home-settings') {
     const preferences = profile?.home_preferences || (overview?.home_widgets && overview.home_preferences ? { widgets: overview.home_widgets, ...overview.home_preferences } : null);
@@ -772,6 +791,12 @@ async function loadScreen(): Promise<void> {
       }
       const announcementTotal = overview.announcements?.length || 0;
       state.announcementIndex = announcementTotal ? Math.min(state.announcementIndex || 0, announcementTotal - 1) : 0;
+      if (overview.spendable?.available && overview.spendable.experiment?.enabled && !impressedForecasts.has(overview.spendable.fingerprint)) {
+        const fingerprint = overview.spendable.fingerprint;
+        impressedForecasts.add(fingerprint);
+        void api.forecastExposure(state.workspaceId, 'home_spendable', overview.spendable.quality_tier).catch(() => impressedForecasts.delete(fingerprint));
+        void api.track('spendable_card_seen', { surface: 'home', quality_tier: overview.spendable.quality_tier, risk_bucket: overview.spendable.risk_state });
+      }
     }
     if (state.tab === 'operations') operations = await api.operations(state.workspaceId, { ...filters, ...(state.operationScope || {}) }, 0, state.search);
     if (state.tab === 'analytics') {
@@ -1008,10 +1033,18 @@ function closeSheet(): void {
   state.privacyPreview = undefined;
   state.accountPreview = undefined;
   state.accountDeletedMessage = undefined;
+  state.spendableForecast = undefined;
+  state.canSpendResult = undefined;
   render();
 }
 
 function navigateBack(): void {
+  if (state.sheet === 'can-spend-result' && state.spendableForecast) {
+    state.sheet = 'spendable-detail';
+    state.canSpendResult = undefined;
+    render();
+    return;
+  }
   if (state.sheet === 'privacy-history' && state.privacyStage === 'confirm') {
     state.privacyStage = 'preview';
     render();
@@ -1365,6 +1398,10 @@ function wireEvents(): void {
     await api.track('mini_app_workspace_changed', { scope: String(state.workspaceId) });
     await loadScreen();
   });
+  app.querySelector<HTMLSelectElement>('[data-action="global-currency"]')?.addEventListener('change', async (event) => {
+    setGlobalFilters({ ...activeFilters(), currency: (event.currentTarget as HTMLSelectElement).value });
+    await loadScreen();
+  });
   app.querySelector<HTMLSelectElement>('[data-action="period"]')?.addEventListener('change', async (event) => {
     const period = (event.currentTarget as HTMLSelectElement).value as PeriodKey;
     hapticSelection();
@@ -1372,7 +1409,7 @@ function wireEvents(): void {
       const today = new Date().toISOString().slice(0, 10);
       setGlobalFilters({ ...state.globalFilters, period, start_date: today, end_date: today });
     } else {
-      setGlobalFilters({ operation_type: state.globalFilters.operation_type, category: state.globalFilters.category, period });
+      setGlobalFilters({ operation_type: state.globalFilters.operation_type, category: state.globalFilters.category, currency: state.globalFilters.currency, period });
     }
     state.operationScope = undefined;
     await api.track('mini_app_global_filter_applied', { period_kind: state.globalFilters.period, operation_type: state.globalFilters.operation_type, has_category_filter: String(state.globalFilters.category !== 'all'), source: 'mini_app' });
@@ -1523,7 +1560,7 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="carousel-dot"]').forEach((button) => {
     button.addEventListener('click', () => {
-      const kind = button.dataset.carousel as 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement';
+      const kind = button.dataset.carousel as 'goal' | 'limit' | 'reminder' | 'announcement';
       setHomeCarouselIndex(kind, Number(button.dataset.index || 0), 'dot');
       hapticSelection();
       render();
@@ -1531,7 +1568,7 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLElement>('[data-carousel]').forEach((node) => {
     let startX = 0;
-    const kind = node.dataset.carousel as 'challenge' | 'goal' | 'limit' | 'reminder' | 'announcement';
+    const kind = node.dataset.carousel as 'goal' | 'limit' | 'reminder' | 'announcement';
     node.addEventListener('keydown', (event) => {
       if (!(event instanceof KeyboardEvent)) return;
       const current = Number(node.dataset.index || 0);
@@ -1591,6 +1628,50 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="home-settings-open"]').forEach((button) => {
     button.addEventListener('click', openHomeSettings);
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="activity-open"]')?.addEventListener('click', async () => {
+    state.sheet = 'activity-detail';
+    await api.track('mini_app_activity_opened', { surface: 'home' });
+    render();
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="spendable-open"]')?.addEventListener('click', async () => {
+    if (!overview?.spendable?.available || state.saving) return;
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      const [forecast] = await Promise.all([api.spendableForecast(state.workspaceId, activeFilters()), loadCategoriesFor('expense')]);
+      state.spendableForecast = forecast;
+      state.sheet = 'spendable-detail';
+      state.saving = false;
+      void api.forecastExposure(state.workspaceId, 'forecast_detail', forecast.quality_tier);
+      render();
+    } catch (error) {
+      state.saving = false;
+      state.error = safeError(error);
+      render();
+    }
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="forecast-feedback"]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (state.saving) return;
+      const fingerprint = button.dataset.fingerprint || '';
+      const feedback = button.dataset.feedback === 'not_useful' ? 'not_useful' : 'useful';
+      state.saving = true;
+      render();
+      try {
+        await api.forecastFeedback(fingerprint, state.workspaceId, feedback);
+        if (overview?.spendable?.available && overview.spendable.fingerprint === fingerprint) overview.spendable.feedback = feedback;
+        state.saving = false;
+        showToast('Спасибо, учтём этот выбор.');
+        render();
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
+        render();
+      }
+    });
   });
   app.querySelector<HTMLButtonElement>('[data-action="announcement-open"]')?.addEventListener('click', async (event) => {
     event.stopPropagation();
@@ -1734,12 +1815,6 @@ function wireEvents(): void {
       render();
     }
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-challenge"]')?.addEventListener('click', async () => {
-    await api.track('mini_app_home_challenge_opened', { kind: overview?.challenge?.completed ? 'completed' : 'active', source: 'mini_app' });
-    state.tab = 'plans';
-    state.plansMode = 'limits';
-    await loadScreen();
-  });
   app.querySelector<HTMLButtonElement>('[data-action="home-focus"]')?.addEventListener('click', async (event) => {
     const mode = (event.currentTarget as HTMLButtonElement).dataset.mode === 'limits' ? 'limits' : 'goals';
     await api.track('mini_app_home_focus_opened', { kind: mode, source: 'mini_app' });
@@ -1791,6 +1866,31 @@ function wireEvents(): void {
         state.saveError = safeError(error);
       } finally {
         state.saving = false;
+        render();
+      }
+    });
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-action="home-insight-feedback"]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const insightId = button.dataset.insightId || '';
+      const feedback = button.dataset.feedback === 'not_useful' ? 'not_useful' : 'useful';
+      if (!insightId || state.saving) return;
+      state.saving = true;
+      render();
+      try {
+        await api.insightFeedback(insightId, state.workspaceId, feedback);
+        if (feedback === 'not_useful') rejectedInsightIds.add(`${state.workspaceId ?? 'personal'}:${insightId}`);
+        if (overview) {
+          const updated: Insight[] = (overview.insights || []).filter((item) => feedback !== 'not_useful' || item.id !== insightId).map((item) => item.id === insightId ? { ...item, feedback: feedback as Insight['feedback'] } : item);
+          overview = { ...overview, insights: updated, insight: updated[0] || null };
+        }
+        state.saving = false;
+        showToast('Спасибо, учтём этот выбор.');
+        render();
+      } catch (error) {
+        state.saving = false;
+        state.saveError = safeError(error);
         render();
       }
     });
@@ -1877,12 +1977,22 @@ function wireEvents(): void {
       render();
       try {
         const status = button.dataset.status || 'active';
-        await api.setGoalStatus(Number(button.dataset.id), state.workspaceId, status);
+        const response = await api.setGoalStatus(Number(button.dataset.id), state.workspaceId, status);
+        if (plans) {
+          const withoutGoal = (items: Goal[] = []) => items.filter((goal) => goal.id !== response.goal.id);
+          plans = {
+            ...plans,
+            goals: status === 'active' ? [response.goal, ...withoutGoal(plans.goals)] : withoutGoal(plans.goals),
+            archived_goals: status === 'archived' ? [response.goal, ...withoutGoal(plans.archived_goals)] : withoutGoal(plans.archived_goals),
+          };
+        }
         state.sheet = null;
         selectedGoal = null;
         if (status === 'active') state.plansGoalView = 'active';
         showToast(status === 'archived' ? 'Цель перемещена в архив' : status === 'active' ? 'Цель восстановлена' : 'Цель обновлена');
         await reloadActive();
+        state.saving = false;
+        render();
       } catch (error) {
         state.saving = false;
         state.saveError = safeError(error);
@@ -2295,66 +2405,12 @@ function wireEvents(): void {
       render();
     });
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-enable-all"]')?.addEventListener('click', () => {
-    const widgets = profile?.home_preferences.widgets || overview?.home_widgets || [];
-    state.homeDraftEnabled = widgets.map((widget) => widget.key);
-    render();
-  });
-  app.querySelector<HTMLButtonElement>('[data-action="home-reset"]')?.addEventListener('click', () => {
-    const widgets = profile?.home_preferences.widgets || overview?.home_widgets || [];
-    const defaults = [...widgets].sort((left, right) => left.default_order - right.default_order);
-    state.homeDraftOrder = defaults.map((widget) => widget.key);
-    state.homeDraftEnabled = defaults.filter((widget) => widget.default_enabled).map((widget) => widget.key);
-    render();
-  });
   app.querySelectorAll<HTMLInputElement>('[data-action="home-widget-toggle"]').forEach((input) => {
     input.addEventListener('change', () => {
       const key = input.dataset.key as HomeWidgetKey;
       const enabled = new Set(state.homeDraftEnabled || []);
       if (input.checked) enabled.add(key); else enabled.delete(key);
       state.homeDraftEnabled = (state.homeDraftOrder || []).filter((item) => enabled.has(item));
-    });
-  });
-  app.querySelectorAll<HTMLButtonElement>('[data-action="home-widget-move"]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const order = [...(state.homeDraftOrder || [])];
-      const index = order.indexOf(button.dataset.key as HomeWidgetKey);
-      const next = button.dataset.direction === 'up' ? index - 1 : index + 1;
-      if (index < 0 || next < 0 || next >= order.length) return;
-      [order[index], order[next]] = [order[next], order[index]];
-      state.homeDraftOrder = order;
-      hapticSelection();
-      render();
-    });
-  });
-  app.querySelectorAll<HTMLButtonElement>('[data-action="home-drag"]').forEach((handle) => {
-    handle.addEventListener('pointerdown', (event) => {
-      const key = handle.closest<HTMLElement>('[data-home-key]')?.dataset.homeKey as HomeWidgetKey;
-      if (!key) return;
-      handle.setPointerCapture(event.pointerId);
-      let changed = false;
-      const move = (moveEvent: PointerEvent) => {
-        const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest<HTMLElement>('[data-home-key]');
-        const targetKey = target?.dataset.homeKey as HomeWidgetKey;
-        if (!targetKey || targetKey === key) return;
-        const order = [...(state.homeDraftOrder || [])];
-        const from = order.indexOf(key);
-        const to = order.indexOf(targetKey);
-        if (from < 0 || to < 0) return;
-        order.splice(to, 0, order.splice(from, 1)[0]);
-        state.homeDraftOrder = order;
-        changed = true;
-        const dragged = handle.closest<HTMLElement>('[data-home-key]');
-        if (dragged && target?.parentElement) target.parentElement.insertBefore(dragged, from < to ? target.nextSibling : target);
-      };
-      const finish = () => {
-        handle.removeEventListener('pointermove', move);
-        if (changed) hapticSelection();
-        render();
-      };
-      handle.addEventListener('pointermove', move);
-      handle.addEventListener('pointerup', finish, { once: true });
-      handle.addEventListener('pointercancel', finish, { once: true });
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="home-settings-save"]')?.addEventListener('click', async () => {
@@ -2919,6 +2975,33 @@ function wireEvents(): void {
       closeSheet();
       showToast('Лимит обновлён');
       await reloadActive();
+    } catch (error) {
+      state.saving = false;
+      state.saveError = safeError(error);
+      render();
+    }
+  });
+
+  app.querySelector<HTMLFormElement>('form[data-action="can-spend"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving || !state.spendableForecast) return;
+    const data = new FormData(event.currentTarget as HTMLFormElement);
+    state.saving = true;
+    state.saveError = undefined;
+    render();
+    try {
+      state.canSpendResult = await api.canSpend({
+        workspace_id: state.workspaceId,
+        currency: state.spendableForecast.currency,
+        period: activeFilters().period,
+        start_date: activeFilters().start_date,
+        end_date: activeFilters().end_date,
+        amount: normalizeMoneyText(String(data.get('amount') || '0')),
+        category: String(data.get('category') || '').trim() || undefined,
+      });
+      state.sheet = 'can-spend-result';
+      state.saving = false;
+      render();
     } catch (error) {
       state.saving = false;
       state.saveError = safeError(error);
