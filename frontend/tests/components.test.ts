@@ -98,7 +98,7 @@ describe('acceptance components', () => {
     expect(html).not.toContain('Food 4');
   });
 
-  it('renders fixed plan summaries without plan carousels or challenges', () => {
+  it('renders fixed plan summaries with reminder paging and no challenges', () => {
     const html = HomeScreen({
       ...overview,
       challenges: [
@@ -119,7 +119,7 @@ describe('acceptance components', () => {
     expect(html).not.toContain('class="smart-card home-carousel"');
     expect(html).toContain('Цели');
     expect(html).toContain('Лимиты');
-    expect(html).not.toContain('data-action="carousel-dot"');
+    expect(html).toContain('data-action="carousel-dot" data-carousel="reminder"');
     expect(html).not.toContain('Сегодня');
     expect(html).toContain('class="smart-card insight-card');
     expect(html).not.toContain('<button class="smart-card"');

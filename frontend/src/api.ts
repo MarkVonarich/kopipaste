@@ -62,7 +62,7 @@ export type Overview = {
   challenges?: Array<{ key: string; title: string; description: string; progress: number; target: number; completed: boolean; cta_label: string; period_type?: string; period_key: string; period_end?: string | null }>;
   focus?: { kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean } | null;
   focus_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; cta_label?: string; target_mode?: 'goals' | 'limits'; read_only?: boolean }>;
-  goal_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; severity?: string; target_mode?: 'goals' }>;
+  goal_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; status?: string; severity?: string; due_within_one_day?: boolean; target_mode?: 'goals' }>;
   limit_items?: Array<{ kind: string; id?: string | number | null; title: string; description: string; percent?: number; projected_percent?: number | null; status?: string; severity?: string; target_mode?: 'limits' }>;
   insights?: Insight[];
   insight?: Insight | null;

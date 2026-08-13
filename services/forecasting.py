@@ -1286,3 +1286,27 @@ def record_forecast_feedback(user_id: int, workspace_id: int | None, fingerprint
         raise
     finally:
         conn.close()
+
+
+def get_forecast_feedback(user_id: int, workspace_id: int | None, fingerprint: str) -> str | None:
+    try:
+        rows = pg_fetchall(
+            """
+            SELECT feedback_type
+              FROM public.forecast_feedback
+             WHERE user_id=%s
+               AND workspace_scope_key=COALESCE(%s::bigint,0)
+               AND forecast_fingerprint=%s
+             LIMIT 1
+            """,
+            (int(user_id), workspace_id, str(fingerprint)),
+        )
+    except errors.UndefinedTable:
+        return None
+    except Exception as exc:
+        log.info("forecast_feedback_read_failed reason=%s", type(exc).__name__)
+        return None
+    if not rows:
+        return None
+    feedback = str(rows[0][0] or "")
+    return feedback if feedback in {"useful", "not_useful"} else None

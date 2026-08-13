@@ -21,6 +21,7 @@ export function SpendableCard(summary?: SpendableSummary, feedbackSaving = false
 }
 
 export function InlineForecastFeedback(fingerprint: string, feedback?: string | null, saving = false): string {
+  if (feedback) return '<div class="inline-feedback resolved-feedback" aria-label="Оценка прогноза сохранена"><span>Спасибо</span></div>';
   return `<div class="inline-feedback" aria-label="Оценка прогноза">
     <span>Полезно?</span>
     <button type="button" data-action="forecast-feedback" data-fingerprint="${esc(fingerprint)}" data-feedback="useful" aria-label="Полезно" ${saving || feedback ? 'disabled' : ''}>👍</button>

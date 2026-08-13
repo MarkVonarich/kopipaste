@@ -55,6 +55,7 @@ from services.forecasting import (
     deterministic_currency_compatible,
     evaluate_target_validity,
     explain_forecast_change,
+    get_forecast_feedback,
     record_forecast_feedback,
     forecast_source_fingerprint,
     operation_is_deterministic,
@@ -1358,6 +1359,20 @@ def test_forecast_feedback_is_bound_to_issued_user_workspace_prediction(monkeypa
     assert "JOIN public.forecast_snapshots" in captured["sql"]
     assert "s.user_id=%s" in captured["sql"]
     assert captured["params"][-3:] == (42, 10, "a" * 64)
+
+
+def test_forecast_feedback_is_loaded_for_same_user_workspace_fingerprint(monkeypatch):
+    captured = {}
+
+    def fetch(sql, params=()):
+        captured.update(sql=" ".join(sql.split()), params=params)
+        return [("useful",)]
+
+    monkeypatch.setattr("services.forecasting.pg_fetchall", fetch)
+
+    assert get_forecast_feedback(42, 10, "a" * 64) == "useful"
+    assert "workspace_scope_key=COALESCE(%s::bigint,0)" in captured["sql"]
+    assert captured["params"] == (42, 10, "a" * 64)
 
 
 def test_forecast_insights_cover_risk_commitments_goals_end_result_and_change():

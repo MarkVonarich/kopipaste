@@ -1453,7 +1453,7 @@ def _percent_text(value: Decimal | None) -> str | None:
     return f"{pct:+d}%"
 
 
-def present_candidate(candidate: InsightCandidate) -> dict[str, Any]:
+def present_candidate(candidate: InsightCandidate, feedback: str | None = None) -> dict[str, Any]:
     data = candidate.content_data
     delta_text = format_money(abs(candidate.absolute_delta), candidate.currency)
     relative_text = _percent_text(candidate.relative_delta)
@@ -1561,7 +1561,7 @@ def present_candidate(candidate: InsightCandidate) -> dict[str, Any]:
             {"type": action.type, "label": action.label, "params": action.params}
             for action in candidate.actions
         ],
-        "feedback": None,
+        "feedback": feedback if feedback in FEEDBACK_TYPES else None,
     }
 
 
@@ -1577,7 +1577,12 @@ class InsightEngine:
         states = self.store.load(snapshot.user_id, snapshot.workspace_id)
         selected = rank_candidates(candidates, states, now=generated_at)
         self.store.ensure(snapshot.user_id, snapshot.workspace_id, selected)
-        return [present_candidate(candidate) for candidate in selected]
+        state_by_fingerprint = {state.fingerprint: state for state in states}
+        presented = []
+        for candidate in selected:
+            state = state_by_fingerprint.get(candidate.fingerprint)
+            presented.append(present_candidate(candidate, state.feedback_type if state else None))
+        return presented
 
     def impression(self, user_id: int, workspace_id: int | None, fingerprint: str) -> InsightState | None:
         return self.store.record_impression(user_id, workspace_id, fingerprint)
