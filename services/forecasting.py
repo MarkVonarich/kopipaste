@@ -37,6 +37,9 @@ FEATURE_SCHEMA_VERSION = "forecast-features-v1"
 RISK_POLICY_VERSION = "downside-q80-v1"
 DEFAULT_MODEL_VERSION = "personal-ensemble-v1"
 QUALITY_TIERS = ("known_only", "limited", "personal", "strong", "calibrated")
+MIN_INPUT_COVERAGE_RATIO = Decimal("0.35")
+MIN_TARGET_COVERAGE_RATIO = Decimal("0.35")
+TARGET_VALIDITY_POLICY_VERSION = "target-coverage-v1"
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,8 @@ class HistoricalRemainder:
     target_tracked_days: int = 1
     target_coverage_ratio: Decimal = Decimal("0.01")
     input_variable_expense: Decimal = Decimal("0.00")
+    target_valid: bool = False
+    target_validity_reason: str = "legacy_unassessed"
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,7 @@ class RegisteredChampion:
     model: Any
     family: str
     version: str
+    currency: str
     calibration: CalibrationResult
 
 
@@ -146,6 +152,8 @@ class SpendableForecast:
     variable_q90: Decimal
     variable_reserve: Decimal
     general_budget_remaining: Decimal | None
+    general_budget_current_remaining: Decimal | None
+    general_budget_projected_remaining: Decimal | None
     expected_end_result: Decimal
     lower_spendable: Decimal
     upper_spendable: Decimal
@@ -248,6 +256,48 @@ def operation_matches_snapshot_currency(operation_currency: str | None, snapshot
     return str(operation_currency).upper() == str(snapshot_currency).upper()
 
 
+def deterministic_currency_compatible(
+    operation_currency: str | None,
+    pattern_currency: str,
+    default_currency: str,
+) -> bool:
+    resolved = operation_currency if operation_currency is not None else default_currency
+    return str(resolved).upper() == str(pattern_currency).upper()
+
+
+def evaluate_target_validity(
+    *,
+    horizon_days: int,
+    operation_count: int,
+    tracked_days: int,
+    variable_expense: Decimal,
+) -> tuple[bool, str, Decimal]:
+    horizon = max(0, int(horizon_days))
+    tracked = max(0, int(tracked_days))
+    operations = max(0, int(operation_count))
+    if horizon <= 0:
+        return False, "no_target_horizon", Decimal("0")
+    coverage = min(Decimal("1"), Decimal(tracked) / Decimal(horizon))
+    if tracked == 0:
+        return False, "missing_future_tracking", coverage
+    if coverage < MIN_TARGET_COVERAGE_RATIO:
+        return False, "insufficient_future_coverage", coverage
+    if money(variable_expense) > 0 and operations == 0:
+        return False, "inconsistent_future_evidence", coverage
+    if operations == 0:
+        return True, "valid_tracked_zero", coverage
+    return True, "valid_observed_activity", coverage
+
+
+def _valid_history_rows(inputs: ForecastInputs) -> list[HistoricalRemainder]:
+    return [
+        row for row in inputs.historical
+        if row.input_coverage_ratio >= MIN_INPUT_COVERAGE_RATIO
+        and row.input_operation_count > 0
+        and row.target_valid
+    ]
+
+
 def _calibration_from_metadata(raw: Any) -> CalibrationResult:
     values = raw if isinstance(raw, dict) else {}
     offsets = values.get("offsets")
@@ -295,12 +345,7 @@ def comparable_periods(period: ForecastPeriod, count: int = 18) -> tuple[tuple[d
 
 
 def _quality(inputs: ForecastInputs, calibration_state: str = "insufficient") -> tuple[str, str]:
-    valid = [
-        row for row in inputs.historical
-        if row.input_coverage_ratio >= Decimal("0.35")
-        and row.input_operation_count > 0
-        and row.target_tracked_days > 0
-    ]
+    valid = _valid_history_rows(inputs)
     if calibration_state == "calibrated" and len(valid) >= 8:
         return "calibrated", "Калиброванный прогноз"
     if len(valid) >= 6 and inputs.current_operation_count >= 8:
@@ -313,12 +358,7 @@ def _quality(inputs: ForecastInputs, calibration_state: str = "insufficient") ->
 
 
 def _forecast_observations(inputs: ForecastInputs) -> list[ForecastObservation]:
-    rows = [
-        row for row in inputs.historical
-        if row.input_coverage_ratio >= Decimal("0.35")
-        and row.input_operation_count > 0
-        and row.target_tracked_days > 0
-    ]
+    rows = _valid_history_rows(inputs)
     return [
         ForecastObservation(
             snapshot_key=f"{inputs.workspace_id}:{inputs.currency}:{row.start.isoformat()}:{row.as_of.isoformat()}",
@@ -354,7 +394,7 @@ def _prediction(inputs: ForecastInputs) -> tuple[QuantilePrediction, str]:
         target_remainder=Decimal("0.00"),
     )
     if not values:
-        if inputs.registered_champion is not None:
+        if inputs.registered_champion is not None and inputs.registered_champion.currency.upper() == inputs.currency.upper():
             champion = inputs.registered_champion
             try:
                 registered = champion.model.predict(target)
@@ -398,7 +438,7 @@ def _prediction(inputs: ForecastInputs) -> tuple[QuantilePrediction, str]:
         calibration = calibrate_quantiles(list(backtest.predictions), list(backtest.actuals), minimum_samples=8)
         blended = apply_calibration(blended, calibration)
         calibration_state = calibration.state
-    if inputs.registered_champion is not None:
+    if inputs.registered_champion is not None and inputs.registered_champion.currency.upper() == inputs.currency.upper():
         champion = inputs.registered_champion
         try:
             registered = champion.model.predict(target)
@@ -423,6 +463,7 @@ def _fingerprint(inputs: ForecastInputs, prediction: QuantilePrediction, amount:
             item.start.isoformat(), str(money(item.remainder)), item.input_operation_count,
             item.input_tracked_days, str(item.input_coverage_ratio), item.target_tracked_days,
             str(item.target_coverage_ratio), str(money(item.input_variable_expense)),
+            item.target_valid, item.target_validity_reason,
         ) for item in inputs.historical],
         "counts": [inputs.current_operation_count, inputs.tracked_days],
         "variable_realized": str(money(inputs.realized_variable_expense)),
@@ -449,7 +490,7 @@ def forecast_source_fingerprint(inputs: ForecastInputs) -> str:
             item.start.isoformat(), item.end.isoformat(), item.as_of.isoformat(),
             str(money(item.remainder)), item.input_operation_count, item.input_tracked_days,
             str(item.input_coverage_ratio), item.target_tracked_days, str(item.target_coverage_ratio),
-            str(money(item.input_variable_expense)),
+            str(money(item.input_variable_expense)), item.target_valid, item.target_validity_reason,
         ) for item in inputs.historical],
         "budget": [str(money(inputs.general_budget_amount)) if inputs.general_budget_amount is not None else None, str(money(inputs.general_budget_spent))],
         "category_limits": sorted((key, str(money(total)), str(money(spent))) for key, (total, spent) in inputs.category_limits.items()),
@@ -490,15 +531,22 @@ def calculate_spendable(inputs: ForecastInputs, *, calibration_state: str | None
     goals = money(sum((item.amount for item in inputs.goal_contributions), Decimal("0.00")))
     variable_reserve = money(max(Decimal("0.00"), prediction.q80))
     raw_spendable = money(current_result - commitments - goals - variable_reserve)
-    budget_remaining = None
+    budget_current_remaining = None
+    budget_projected_remaining = None
     if inputs.general_budget_amount is not None:
-        budget_remaining = money(max(Decimal("0.00"), inputs.general_budget_amount - inputs.general_budget_spent))
-        raw_spendable = min(raw_spendable, budget_remaining)
+        budget_current_remaining = money(max(Decimal("0.00"), inputs.general_budget_amount - inputs.general_budget_spent))
+        budget_projected_remaining = money(max(
+            Decimal("0.00"),
+            budget_current_remaining - commitments - variable_reserve,
+        ))
+        raw_spendable = min(raw_spendable, budget_projected_remaining)
     amount = money(max(Decimal("0.00"), raw_spendable))
     lower = money(max(Decimal("0.00"), current_result - commitments - goals - max(Decimal("0.00"), prediction.q90)))
     upper = money(max(Decimal("0.00"), current_result - commitments - goals - max(Decimal("0.00"), prediction.q50)))
-    if budget_remaining is not None:
-        lower, upper = min(lower, budget_remaining), min(upper, budget_remaining)
+    if budget_current_remaining is not None:
+        lower_budget = money(max(Decimal("0.00"), budget_current_remaining - commitments - max(Decimal("0.00"), prediction.q90)))
+        upper_budget = money(max(Decimal("0.00"), budget_current_remaining - commitments - max(Decimal("0.00"), prediction.q50)))
+        lower, upper = min(lower, lower_budget), min(upper, upper_budget)
     quality, quality_label = _quality(inputs, calibration_state)
     reasons: list[dict[str, Any]] = []
     if commitments:
@@ -507,8 +555,8 @@ def calculate_spendable(inputs: ForecastInputs, *, calibration_state: str | None
         reasons.append({"code": "goal_reserve", "label": "Защищено на цели", "amount": goals, "count": len(inputs.goal_contributions)})
     if variable_reserve:
         reasons.append({"code": "variable_spend", "label": "Прогноз обычных расходов", "amount": variable_reserve})
-    if budget_remaining is not None and amount == budget_remaining:
-        reasons.append({"code": "general_budget_binding", "label": "Ограничено общим бюджетом", "amount": budget_remaining})
+    if budget_projected_remaining is not None and amount == budget_projected_remaining:
+        reasons.append({"code": "general_budget_binding", "label": "Ограничено общим бюджетом", "amount": budget_projected_remaining})
     if quality in {"known_only", "limited"}:
         reasons.append({"code": "limited_history", "label": "Истории пока мало — прогноз больше опирается на известные платежи."})
     risk_state = "attention" if amount <= 0 or lower <= 0 else "watch" if variable_reserve > max(current_result, Decimal("0.00")) * Decimal("0.60") else "normal"
@@ -528,7 +576,9 @@ def calculate_spendable(inputs: ForecastInputs, *, calibration_state: str | None
         variable_q80=prediction.q80,
         variable_q90=prediction.q90,
         variable_reserve=variable_reserve,
-        general_budget_remaining=budget_remaining,
+        general_budget_remaining=budget_projected_remaining,
+        general_budget_current_remaining=budget_current_remaining,
+        general_budget_projected_remaining=budget_projected_remaining,
         expected_end_result=money(current_result - commitments - goals - prediction.q50),
         lower_spendable=lower,
         upper_spendable=upper,
@@ -539,7 +589,7 @@ def calculate_spendable(inputs: ForecastInputs, *, calibration_state: str | None
         model_version=prediction.version,
         risk_policy_version=RISK_POLICY_VERSION,
         calibration_state=calibration_state,
-        history_periods=len([item for item in inputs.historical if item.input_operation_count > 0 and item.target_tracked_days > 0]),
+        history_periods=len(_valid_history_rows(inputs)),
         reasons=tuple(reasons[:4]),
         trajectory=_trajectory(inputs, prediction),
         fingerprint=fingerprint,
@@ -578,6 +628,8 @@ def can_spend(inputs: ForecastInputs, forecast: SpendableForecast, amount: Decim
         "amount_before": forecast.amount,
         "projected_spendable_after": after,
         "general_budget_remaining": forecast.general_budget_remaining,
+        "general_budget_current_remaining": forecast.general_budget_current_remaining,
+        "general_budget_projected_remaining": forecast.general_budget_projected_remaining,
         "category_limit_remaining": category_remaining,
         "grouped_budget_remaining": grouped_remaining,
         "goal_reserve": forecast.goal_reserve,
@@ -619,23 +671,27 @@ def deduplicate_commitments(items: Iterable[KnownCommitment]) -> tuple[KnownComm
     priority = {"reminder": 0, "subscription": 1, "recurring": 2}
     selected: list[KnownCommitment] = []
     for item in sorted(items, key=lambda value: (value.due_date, priority.get(value.source, 9), value.source_key)):
-        matching_higher_priority = [
-            index
-            for index, existing in enumerate(selected)
-            if existing.source != item.source
+        proven_duplicate = any(
+            existing.source != item.source
+            and bool(existing.identity_kind)
+            and existing.identity_kind == item.identity_kind
+            and bool(existing.identity_hash)
+            and existing.identity_hash == item.identity_hash
             and existing.due_date == item.due_date
             and existing.currency == item.currency
             and money(existing.amount) == money(item.amount)
-            and priority.get(existing.source, 9) < priority.get(item.source, 9)
-        ]
-        if not matching_higher_priority:
+            and priority.get(existing.source, 9) <= priority.get(item.source, 9)
+            for existing in selected
+        )
+        if not proven_duplicate:
             selected.append(item)
     return tuple(sorted(selected, key=lambda item: (item.due_date, item.source, item.source_key)))
 
 
 class ForecastRepository:
-    def _deterministic_expense_sql(self, alias: str = "o") -> str:
+    def _deterministic_expense_sql(self, alias: str = "o", default_currency_ref: str = "forecast_ctx.default_currency") -> str:
         merchant = merchant_key_sql(f"{alias}.comment")
+        resolved_currency = f"COALESCE({alias}.currency,{default_currency_ref})"
         return f"""(
             COALESCE({alias}.source,'')='reminder'
             OR EXISTS (
@@ -647,7 +703,7 @@ class ForecastRepository:
                 SELECT 1 FROM public.subscription_patterns sp
                  WHERE sp.user_id={alias}.user_id
                    AND sp.workspace_id IS NOT DISTINCT FROM {alias}.workspace_id
-                   AND sp.currency={alias}.currency
+                   AND sp.currency={resolved_currency}
                    AND (sp.last_operation_id={alias}.id OR (
                        sp.normalized_merchant={merchant}
                        AND sp.amount IS NOT NULL AND sp.amount={alias}.amount
@@ -657,7 +713,7 @@ class ForecastRepository:
                 SELECT 1 FROM public.recurring_spend_patterns rp
                  WHERE rp.user_id={alias}.user_id
                    AND rp.workspace_id IS NOT DISTINCT FROM {alias}.workspace_id
-                   AND rp.currency={alias}.currency
+                   AND rp.currency={resolved_currency}
                    AND rp.status IN ('detected','subscription')
                    AND rp.normalized_merchant={merchant}
                    AND lower(rp.category)=lower(COALESCE({alias}.category,''))
@@ -665,21 +721,23 @@ class ForecastRepository:
             )
         )"""
 
-    def _registered_champion(self, as_of: date) -> RegisteredChampion | None:
+    def _registered_champion(self, currency: str, as_of: date) -> RegisteredChampion | None:
         from settings import FORECAST_MODEL_DIR
 
         if not FORECAST_MODEL_DIR:
             return None
+        exact_currency = str(currency).upper()
         try:
             rows = pg_fetchall(
                 """
                 SELECT model_family, model_version, artifact_path, artifact_sha256,
                        feature_schema_version, risk_policy_version, training_cutoff,
                        metrics, calibration
-                  FROM public.forecast_model_registry
-                 WHERE status='champion'
+                 FROM public.forecast_model_registry
+                 WHERE currency=%s AND status='champion'
                  ORDER BY updated_at DESC, id DESC LIMIT 1
-                """
+                """,
+                (exact_currency,),
             )
             if not rows:
                 return None
@@ -701,9 +759,14 @@ class ForecastRepository:
                 str(checksum),
                 expected_feature_schema=FEATURE_SCHEMA_VERSION,
             )
-            if metadata.get("risk_policy") != RISK_POLICY_VERSION or metadata.get("model_family") != family or metadata.get("model_version") != version:
+            if (
+                metadata.get("risk_policy") != RISK_POLICY_VERSION
+                or metadata.get("model_family") != family
+                or metadata.get("model_version") != version
+                or str(metadata.get("currency") or "").upper() != exact_currency
+            ):
                 raise ValueError("model_artifact_metadata_mismatch")
-            return RegisteredChampion(model, str(family), str(version), _calibration_from_metadata(calibration))
+            return RegisteredChampion(model, str(family), str(version), exact_currency, _calibration_from_metadata(calibration))
         except errors.UndefinedTable:
             return None
         except Exception as exc:
@@ -730,6 +793,7 @@ class ForecastRepository:
         deterministic = self._deterministic_expense_sql("o")
         current = pg_fetchall(
             f"""
+            WITH forecast_ctx AS (SELECT %s::text AS default_currency)
             SELECT COALESCE(SUM(o.amount) FILTER (WHERE o.type='Доходы' AND COALESCE(o.category,'')<>'Без операций'),0),
                    COALESCE(SUM(o.amount) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций'),0),
                    COUNT(*) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций' AND NOT {deterministic}),
@@ -738,11 +802,12 @@ class ForecastRepository:
                        WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций' AND NOT {deterministic}
                    ),0)
               FROM public.operations o
+              CROSS JOIN forecast_ctx
              WHERE {scope}
                AND o.op_date BETWEEN %s AND %s
-               AND COALESCE(o.currency,%s)=%s
+               AND COALESCE(o.currency,forecast_ctx.default_currency)=%s
             """,
-            (*scope_params, period.start, period.as_of, default_currency, currency),
+            (default_currency, *scope_params, period.start, period.as_of, currency),
         )[0]
         history = self._history(user_id, workspace_id, currency, default_currency, period)
         commitments, expected_income = self._commitments(user_id, workspace_id, workspace_kind, currency, period)
@@ -770,7 +835,7 @@ class ForecastRepository:
             realized_variable_expense=money(current[4]),
             default_currency=default_currency,
             timezone_name=timezone_name,
-            registered_champion=self._registered_champion(period.as_of),
+            registered_champion=self._registered_champion(currency, period.as_of),
         )
 
     def _history(self, user_id: int, workspace_id: int | None, currency: str, default_currency: str, period: ForecastPeriod) -> tuple[HistoricalRemainder, ...]:
@@ -779,6 +844,7 @@ class ForecastRepository:
         deterministic = self._deterministic_expense_sql("o")
         rows = pg_fetchall(
             f"""
+            WITH forecast_ctx AS (SELECT %s::text AS default_currency)
             SELECT o.op_date,
                    COALESCE(SUM(o.amount) FILTER (
                        WHERE o.type='Расходы'
@@ -790,17 +856,25 @@ class ForecastRepository:
                          AND COALESCE(o.category,'')<>'Без операций'
                          AND NOT {deterministic}
                    ),
+                   COUNT(*) FILTER (
+                       WHERE o.type IN ('Доходы','Расходы')
+                         AND COALESCE(o.category,'')<>'Без операций'
+                   ),
                    COUNT(*)
               FROM public.operations o
+              CROSS JOIN forecast_ctx
              WHERE {scope}
                AND o.op_date BETWEEN %s AND %s
-               AND COALESCE(o.currency,%s)=%s
+               AND COALESCE(o.currency,forecast_ctx.default_currency)=%s
              GROUP BY o.op_date
              ORDER BY o.op_date
             """,
-            (*params, periods[0][0], periods[-1][1], default_currency, currency),
+            (default_currency, *params, periods[0][0], periods[-1][1], currency),
         )
-        daily = {row[0]: (money(row[1]), int(row[2] or 0), int(row[3] or 0)) for row in rows}
+        daily = {
+            row[0]: (money(row[1]), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0))
+            for row in rows
+        }
         values = []
         for start, end, as_of in periods:
             input_days = [day for day in daily if start <= day <= as_of]
@@ -808,12 +882,18 @@ class ForecastRepository:
             remainder = sum((daily[day][0] for day in future_days), Decimal("0.00"))
             input_variable = sum((daily[day][0] for day in input_days), Decimal("0.00"))
             input_count = sum(daily[day][1] for day in input_days)
-            input_tracked = len([day for day in input_days if daily[day][2] > 0])
-            target_tracked = len([day for day in future_days if daily[day][2] > 0])
+            input_tracked = len([day for day in input_days if daily[day][3] > 0])
+            target_tracked = len([day for day in future_days if daily[day][3] > 0])
             elapsed_days = max(1, (as_of - start).days + 1)
             horizon_days = max(1, (end - as_of).days)
             input_coverage = min(Decimal("1"), Decimal(input_tracked) / Decimal(elapsed_days))
             target_coverage = min(Decimal("1"), Decimal(target_tracked) / Decimal(horizon_days))
+            target_valid, target_reason, target_coverage = evaluate_target_validity(
+                horizon_days=horizon_days,
+                operation_count=sum(daily[day][2] for day in future_days),
+                tracked_days=target_tracked,
+                variable_expense=money(remainder),
+            )
             values.append(HistoricalRemainder(
                 start,
                 end,
@@ -825,6 +905,8 @@ class ForecastRepository:
                 target_tracked,
                 target_coverage,
                 money(input_variable),
+                target_valid,
+                target_reason,
             ))
         return tuple(values)
 
@@ -1034,12 +1116,22 @@ class ForecastRepository:
                     INSERT INTO public.forecast_predictions
                       (snapshot_id, model_family, model_version, risk_policy_version,
                        q50, q80, q90, calibration_state, known_commitments, goal_reserve,
-                       general_budget_remaining, spendable_amount, expected_end_result,
+                       general_budget_remaining, general_budget_current_remaining,
+                       general_budget_projected_remaining, spendable_amount, expected_end_result,
                        risk_state, quality_tier, reasons, prediction_fingerprint)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (snapshot_id, prediction_fingerprint) DO NOTHING
                     """,
-                    (snapshot_id, forecast.model_family, forecast.model_version, forecast.risk_policy_version, forecast.variable_q50, forecast.variable_q80, forecast.variable_q90, forecast.calibration_state, forecast.known_commitments, forecast.goal_reserve, forecast.general_budget_remaining, forecast.amount, forecast.expected_end_result, forecast.risk_state, forecast.quality_tier, Json(list(forecast.reasons)), forecast.fingerprint),
+                    (
+                        snapshot_id, forecast.model_family, forecast.model_version,
+                        forecast.risk_policy_version, forecast.variable_q50, forecast.variable_q80,
+                        forecast.variable_q90, forecast.calibration_state,
+                        forecast.known_commitments, forecast.goal_reserve,
+                        forecast.general_budget_remaining, forecast.general_budget_current_remaining,
+                        forecast.general_budget_projected_remaining, forecast.amount,
+                        forecast.expected_end_result, forecast.risk_state, forecast.quality_tier,
+                        Json(list(forecast.reasons)), forecast.fingerprint,
+                    ),
                 )
             conn.commit()
         except errors.UndefinedTable:

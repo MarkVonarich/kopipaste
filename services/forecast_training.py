@@ -23,12 +23,25 @@ from services.forecast_models import (
     save_model_artifact,
     select_champion,
 )
-from services.forecasting import FEATURE_SCHEMA_VERSION, RISK_POLICY_VERSION, operation_is_deterministic
+from services.forecasting import (
+    FEATURE_SCHEMA_VERSION,
+    RISK_POLICY_VERSION,
+    TARGET_VALIDITY_POLICY_VERSION,
+    evaluate_target_validity,
+    operation_is_deterministic,
+)
 
 
 log = logging.getLogger(__name__)
 TRAINING_LOCK_ID = 742_024_001
 MIN_TRAINING_OBSERVATIONS = 18
+
+
+def normalize_training_currency(currency: str) -> str:
+    normalized = str(currency or "").strip().upper()
+    if not normalized or len(normalized) > 12 or not normalized.isalnum():
+        raise ValueError("invalid_training_currency")
+    return normalized
 
 
 def synthetic_observations(count: int = 30) -> list[ForecastObservation]:
@@ -57,7 +70,7 @@ def backtest_candidates(observations: list[ForecastObservation]) -> dict[str, An
     return {"champion": champion, "challengers": tuple(item for item in results if item is not champion)}
 
 
-def _training_rows(cur: Any, limit: int) -> list[tuple[Any, ...]]:
+def _training_rows(cur: Any, limit: int, currency: str) -> list[tuple[Any, ...]]:
     cur.execute(
         """
         SELECT s.source_fingerprint,
@@ -69,12 +82,13 @@ def _training_rows(cur: Any, limit: int) -> list[tuple[Any, ...]]:
          WHERE s.outcome_finalized_at IS NOT NULL
            AND s.invalidated_at IS NULL
            AND s.feature_schema_version=%s
+           AND s.currency=%s
            AND s.actual_variable_expense IS NOT NULL
-           AND s.target_tracked_days > 0
+           AND s.target_valid=TRUE
          ORDER BY s.as_of_date, s.id
          LIMIT %s
         """,
-        (FEATURE_SCHEMA_VERSION, max(1, min(int(limit), 50000))),
+        (FEATURE_SCHEMA_VERSION, currency, max(1, min(int(limit), 50000))),
     )
     return list(cur.fetchall())
 
@@ -102,9 +116,10 @@ def observations_from_rows(rows: list[tuple[Any, ...]]) -> list[ForecastObservat
     return observations
 
 
-def extract_training_observations(limit: int = 5000, *, cur: Any | None = None) -> list[ForecastObservation]:
+def extract_training_observations(currency: str, limit: int = 5000, *, cur: Any | None = None) -> list[ForecastObservation]:
+    exact_currency = normalize_training_currency(currency)
     if cur is not None:
-        return observations_from_rows(_training_rows(cur, limit))
+        return observations_from_rows(_training_rows(cur, limit, exact_currency))
     from db.database import pg_fetchall
 
     rows = pg_fetchall(
@@ -115,17 +130,19 @@ def extract_training_observations(limit: int = 5000, *, cur: Any | None = None) 
          WHERE s.outcome_finalized_at IS NOT NULL
            AND s.invalidated_at IS NULL
            AND s.feature_schema_version=%s
+           AND s.currency=%s
            AND s.actual_variable_expense IS NOT NULL
-           AND s.target_tracked_days > 0
+           AND s.target_valid=TRUE
          ORDER BY s.as_of_date, s.id LIMIT %s
         """,
-        (FEATURE_SCHEMA_VERSION, max(1, min(int(limit), 50000))),
+        (FEATURE_SCHEMA_VERSION, exact_currency, max(1, min(int(limit), 50000))),
     )
     return observations_from_rows(list(rows))
 
 
 def register_model(
     *,
+    currency: str,
     family: str,
     version: str,
     status: str,
@@ -139,6 +156,7 @@ def register_model(
 
     if status not in {"candidate", "challenger", "champion"}:
         raise ValueError("invalid_model_status")
+    exact_currency = normalize_training_currency(currency)
     if status == "champion":
         from settings import FORECAST_MODEL_DIR
 
@@ -154,6 +172,7 @@ def register_model(
             metadata.get("risk_policy") != RISK_POLICY_VERSION
             or metadata.get("model_family") != family
             or metadata.get("model_version") != version
+            or str(metadata.get("currency") or "").upper() != exact_currency
         ):
             raise ValueError("model_artifact_metadata_mismatch")
     conn = get_conn()
@@ -164,15 +183,16 @@ def register_model(
                 return False
             if status == "champion":
                 cur.execute(
-                    "UPDATE public.forecast_model_registry SET status='challenger', updated_at=now() WHERE status='champion'"
+                    "UPDATE public.forecast_model_registry SET status='challenger', updated_at=now() WHERE currency=%s AND status='champion'",
+                    (exact_currency,),
                 )
             cur.execute(
                 """
                 INSERT INTO public.forecast_model_registry
-                  (model_family, model_version, status, artifact_path, artifact_sha256,
+                  (currency, model_family, model_version, status, artifact_path, artifact_sha256,
                    feature_schema_version, risk_policy_version, training_cutoff, metrics, calibration)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (model_family, model_version) DO UPDATE
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (currency, model_family, model_version) DO UPDATE
                    SET status=EXCLUDED.status,
                        artifact_path=EXCLUDED.artifact_path,
                        artifact_sha256=EXCLUDED.artifact_sha256,
@@ -183,7 +203,7 @@ def register_model(
                        calibration=EXCLUDED.calibration,
                        updated_at=now()
                 """,
-                (family, version, status, artifact_path, artifact_sha256, FEATURE_SCHEMA_VERSION, RISK_POLICY_VERSION, training_cutoff, Json(metrics), Json(calibration)),
+                (exact_currency, family, version, status, artifact_path, artifact_sha256, FEATURE_SCHEMA_VERSION, RISK_POLICY_VERSION, training_cutoff, Json(metrics), Json(calibration)),
             )
         conn.commit()
         return True
@@ -223,12 +243,14 @@ def ensure_safe_training_dsn(database_url: str, *, allow_production: bool = Fals
 
 def train_from_snapshots(
     *,
+    currency: str,
     limit: int,
     model_directory: str | Path,
     database_url: str,
     allow_production: bool = False,
 ) -> dict[str, Any]:
     ensure_safe_training_dsn(database_url, allow_production=allow_production)
+    exact_currency = normalize_training_currency(currency)
     from db.database import get_conn
 
     root = Path(model_directory).expanduser().resolve()
@@ -241,7 +263,7 @@ def train_from_snapshots(
             if not acquire_training_lock(cur):
                 conn.rollback()
                 return {"status": "locked"}
-            observations = extract_training_observations(limit, cur=cur)
+            observations = extract_training_observations(exact_currency, limit, cur=cur)
             if len(observations) < MIN_TRAINING_OBSERVATIONS:
                 raise ValueError("insufficient_training_dataset")
             evaluated = backtest_candidates(observations)
@@ -252,7 +274,7 @@ def train_from_snapshots(
                 PooledQuantileGBDTModel.family: PooledQuantileGBDTModel,
             }
             model = factories[champion_result.family]().fit(observations)
-            version = f"{champion_result.family}-{date.today().isoformat()}-{len(observations)}"
+            version = f"{champion_result.family}-{exact_currency.lower()}-{date.today().isoformat()}-{len(observations)}"
             artifact_path = root / f"{version}.joblib"
             temporary_artifact = root / f".{version}.{os.getpid()}.tmp"
             checksum = save_model_artifact(model, temporary_artifact, {
@@ -260,29 +282,38 @@ def train_from_snapshots(
                 "risk_policy": RISK_POLICY_VERSION,
                 "model_family": champion_result.family,
                 "model_version": version,
+                "currency": exact_currency,
                 "training_cutoff": date.fromordinal(max(item.as_of_ordinal for item in observations)).isoformat(),
             })
             os.replace(temporary_artifact, artifact_path)
-            load_trusted_model_artifact(root, artifact_path, checksum, expected_feature_schema=FEATURE_SCHEMA_VERSION)
+            _loaded_model, persisted_metadata = load_trusted_model_artifact(
+                root, artifact_path, checksum, expected_feature_schema=FEATURE_SCHEMA_VERSION,
+            )
+            if str(persisted_metadata.get("currency") or "").upper() != exact_currency:
+                raise ValueError("model_artifact_currency_mismatch")
             robust = next(item for item in (champion_result, *evaluated["challengers"]) if item.family == RobustRemainderModel.family)
             all_results = (champion_result, *evaluated["challengers"])
             for result in all_results:
                 eligible = result.metrics.breach_rate <= robust.metrics.breach_rate + Decimal("0.03")
                 status = "champion" if result is champion_result else "challenger"
                 if status == "champion":
-                    cur.execute("UPDATE public.forecast_model_registry SET status='challenger', updated_at=now() WHERE status='champion'")
+                    cur.execute(
+                        "UPDATE public.forecast_model_registry SET status='challenger', updated_at=now() WHERE currency=%s AND status='champion'",
+                        (exact_currency,),
+                    )
                 cur.execute(
                     """
                     INSERT INTO public.forecast_model_registry
-                      (model_family, model_version, status, artifact_path, artifact_sha256,
+                      (currency, model_family, model_version, status, artifact_path, artifact_sha256,
                        feature_schema_version, risk_policy_version, training_cutoff, metrics, calibration)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (model_family, model_version) DO UPDATE
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (currency, model_family, model_version) DO UPDATE
                        SET status=EXCLUDED.status, artifact_path=EXCLUDED.artifact_path,
                            artifact_sha256=EXCLUDED.artifact_sha256, metrics=EXCLUDED.metrics,
                            calibration=EXCLUDED.calibration, updated_at=now()
                     """,
                     (
+                        exact_currency,
                         result.family,
                         version if result is champion_result else result.version,
                         status,
@@ -300,6 +331,7 @@ def train_from_snapshots(
             "status": "trained",
             "family": champion_result.family,
             "version": version,
+            "currency": exact_currency,
             "observations": len(observations),
             "artifact_sha256": checksum,
         }
@@ -312,8 +344,9 @@ def train_from_snapshots(
             temporary_artifact.unlink()
 
 
-def backtest_from_snapshots(*, limit: int, database_url: str, allow_production: bool = False) -> dict[str, Any]:
+def backtest_from_snapshots(*, currency: str, limit: int, database_url: str, allow_production: bool = False) -> dict[str, Any]:
     ensure_safe_training_dsn(database_url, allow_production=allow_production)
+    exact_currency = normalize_training_currency(currency)
     from db.database import get_conn
 
     conn = get_conn()
@@ -322,12 +355,12 @@ def backtest_from_snapshots(*, limit: int, database_url: str, allow_production: 
             if not acquire_training_lock(cur):
                 conn.rollback()
                 return {"status": "locked"}
-            observations = extract_training_observations(limit, cur=cur)
+            observations = extract_training_observations(exact_currency, limit, cur=cur)
             if len(observations) < MIN_TRAINING_OBSERVATIONS:
                 raise ValueError("insufficient_training_dataset")
             result = backtest_candidates(observations)
         conn.rollback()
-        return {"status": "evaluated", "observations": len(observations), **result}
+        return {"status": "evaluated", "currency": exact_currency, "observations": len(observations), **result}
     finally:
         conn.close()
 
@@ -400,19 +433,26 @@ def finalize_forecast_outcomes(limit: int = 200, *, now_utc: datetime | None = N
                 target_rows = [item for item in operations if item["op_date"] > as_of_date]
                 target_operation_count = sum(item["category"] != "Без операций" and item["type"] in {"Доходы", "Расходы"} for item in target_rows)
                 target_tracked_days = len({item["op_date"] for item in target_rows})
-                target_coverage = Decimal(target_tracked_days) / Decimal(max(1, (period_end - as_of_date).days))
+                target_valid, target_reason, target_coverage = evaluate_target_validity(
+                    horizon_days=(period_end - as_of_date).days,
+                    operation_count=target_operation_count,
+                    tracked_days=target_tracked_days,
+                    variable_expense=money(variable),
+                )
                 cur.execute(
                     """
                     UPDATE public.forecast_snapshots
                        SET actual_variable_expense=%s, actual_end_result=%s,
                            target_operation_count=%s, target_tracked_days=%s,
-                           target_coverage_ratio=%s,
+                           target_coverage_ratio=%s, target_valid=%s,
+                           target_validity_reason=%s, target_validity_policy_version=%s,
                            outcome_finalized_at=now(), updated_at=now()
                      WHERE id=%s AND outcome_finalized_at IS NULL
                     """,
                     (
                         money(variable), money(income - expense), target_operation_count,
-                        target_tracked_days, min(Decimal("1"), target_coverage), snapshot_id,
+                        target_tracked_days, target_coverage, target_valid, target_reason,
+                        TARGET_VALIDITY_POLICY_VERSION, snapshot_id,
                     ),
                 )
                 finalized += int(cur.rowcount)

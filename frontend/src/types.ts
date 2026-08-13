@@ -116,6 +116,8 @@ export type SpendableSummary = ForecastUnavailable | {
   quality_label: string;
   quality_tier: 'known_only' | 'limited' | 'personal' | 'strong' | 'calibrated';
   risk_state: 'normal' | 'watch' | 'attention';
+  general_budget_current_remaining?: string | null;
+  general_budget_projected_remaining?: string | null;
   fingerprint: string;
   feedback?: 'useful' | 'not_useful' | null;
   experiment?: { enabled: boolean; variant: string };
@@ -132,6 +134,8 @@ export type SpendableForecast = Extract<SpendableSummary, { available: true }> &
   variable_q90: string;
   variable_reserve: string;
   general_budget_remaining?: string | null;
+  general_budget_current_remaining?: string | null;
+  general_budget_projected_remaining?: string | null;
   expected_end_result: string;
   lower_spendable: string;
   upper_spendable: string;
@@ -149,6 +153,8 @@ export type CanSpendResult = {
   amount_before: string;
   projected_spendable_after: string;
   general_budget_remaining?: string | null;
+  general_budget_current_remaining?: string | null;
+  general_budget_projected_remaining?: string | null;
   category_limit_remaining?: string | null;
   grouped_budget_remaining?: string | null;
   goal_reserve: string;

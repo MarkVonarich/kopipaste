@@ -1126,6 +1126,8 @@ class MiniAppAPI:
                 "variable_q80": forecast.variable_q80,
                 "variable_q90": forecast.variable_q90,
                 "general_budget_remaining": forecast.general_budget_remaining,
+                "general_budget_current_remaining": forecast.general_budget_current_remaining,
+                "general_budget_projected_remaining": forecast.general_budget_projected_remaining,
                 "reason_codes": [str(item.get("code")) for item in forecast.reasons if item.get("code")],
                 "recurring_commitment_count": len(recurring_commitments),
                 "recurring_commitments": sum((item.amount for item in recurring_commitments), Decimal("0.00")),

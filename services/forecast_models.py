@@ -253,19 +253,24 @@ class BacktestResult:
 
 
 def rolling_origin_backtest(model_factory: Any, observations: list[ForecastObservation], *, minimum_train: int = 6) -> BacktestResult:
-    ordered = sorted(observations, key=lambda item: item.as_of_ordinal)
+    ordered = sorted(observations, key=lambda item: (item.as_of_ordinal, item.snapshot_key))
     predictions: list[QuantilePrediction] = []
     actuals: list[Decimal] = []
     naive_errors: list[Decimal] = []
-    for index in range(minimum_train, len(ordered)):
-        training = ordered[:index]
-        target = ordered[index]
-        if max(item.as_of_ordinal for item in training) >= target.as_of_ordinal:
+    origins = sorted({item.as_of_ordinal for item in ordered})
+    for origin in origins:
+        training = [item for item in ordered if item.as_of_ordinal < origin]
+        targets = [item for item in ordered if item.as_of_ordinal == origin]
+        if len(training) < minimum_train:
+            continue
+        if not training or max(item.as_of_ordinal for item in training) >= origin:
             raise ValueError("forecast_backtest_leakage")
         model: ForecastModel = model_factory().fit(training)
-        predictions.append(model.predict(target))
-        actuals.append(money(target.target_remainder))
-        naive_errors.append(abs(money(target.target_remainder - training[-1].target_remainder)))
+        naive_target = training[-1].target_remainder
+        for target in targets:
+            predictions.append(model.predict(target))
+            actuals.append(money(target.target_remainder))
+            naive_errors.append(abs(money(target.target_remainder - naive_target)))
     if not predictions:
         raise ValueError("insufficient_backtest_history")
     errors = [abs(money(actual - prediction.q50)) for prediction, actual in zip(predictions, actuals)]

@@ -18,13 +18,17 @@ def main() -> None:
     parser.add_argument("--from-snapshots", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--allow-production", action="store_true")
+    parser.add_argument("--currency", help="Exact currency scope required for snapshot backtesting, for example RUB.")
     parser.add_argument("--limit", type=int, default=5000)
     args = parser.parse_args()
     if args.from_snapshots:
+        if not args.currency:
+            raise SystemExit("--currency is required with --from-snapshots")
         if not args.execute:
             print("forecast snapshot backtest dry-run: add --execute with an explicitly safe DSN")
             return
         result = backtest_from_snapshots(
+            currency=args.currency,
             limit=args.limit,
             database_url=os.getenv("DATABASE_URL", ""),
             allow_production=args.allow_production,

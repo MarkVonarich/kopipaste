@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS public.forecast_snapshots (
     target_operation_count INTEGER,
     target_tracked_days INTEGER,
     target_coverage_ratio NUMERIC(8,6),
+    target_valid BOOLEAN NOT NULL DEFAULT false,
+    target_validity_reason TEXT,
+    target_validity_policy_version TEXT,
     outcome_finalized_at TIMESTAMPTZ,
     invalidated_at TIMESTAMPTZ,
     invalidation_reason TEXT,
@@ -48,7 +51,10 @@ ALTER TABLE public.forecast_snapshots
     ADD COLUMN IF NOT EXISTS goal_reserve_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS target_operation_count INTEGER,
     ADD COLUMN IF NOT EXISTS target_tracked_days INTEGER,
-    ADD COLUMN IF NOT EXISTS target_coverage_ratio NUMERIC(8,6);
+    ADD COLUMN IF NOT EXISTS target_coverage_ratio NUMERIC(8,6),
+    ADD COLUMN IF NOT EXISTS target_valid BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS target_validity_reason TEXT,
+    ADD COLUMN IF NOT EXISTS target_validity_policy_version TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_forecast_snapshots_source
     ON public.forecast_snapshots(
@@ -73,6 +79,8 @@ CREATE TABLE IF NOT EXISTS public.forecast_predictions (
     known_commitments NUMERIC(18,2) NOT NULL DEFAULT 0,
     goal_reserve NUMERIC(18,2) NOT NULL DEFAULT 0,
     general_budget_remaining NUMERIC(18,2),
+    general_budget_current_remaining NUMERIC(18,2),
+    general_budget_projected_remaining NUMERIC(18,2),
     spendable_amount NUMERIC(18,2) NOT NULL,
     expected_end_result NUMERIC(18,2) NOT NULL,
     risk_state TEXT NOT NULL,
@@ -89,6 +97,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_forecast_predictions_fingerprint
 
 CREATE TABLE IF NOT EXISTS public.forecast_model_registry (
     id BIGSERIAL PRIMARY KEY,
+    currency TEXT NOT NULL,
     model_family TEXT NOT NULL,
     model_version TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('candidate', 'challenger', 'champion', 'retired', 'retrain_required')),
@@ -103,11 +112,12 @@ CREATE TABLE IF NOT EXISTS public.forecast_model_registry (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT forecast_model_registry_metrics_object CHECK (jsonb_typeof(metrics) = 'object'),
     CONSTRAINT forecast_model_registry_calibration_object CHECK (jsonb_typeof(calibration) = 'object'),
-    CONSTRAINT forecast_model_registry_version_unique UNIQUE (model_family, model_version)
+    CONSTRAINT forecast_model_registry_currency_valid CHECK (currency <> '' AND currency = upper(currency)),
+    CONSTRAINT forecast_model_registry_version_unique UNIQUE (currency, model_family, model_version)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_forecast_model_registry_champion
-    ON public.forecast_model_registry(status)
+    ON public.forecast_model_registry(currency)
     WHERE status='champion';
 
 CREATE TABLE IF NOT EXISTS public.forecast_feedback (
