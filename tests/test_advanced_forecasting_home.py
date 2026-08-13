@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -33,8 +34,10 @@ from services.forecast_training import (
     ensure_safe_training_dsn,
     extract_training_observations,
     finalize_forecast_outcomes,
+    publish_immutable_artifact,
     register_model,
     synthetic_observations,
+    training_fingerprint,
     train_from_snapshots,
 )
 from services.forecasting import (
@@ -56,7 +59,12 @@ from services.forecasting import (
     forecast_source_fingerprint,
     operation_is_deterministic,
     operation_matches_snapshot_currency,
+    recurring_eligibility_sql,
+    recurring_pattern_eligible,
     safe_identity_hash,
+    subscription_eligibility_sql,
+    subscription_pattern_eligible,
+    variable_daily_pace,
 )
 from services.insights import (
     CategoryAggregate,
@@ -155,6 +163,35 @@ def test_repository_scope_isolates_legacy_user_and_concrete_workspace():
     repository = ForecastRepository()
     assert repository._scope(42, None) == ("o.workspace_id IS NULL AND o.user_id=%s", (42,))
     assert repository._scope(42, 10) == ("o.workspace_id=%s", (10,))
+
+
+def test_current_forecast_coverage_and_pace_use_expense_evidence_only(monkeypatch):
+    captured = {}
+    repository = ForecastRepository()
+
+    def fake(sql, params=()):
+        captured.update(sql=" ".join(sql.split()), params=params)
+        # Eight income-only dates are intentionally absent from expense tracking counts.
+        return [(Decimal("800"), Decimal("200"), 2, 2, 2, 0, 2, Decimal("200"))]
+
+    monkeypatch.setattr("services.forecasting.pg_fetchall", fake)
+    monkeypatch.setattr(repository, "_history", lambda *_args: ())
+    monkeypatch.setattr(repository, "_commitments", lambda *_args: ((), Decimal("0")))
+    monkeypatch.setattr(repository, "_goals", lambda *_args: ())
+    monkeypatch.setattr(repository, "_general_budget", lambda *_args: (None, Decimal("200")))
+    monkeypatch.setattr(repository, "_category_controls", lambda *_args: ({}, ()))
+    monkeypatch.setattr(repository, "_registered_champion", lambda *_args: None)
+    loaded = repository.load_inputs(
+        user_id=42, workspace_id=10, workspace_kind="group", currency="RUB",
+        period=PERIOD, default_currency="RUB",
+    )
+    assert loaded.current_expense_count == 2
+    assert loaded.current_expense_tracked_days == 2
+    assert loaded.current_no_operation_marker_days == 0
+    assert loaded.tracked_days == 2
+    assert variable_daily_pace(loaded) == Decimal("100.00")
+    assert "COUNT(DISTINCT o.op_date) FILTER ( WHERE o.type='Расходы'" in captured["sql"]
+    assert "o.type='noop' AND o.category='Без операций'" in captured["sql"]
 
 
 def test_realized_income_and_expense_form_resource():
@@ -448,6 +485,18 @@ def test_historical_features_stop_at_as_of_while_target_uses_future_days(monkeyp
     assert july.target_valid is False
 
 
+def test_historical_income_only_days_do_not_inflate_expense_coverage(monkeypatch):
+    rows = [
+        (date(2026, 7, day), Decimal("0"), 0, 0, 0)
+        for day in range(1, 9)
+    ] + [(date(2026, 7, 9), Decimal("100"), 1, 1, 0)]
+    monkeypatch.setattr("services.forecasting.pg_fetchall", lambda *_args, **_kwargs: rows)
+    july = ForecastRepository()._history(42, 10, "RUB", "RUB", PERIOD)[-1]
+    assert july.input_operation_count == 1
+    assert july.input_tracked_days == 1
+    assert july.input_coverage_ratio == Decimal(1) / Decimal(13)
+
+
 def test_historical_remainder_sql_excludes_authoritative_deterministic_sources(monkeypatch):
     captured = {}
 
@@ -464,6 +513,8 @@ def test_historical_remainder_sql_excludes_authoritative_deterministic_sources(m
     assert "public.recurring_spend_patterns" in captured["sql"]
     assert "sp.currency=COALESCE(o.currency,forecast_ctx.default_currency)" in captured["sql"]
     assert "rp.currency=COALESCE(o.currency,forecast_ctx.default_currency)" in captured["sql"]
+    assert subscription_eligibility_sql("sp") in captured["sql"]
+    assert recurring_eligibility_sql("rp") in captured["sql"]
     assert captured["params"][0] == "RUB"
     assert "AND NOT" in captured["sql"]
 
@@ -482,6 +533,36 @@ def test_commitment_query_excludes_paid_expired_wrong_scope_and_wrong_currency(m
     assert "r.event_date > %s AND r.event_date <= %s" in reminder_sql
     assert "r.currency=%s" in reminder_sql
     assert reminder_params[1:3] == (10, False)
+    pattern_sql = seen[1][0]
+    assert subscription_eligibility_sql("sp") in pattern_sql
+    assert recurring_eligibility_sql("rp") in pattern_sql
+
+
+@pytest.mark.parametrize(
+    ("status", "confidence", "eligible"),
+    [
+        ("detected", "0.60", True),
+        ("confirmed", "0.95", True),
+        ("detected", "0.59", False),
+        ("suppressed", "0.99", False),
+        ("dismissed", "0.99", False),
+    ],
+)
+def test_subscription_h_and_v_share_exact_eligibility(status, confidence, eligible):
+    assert subscription_pattern_eligible(status, Decimal(confidence)) is eligible
+
+
+@pytest.mark.parametrize(
+    ("status", "confidence", "eligible"),
+    [
+        ("detected", "0.70", True),
+        ("detected", "0.69", False),
+        ("subscription", "0.99", False),
+        ("dismissed", "0.99", False),
+    ],
+)
+def test_recurring_h_and_v_share_exact_eligibility(status, confidence, eligible):
+    assert recurring_pattern_eligible(status, Decimal(confidence)) is eligible
 
 
 def test_future_income_reminder_is_separate_from_expense_commitments(monkeypatch):
@@ -532,7 +613,8 @@ def test_genuine_zero_with_tracking_evidence_remains_valid():
 
 def test_target_validity_rejects_one_isolated_record_in_long_horizon():
     valid, reason, coverage = evaluate_target_validity(
-        horizon_days=18, operation_count=1, tracked_days=1, variable_expense=Decimal("100"),
+        horizon_days=18, expense_count=1, expense_tracked_days=1,
+        no_operation_marker_days=0, variable_expense=Decimal("100"),
     )
     assert valid is False
     assert reason == "insufficient_future_coverage"
@@ -541,10 +623,12 @@ def test_target_validity_rejects_one_isolated_record_in_long_horizon():
 
 def test_target_validity_accepts_strong_tracking_and_genuine_tracked_zero():
     observed = evaluate_target_validity(
-        horizon_days=18, operation_count=7, tracked_days=7, variable_expense=Decimal("1000"),
+        horizon_days=18, expense_count=7, expense_tracked_days=7,
+        no_operation_marker_days=0, variable_expense=Decimal("1000"),
     )
     tracked_zero = evaluate_target_validity(
-        horizon_days=10, operation_count=0, tracked_days=4, variable_expense=Decimal("0"),
+        horizon_days=10, expense_count=0, expense_tracked_days=0,
+        no_operation_marker_days=4, variable_expense=Decimal("0"),
     )
     assert observed[:2] == (True, "valid_observed_activity")
     assert tracked_zero[:2] == (True, "valid_tracked_zero")
@@ -552,8 +636,52 @@ def test_target_validity_accepts_strong_tracking_and_genuine_tracked_zero():
 
 def test_target_validity_rejects_missing_future_history():
     assert evaluate_target_validity(
-        horizon_days=18, operation_count=0, tracked_days=0, variable_expense=Decimal("0"),
+        horizon_days=18, expense_count=0, expense_tracked_days=0,
+        no_operation_marker_days=0, variable_expense=Decimal("0"),
     )[:2] == (False, "missing_future_tracking")
+
+
+def test_income_only_future_activity_never_validates_spending_target():
+    # Income operation counts are deliberately absent from this expense-side contract.
+    assert evaluate_target_validity(
+        horizon_days=10, expense_count=0, expense_tracked_days=0,
+        no_operation_marker_days=0, variable_expense=Decimal("0"),
+    )[:2] == (False, "missing_future_tracking")
+
+
+def test_deterministic_expense_tracking_can_validate_genuine_variable_zero():
+    assert evaluate_target_validity(
+        horizon_days=10, expense_count=4, expense_tracked_days=4,
+        no_operation_marker_days=0, variable_expense=Decimal("0"),
+    )[:2] == (True, "valid_observed_activity")
+
+
+def test_trusted_no_operation_markers_can_validate_genuine_zero():
+    assert evaluate_target_validity(
+        horizon_days=10, expense_count=0, expense_tracked_days=0,
+        no_operation_marker_days=4, variable_expense=Decimal("0"),
+    )[:2] == (True, "valid_tracked_zero")
+
+
+def test_income_only_invalid_period_never_enters_baseline_or_calibration():
+    income_only = replace(
+        history("0"), input_operation_count=0, input_tracked_days=0,
+        input_coverage_ratio=Decimal("0"), target_valid=False,
+        target_validity_reason="missing_future_tracking",
+    )
+    forecast = calculate_spendable(inputs(historical=(income_only,)))
+    assert forecast.history_periods == 0
+    assert forecast.model_family == "known_only"
+    assert forecast.calibration_state == "insufficient"
+
+
+def test_current_variable_daily_pace_ignores_income_only_dates():
+    model_inputs = inputs(
+        realized_variable_expense=Decimal("200"),
+        current_expense_tracked_days=2,
+        tracked_days=2,
+    )
+    assert variable_daily_pace(model_inputs) == Decimal("100.00")
 
 
 def test_invalid_target_is_excluded_without_entering_input_features():
@@ -792,6 +920,10 @@ def test_real_training_and_backtest_pass_exact_currency_scope(monkeypatch, tmp_p
 
 def test_failed_artifact_write_does_not_demote_working_champion(monkeypatch, tmp_path):
     statements = []
+    previous_path = tmp_path / "previous.joblib"
+    previous_checksum = save_model_artifact(
+        RobustRemainderModel(), previous_path, {"feature_schema": "forecast-features-v1"},
+    )
 
     class Cursor:
         def __enter__(self): return self
@@ -815,6 +947,76 @@ def test_failed_artifact_write_does_not_demote_working_champion(monkeypatch, tmp
             database_url="postgresql://localhost/finuchet_test",
         )
     assert not any("UPDATE public.forecast_model_registry" in sql for sql in statements)
+    load_model_artifact(previous_path, previous_checksum)
+
+
+def test_training_fingerprint_changes_for_same_count_different_dataset():
+    first = synthetic_observations(24)
+    second = list(first)
+    second[-1] = replace(second[-1], target_remainder=second[-1].target_remainder + Decimal("1"))
+    assert training_fingerprint("RUB", "pooled_quantile_gbdt", first) != training_fingerprint(
+        "RUB", "pooled_quantile_gbdt", second,
+    )
+    assert training_fingerprint("RUB", "pooled_quantile_gbdt", first) == training_fingerprint(
+        "RUB", "pooled_quantile_gbdt", list(reversed(first)),
+    )
+
+
+def test_immutable_artifact_publication_is_idempotent_and_rejects_overwrite(tmp_path):
+    final = tmp_path / "model.joblib"
+    first = tmp_path / ".first.tmp"
+    first.write_bytes(b"first artifact")
+    checksum = hashlib.sha256(first.read_bytes()).hexdigest()
+    publish_immutable_artifact(first, final, checksum)
+    assert final.read_bytes() == b"first artifact"
+
+    identical = tmp_path / ".identical.tmp"
+    identical.write_bytes(b"first artifact")
+    publish_immutable_artifact(identical, final, checksum)
+    assert final.read_bytes() == b"first artifact"
+
+    different = tmp_path / ".different.tmp"
+    different.write_bytes(b"different artifact")
+    with pytest.raises(ValueError, match="immutable_collision"):
+        publish_immutable_artifact(different, final, hashlib.sha256(different.read_bytes()).hexdigest())
+    assert final.read_bytes() == b"first artifact"
+
+
+def test_failed_registry_promotion_preserves_previous_champion_artifact(monkeypatch, tmp_path):
+    previous_path = tmp_path / "working.joblib"
+    previous_checksum = save_model_artifact(
+        RobustRemainderModel().fit(synthetic_observations(8)),
+        previous_path,
+        {"feature_schema": "forecast-features-v1"},
+    )
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, params=()):
+            if "UPDATE public.forecast_model_registry" in sql:
+                raise RuntimeError("promotion failed")
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("db.database.get_conn", lambda: Connection())
+    monkeypatch.setattr("services.forecast_training.acquire_training_lock", lambda _cur: True)
+    monkeypatch.setattr(
+        "services.forecast_training.extract_training_observations",
+        lambda *_args, **_kwargs: synthetic_observations(24),
+    )
+    with pytest.raises(RuntimeError, match="promotion failed"):
+        train_from_snapshots(
+            currency="RUB", limit=24, model_directory=tmp_path,
+            database_url="postgresql://localhost/finuchet_test",
+        )
+    loaded, _metadata = load_model_artifact(previous_path, previous_checksum)
+    assert isinstance(loaded, RobustRemainderModel)
+    assert hashlib.sha256(previous_path.read_bytes()).hexdigest() == previous_checksum
+    assert any(path.name != previous_path.name for path in tmp_path.glob("*.joblib"))
 
 
 def test_registering_challenger_never_demotes_champion(monkeypatch):
@@ -1009,9 +1211,50 @@ def test_finalized_variable_target_excludes_forecast_commitment_and_goal(monkeyp
     monkeypatch.setattr("services.user_time.user_local_date", lambda *_args, **_kwargs: date(2026, 9, 1))
     assert finalize_forecast_outcomes() == {"finalized": 1}
     assert updates[0][0] == Decimal("500.00")
-    assert updates[0][5] is False
-    assert updates[0][6] == "insufficient_future_coverage"
-    assert updates[0][7] == "target-coverage-v1"
+    assert updates[0][8] is False
+    assert updates[0][9] == "insufficient_future_coverage"
+    assert updates[0][10] == "target-coverage-v1"
+
+
+def test_income_only_finalized_horizon_is_not_valid_spending_evidence(monkeypatch):
+    updates = []
+    candidate = (
+        1, 42, 10, "RUB", "RUB", date(2026, 8, 1), date(2026, 8, 31),
+        date(2026, 8, 13), [], [],
+    )
+    operations = [
+        (index, date(2026, 8, 13 + index), "Доходы", Decimal("100"), "RUB", "text", "", "Зарплата", False)
+        for index in range(1, 9)
+    ]
+
+    class Cursor:
+        rowcount = 0
+        result = []
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, params):
+            compact = " ".join(sql.split())
+            if compact.startswith("SELECT id, user_id"):
+                self.result = [candidate]
+            elif compact.startswith("SELECT o.id"):
+                self.result = operations
+            elif compact.startswith("UPDATE public.forecast_snapshots"):
+                updates.append(params)
+                self.rowcount = 1
+        def fetchall(self): return self.result
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("db.database.get_conn", lambda: Connection())
+    monkeypatch.setattr("services.user_time.user_local_date", lambda *_args, **_kwargs: date(2026, 9, 1))
+    assert finalize_forecast_outcomes() == {"finalized": 1}
+    assert updates[0][2] == 8  # Diagnostic all-operation count remains available.
+    assert updates[0][4:7] == (0, 0, 0)
+    assert updates[0][8] is False
+    assert updates[0][9] == "missing_future_tracking"
 
 
 def test_outcome_finalization_waits_for_user_local_period_end(monkeypatch):
@@ -1258,6 +1501,9 @@ def test_migration_is_additive_idempotent_and_privacy_safe():
     assert "legacy_default_currency TEXT" in source
     assert "timezone_name TEXT" in source
     assert "target_tracked_days INTEGER" in source
+    assert "target_expense_count INTEGER" in source
+    assert "target_expense_tracked_days INTEGER" in source
+    assert "target_no_operation_marker_days INTEGER" in source
     assert "target_coverage_ratio NUMERIC" in source
     assert "target_valid BOOLEAN" in source
     assert "target_validity_reason TEXT" in source

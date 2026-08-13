@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -42,6 +44,41 @@ def normalize_training_currency(currency: str) -> str:
     if not normalized or len(normalized) > 12 or not normalized.isalnum():
         raise ValueError("invalid_training_currency")
     return normalized
+
+
+def training_fingerprint(
+    currency: str,
+    family: str,
+    observations: list[ForecastObservation],
+) -> str:
+    payload = {
+        "currency": normalize_training_currency(currency),
+        "family": family,
+        "feature_schema": FEATURE_SCHEMA_VERSION,
+        "risk_policy": RISK_POLICY_VERSION,
+        "training_cutoff": max((item.as_of_ordinal for item in observations), default=None),
+        "observations": [
+            {
+                key: str(value) if isinstance(value, Decimal) else value
+                for key, value in asdict(item).items()
+            }
+            for item in sorted(observations, key=lambda value: (value.as_of_ordinal, value.snapshot_key))
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def publish_immutable_artifact(temporary_path: Path, final_path: Path, checksum: str) -> None:
+    try:
+        os.link(temporary_path, final_path)
+    except FileExistsError:
+        existing_checksum = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        if existing_checksum != checksum:
+            raise ValueError("model_artifact_immutable_collision")
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def synthetic_observations(count: int = 30) -> list[ForecastObservation]:
@@ -274,7 +311,12 @@ def train_from_snapshots(
                 PooledQuantileGBDTModel.family: PooledQuantileGBDTModel,
             }
             model = factories[champion_result.family]().fit(observations)
-            version = f"{champion_result.family}-{exact_currency.lower()}-{date.today().isoformat()}-{len(observations)}"
+            dataset_fingerprint = training_fingerprint(exact_currency, champion_result.family, observations)
+            cutoff = date.fromordinal(max(item.as_of_ordinal for item in observations))
+            version = (
+                f"{champion_result.family}-{exact_currency.lower()}-"
+                f"{cutoff.strftime('%Y%m%d')}-{dataset_fingerprint[:12]}"
+            )
             artifact_path = root / f"{version}.joblib"
             temporary_artifact = root / f".{version}.{os.getpid()}.tmp"
             checksum = save_model_artifact(model, temporary_artifact, {
@@ -283,19 +325,33 @@ def train_from_snapshots(
                 "model_family": champion_result.family,
                 "model_version": version,
                 "currency": exact_currency,
-                "training_cutoff": date.fromordinal(max(item.as_of_ordinal for item in observations)).isoformat(),
+                "training_cutoff": cutoff.isoformat(),
+                "training_fingerprint": dataset_fingerprint,
             })
-            os.replace(temporary_artifact, artifact_path)
+            _temporary_model, temporary_metadata = load_trusted_model_artifact(
+                root, temporary_artifact, checksum, expected_feature_schema=FEATURE_SCHEMA_VERSION,
+            )
+            if (
+                str(temporary_metadata.get("currency") or "").upper() != exact_currency
+                or temporary_metadata.get("training_fingerprint") != dataset_fingerprint
+            ):
+                raise ValueError("model_artifact_currency_mismatch")
+            publish_immutable_artifact(temporary_artifact, artifact_path, checksum)
             _loaded_model, persisted_metadata = load_trusted_model_artifact(
                 root, artifact_path, checksum, expected_feature_schema=FEATURE_SCHEMA_VERSION,
             )
-            if str(persisted_metadata.get("currency") or "").upper() != exact_currency:
-                raise ValueError("model_artifact_currency_mismatch")
+            if persisted_metadata != temporary_metadata:
+                raise ValueError("model_artifact_metadata_mismatch")
             robust = next(item for item in (champion_result, *evaluated["challengers"]) if item.family == RobustRemainderModel.family)
             all_results = (champion_result, *evaluated["challengers"])
             for result in all_results:
                 eligible = result.metrics.breach_rate <= robust.metrics.breach_rate + Decimal("0.03")
                 status = "champion" if result is champion_result else "challenger"
+                result_fingerprint = training_fingerprint(exact_currency, result.family, observations)
+                result_version = (
+                    version if result is champion_result else
+                    f"{result.family}-{exact_currency.lower()}-{cutoff.strftime('%Y%m%d')}-{result_fingerprint[:12]}"
+                )
                 if status == "champion":
                     cur.execute(
                         "UPDATE public.forecast_model_registry SET status='challenger', updated_at=now() WHERE currency=%s AND status='champion'",
@@ -315,13 +371,13 @@ def train_from_snapshots(
                     (
                         exact_currency,
                         result.family,
-                        version if result is champion_result else result.version,
+                        result_version,
                         status,
                         str(artifact_path) if result is champion_result else None,
                         checksum if result is champion_result else None,
                         FEATURE_SCHEMA_VERSION,
                         RISK_POLICY_VERSION,
-                        date.fromordinal(max(item.as_of_ordinal for item in observations)),
+                        cutoff,
                         Json(_metric_payload(result, eligible=eligible)),
                         Json(calibration_metadata(result)),
                     ),
@@ -432,11 +488,25 @@ def finalize_forecast_outcomes(limit: int = 200, *, now_utc: datetime | None = N
                 expense = sum((item["amount"] for item in operations if item["type"] == "Расходы" and item["category"] != "Без операций"), Decimal("0.00"))
                 target_rows = [item for item in operations if item["op_date"] > as_of_date]
                 target_operation_count = sum(item["category"] != "Без операций" and item["type"] in {"Доходы", "Расходы"} for item in target_rows)
-                target_tracked_days = len({item["op_date"] for item in target_rows})
+                target_expense_count = sum(
+                    item["type"] == "Расходы" and item["category"] != "Без операций"
+                    for item in target_rows
+                )
+                target_expense_days = {
+                    item["op_date"] for item in target_rows
+                    if item["type"] == "Расходы" and item["category"] != "Без операций"
+                }
+                target_marker_days = {
+                    item["op_date"] for item in target_rows
+                    if item["type"] == "noop" and item["category"] == "Без операций"
+                    and item["op_date"] not in target_expense_days
+                }
+                target_tracked_days = len(target_expense_days | target_marker_days)
                 target_valid, target_reason, target_coverage = evaluate_target_validity(
                     horizon_days=(period_end - as_of_date).days,
-                    operation_count=target_operation_count,
-                    tracked_days=target_tracked_days,
+                    expense_count=target_expense_count,
+                    expense_tracked_days=len(target_expense_days),
+                    no_operation_marker_days=len(target_marker_days),
                     variable_expense=money(variable),
                 )
                 cur.execute(
@@ -444,6 +514,8 @@ def finalize_forecast_outcomes(limit: int = 200, *, now_utc: datetime | None = N
                     UPDATE public.forecast_snapshots
                        SET actual_variable_expense=%s, actual_end_result=%s,
                            target_operation_count=%s, target_tracked_days=%s,
+                           target_expense_count=%s, target_expense_tracked_days=%s,
+                           target_no_operation_marker_days=%s,
                            target_coverage_ratio=%s, target_valid=%s,
                            target_validity_reason=%s, target_validity_policy_version=%s,
                            outcome_finalized_at=now(), updated_at=now()
@@ -451,7 +523,8 @@ def finalize_forecast_outcomes(limit: int = 200, *, now_utc: datetime | None = N
                     """,
                     (
                         money(variable), money(income - expense), target_operation_count,
-                        target_tracked_days, target_coverage, target_valid, target_reason,
+                        target_tracked_days, target_expense_count, len(target_expense_days),
+                        len(target_marker_days), target_coverage, target_valid, target_reason,
                         TARGET_VALIDITY_POLICY_VERSION, snapshot_id,
                     ),
                 )

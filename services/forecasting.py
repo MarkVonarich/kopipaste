@@ -40,6 +40,10 @@ QUALITY_TIERS = ("known_only", "limited", "personal", "strong", "calibrated")
 MIN_INPUT_COVERAGE_RATIO = Decimal("0.35")
 MIN_TARGET_COVERAGE_RATIO = Decimal("0.35")
 TARGET_VALIDITY_POLICY_VERSION = "target-coverage-v1"
+SUBSCRIPTION_MIN_CONFIDENCE = Decimal("0.60")
+RECURRING_MIN_CONFIDENCE = Decimal("0.70")
+SUBSCRIPTION_ELIGIBLE_STATUSES = ("detected", "confirmed")
+RECURRING_ELIGIBLE_STATUS = "detected"
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,9 @@ class ForecastInputs:
     category_limits: dict[str, tuple[Decimal, Decimal]] = field(default_factory=dict)
     grouped_budgets: tuple[tuple[str, tuple[str, ...], Decimal, Decimal], ...] = ()
     current_operation_count: int = 0
+    current_expense_count: int = 0
+    current_expense_tracked_days: int = 0
+    current_no_operation_marker_days: int = 0
     tracked_days: int = 0
     realized_variable_expense: Decimal = Decimal("0.00")
     default_currency: str = "RUB"
@@ -268,13 +275,16 @@ def deterministic_currency_compatible(
 def evaluate_target_validity(
     *,
     horizon_days: int,
-    operation_count: int,
-    tracked_days: int,
+    expense_count: int,
+    expense_tracked_days: int,
+    no_operation_marker_days: int,
     variable_expense: Decimal,
 ) -> tuple[bool, str, Decimal]:
     horizon = max(0, int(horizon_days))
-    tracked = max(0, int(tracked_days))
-    operations = max(0, int(operation_count))
+    expense_days = max(0, int(expense_tracked_days))
+    marker_days = max(0, int(no_operation_marker_days))
+    tracked = min(horizon, expense_days + marker_days)
+    expenses = max(0, int(expense_count))
     if horizon <= 0:
         return False, "no_target_horizon", Decimal("0")
     coverage = min(Decimal("1"), Decimal(tracked) / Decimal(horizon))
@@ -282,11 +292,35 @@ def evaluate_target_validity(
         return False, "missing_future_tracking", coverage
     if coverage < MIN_TARGET_COVERAGE_RATIO:
         return False, "insufficient_future_coverage", coverage
-    if money(variable_expense) > 0 and operations == 0:
+    if money(variable_expense) > 0 and expenses == 0:
         return False, "inconsistent_future_evidence", coverage
-    if operations == 0:
+    if expenses == 0:
         return True, "valid_tracked_zero", coverage
     return True, "valid_observed_activity", coverage
+
+
+def subscription_eligibility_sql(alias: str = "sp") -> str:
+    statuses = ",".join(f"'{value}'" for value in SUBSCRIPTION_ELIGIBLE_STATUSES)
+    return (
+        f"{alias}.status IN ({statuses}) "
+        f"AND {alias}.confidence >= {SUBSCRIPTION_MIN_CONFIDENCE}"
+    )
+
+
+def recurring_eligibility_sql(alias: str = "rp") -> str:
+    return f"{alias}.status='{RECURRING_ELIGIBLE_STATUS}' AND {alias}.confidence >= {RECURRING_MIN_CONFIDENCE}"
+
+
+def subscription_pattern_eligible(status: str, confidence: Decimal) -> bool:
+    return status in SUBSCRIPTION_ELIGIBLE_STATUSES and Decimal(str(confidence)) >= SUBSCRIPTION_MIN_CONFIDENCE
+
+
+def recurring_pattern_eligible(status: str, confidence: Decimal) -> bool:
+    return status == RECURRING_ELIGIBLE_STATUS and Decimal(str(confidence)) >= RECURRING_MIN_CONFIDENCE
+
+
+def variable_daily_pace(inputs: ForecastInputs) -> Decimal:
+    return money(inputs.realized_variable_expense / Decimal(max(1, inputs.tracked_days)))
 
 
 def _valid_history_rows(inputs: ForecastInputs) -> list[HistoricalRemainder]:
@@ -386,7 +420,7 @@ def _prediction(inputs: ForecastInputs) -> tuple[QuantilePrediction, str]:
         horizon_days=inputs.period.horizon_days,
         elapsed_ratio=Decimal((inputs.period.as_of - inputs.period.start).days + 1) / Decimal(max(1, (inputs.period.end - inputs.period.start).days + 1)),
         realized_expense=money(inputs.realized_variable_expense),
-        recent_daily_pace=money(inputs.realized_variable_expense / Decimal(max(1, inputs.tracked_days))),
+        recent_daily_pace=variable_daily_pace(inputs),
         weekday=inputs.period.as_of.weekday(),
         cycle_day=(inputs.period.as_of - inputs.period.start).days + 1,
         operation_count=inputs.current_operation_count,
@@ -465,7 +499,11 @@ def _fingerprint(inputs: ForecastInputs, prediction: QuantilePrediction, amount:
             str(item.target_coverage_ratio), str(money(item.input_variable_expense)),
             item.target_valid, item.target_validity_reason,
         ) for item in inputs.historical],
-        "counts": [inputs.current_operation_count, inputs.tracked_days],
+        "counts": [
+            inputs.current_operation_count, inputs.current_expense_count,
+            inputs.current_expense_tracked_days, inputs.current_no_operation_marker_days,
+            inputs.tracked_days,
+        ],
         "variable_realized": str(money(inputs.realized_variable_expense)),
         "general_budget": [str(money(inputs.general_budget_amount)) if inputs.general_budget_amount is not None else None, str(money(inputs.general_budget_spent))],
         "category_limits": sorted((key, str(money(value[0])), str(money(value[1]))) for key, value in inputs.category_limits.items()),
@@ -483,7 +521,11 @@ def forecast_source_fingerprint(inputs: ForecastInputs) -> str:
         "scope": [inputs.user_id, inputs.workspace_id, inputs.currency, inputs.default_currency, inputs.timezone_name],
         "period": [inputs.period.key, inputs.period.start.isoformat(), inputs.period.end.isoformat(), inputs.period.as_of.isoformat()],
         "realized": [str(money(inputs.realized_income)), str(money(inputs.realized_expense)), str(money(inputs.realized_variable_expense))],
-        "coverage": [inputs.current_operation_count, inputs.tracked_days],
+        "coverage": [
+            inputs.current_operation_count, inputs.current_expense_count,
+            inputs.current_expense_tracked_days, inputs.current_no_operation_marker_days,
+            inputs.tracked_days,
+        ],
         "commitments": commitment_facts(inputs.commitments),
         "goals": goal_reserve_facts(inputs.goal_contributions),
         "history": [(
@@ -692,6 +734,8 @@ class ForecastRepository:
     def _deterministic_expense_sql(self, alias: str = "o", default_currency_ref: str = "forecast_ctx.default_currency") -> str:
         merchant = merchant_key_sql(f"{alias}.comment")
         resolved_currency = f"COALESCE({alias}.currency,{default_currency_ref})"
+        subscription_eligible = subscription_eligibility_sql("sp")
+        recurring_eligible = recurring_eligibility_sql("rp")
         return f"""(
             COALESCE({alias}.source,'')='reminder'
             OR EXISTS (
@@ -704,6 +748,7 @@ class ForecastRepository:
                  WHERE sp.user_id={alias}.user_id
                    AND sp.workspace_id IS NOT DISTINCT FROM {alias}.workspace_id
                    AND sp.currency={resolved_currency}
+                   AND {subscription_eligible}
                    AND (sp.last_operation_id={alias}.id OR (
                        sp.normalized_merchant={merchant}
                        AND sp.amount IS NOT NULL AND sp.amount={alias}.amount
@@ -714,7 +759,7 @@ class ForecastRepository:
                  WHERE rp.user_id={alias}.user_id
                    AND rp.workspace_id IS NOT DISTINCT FROM {alias}.workspace_id
                    AND rp.currency={resolved_currency}
-                   AND rp.status IN ('detected','subscription')
+                   AND {recurring_eligible}
                    AND rp.normalized_merchant={merchant}
                    AND lower(rp.category)=lower(COALESCE({alias}.category,''))
                    AND rp.average_amount={alias}.amount
@@ -797,7 +842,17 @@ class ForecastRepository:
             SELECT COALESCE(SUM(o.amount) FILTER (WHERE o.type='Доходы' AND COALESCE(o.category,'')<>'Без операций'),0),
                    COALESCE(SUM(o.amount) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций'),0),
                    COUNT(*) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций' AND NOT {deterministic}),
-                   COUNT(DISTINCT o.op_date),
+                   COUNT(*) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций'),
+                   COUNT(DISTINCT o.op_date) FILTER (
+                       WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций'
+                   ),
+                   COUNT(DISTINCT o.op_date) FILTER (
+                       WHERE o.type='noop' AND o.category='Без операций'
+                   ),
+                   COUNT(DISTINCT o.op_date) FILTER (
+                       WHERE (o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций')
+                          OR (o.type='noop' AND o.category='Без операций')
+                   ),
                    COALESCE(SUM(o.amount) FILTER (
                        WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций' AND NOT {deterministic}
                    ),0)
@@ -831,8 +886,11 @@ class ForecastRepository:
             category_limits=category_limits,
             grouped_budgets=grouped,
             current_operation_count=int(current[2] or 0),
-            tracked_days=int(current[3] or 0),
-            realized_variable_expense=money(current[4]),
+            current_expense_count=int(current[3] or 0),
+            current_expense_tracked_days=int(current[4] or 0),
+            current_no_operation_marker_days=int(current[5] or 0),
+            tracked_days=int(current[6] or 0),
+            realized_variable_expense=money(current[7]),
             default_currency=default_currency,
             timezone_name=timezone_name,
             registered_champion=self._registered_champion(currency, period.as_of),
@@ -857,10 +915,12 @@ class ForecastRepository:
                          AND NOT {deterministic}
                    ),
                    COUNT(*) FILTER (
-                       WHERE o.type IN ('Доходы','Расходы')
+                       WHERE o.type='Расходы'
                          AND COALESCE(o.category,'')<>'Без операций'
                    ),
-                   COUNT(*)
+                   COUNT(*) FILTER (
+                       WHERE o.type='noop' AND o.category='Без операций'
+                   )
               FROM public.operations o
               CROSS JOIN forecast_ctx
              WHERE {scope}
@@ -882,16 +942,19 @@ class ForecastRepository:
             remainder = sum((daily[day][0] for day in future_days), Decimal("0.00"))
             input_variable = sum((daily[day][0] for day in input_days), Decimal("0.00"))
             input_count = sum(daily[day][1] for day in input_days)
-            input_tracked = len([day for day in input_days if daily[day][3] > 0])
-            target_tracked = len([day for day in future_days if daily[day][3] > 0])
+            input_tracked = len([day for day in input_days if daily[day][2] > 0 or daily[day][3] > 0])
+            target_expense_days = len([day for day in future_days if daily[day][2] > 0])
+            target_marker_days = len([day for day in future_days if daily[day][2] == 0 and daily[day][3] > 0])
+            target_tracked = target_expense_days + target_marker_days
             elapsed_days = max(1, (as_of - start).days + 1)
             horizon_days = max(1, (end - as_of).days)
             input_coverage = min(Decimal("1"), Decimal(input_tracked) / Decimal(elapsed_days))
             target_coverage = min(Decimal("1"), Decimal(target_tracked) / Decimal(horizon_days))
             target_valid, target_reason, target_coverage = evaluate_target_validity(
                 horizon_days=horizon_days,
-                operation_count=sum(daily[day][2] for day in future_days),
-                tracked_days=target_tracked,
+                expense_count=sum(daily[day][2] for day in future_days),
+                expense_tracked_days=target_expense_days,
+                no_operation_marker_days=target_marker_days,
                 variable_expense=money(remainder),
             )
             values.append(HistoricalRemainder(
@@ -942,22 +1005,24 @@ class ForecastRepository:
                 "future_expense_reminder", "Будущий платёж",
                 "category", safe_identity_hash("category", str(category or "")),
             ))
+        subscription_eligible = subscription_eligibility_sql("sp")
+        recurring_eligible = recurring_eligibility_sql("rp")
         pattern_rows = pg_fetchall(
-            """
+            f"""
             SELECT 'subscription', id, next_expected_on, amount, currency, normalized_merchant
-              FROM public.subscription_patterns
-             WHERE user_id=%s AND workspace_id IS NOT DISTINCT FROM %s
-               AND status IN ('detected','confirmed') AND confidence >= 0.60
-               AND next_expected_on > %s AND next_expected_on <= %s AND currency=%s
+              FROM public.subscription_patterns sp
+             WHERE sp.user_id=%s AND sp.workspace_id IS NOT DISTINCT FROM %s
+               AND {subscription_eligible}
+               AND sp.next_expected_on > %s AND sp.next_expected_on <= %s AND sp.currency=%s
             UNION ALL
             SELECT 'recurring', id, (metadata->>'next_expected_on')::date,
                    average_amount, currency, normalized_merchant
-              FROM public.recurring_spend_patterns
-             WHERE user_id=%s AND workspace_id IS NOT DISTINCT FROM %s
-               AND status='detected' AND confidence >= 0.70
-               AND metadata->>'next_expected_on' ~ '^\\d{4}-\\d{2}-\\d{2}$'
-               AND (metadata->>'next_expected_on')::date > %s
-               AND (metadata->>'next_expected_on')::date <= %s AND currency=%s
+              FROM public.recurring_spend_patterns rp
+             WHERE rp.user_id=%s AND rp.workspace_id IS NOT DISTINCT FROM %s
+               AND {recurring_eligible}
+               AND rp.metadata->>'next_expected_on' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'
+               AND (rp.metadata->>'next_expected_on')::date > %s
+               AND (rp.metadata->>'next_expected_on')::date <= %s AND rp.currency=%s
              ORDER BY 3, 1, 2 LIMIT 100
             """,
             (int(user_id), workspace_id, period.as_of, period.end, currency, int(user_id), workspace_id, period.as_of, period.end, currency),
@@ -1075,11 +1140,14 @@ class ForecastRepository:
             "realized_expense": str(inputs.realized_expense),
             "realized_variable_expense": str(inputs.realized_variable_expense),
             "operation_count": inputs.current_operation_count,
+            "expense_count": inputs.current_expense_count,
+            "expense_tracked_days": inputs.current_expense_tracked_days,
+            "no_operation_marker_days": inputs.current_no_operation_marker_days,
             "tracked_days": inputs.tracked_days,
             "elapsed_days": max(1, (inputs.period.as_of - inputs.period.start).days + 1),
             "elapsed_ratio": str(Decimal((inputs.period.as_of - inputs.period.start).days + 1) / Decimal(max(1, (inputs.period.end - inputs.period.start).days + 1))),
             "cycle_day": (inputs.period.as_of - inputs.period.start).days + 1,
-            "recent_daily_pace": str(money(inputs.realized_variable_expense / Decimal(max(1, inputs.tracked_days)))),
+            "recent_daily_pace": str(variable_daily_pace(inputs)),
             "history_periods": forecast.history_periods,
             "commitment_count": forecast.known_commitment_count,
             "horizon_days": inputs.period.horizon_days,
