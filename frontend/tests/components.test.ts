@@ -41,7 +41,7 @@ describe('acceptance components', () => {
   it('renders Home result card and recent operations controls', () => {
     const html = HomeScreen(overview, [], 'RUB', true);
     expect(html).toContain('<span>Итог</span>');
-    expect(html).toContain('+649,75 ₽');
+    expect(html).toContain('+650 ₽');
     expect(html).toContain('Последние операции');
     expect(html).toContain('data-action="open-actions"');
     expect(html).toContain('Все операции');
@@ -98,7 +98,7 @@ describe('acceptance components', () => {
     expect(html).not.toContain('Food 4');
   });
 
-  it('renders fixed plan summaries without Home carousels or challenges', () => {
+  it('renders fixed plan summaries without plan carousels or challenges', () => {
     const html = HomeScreen({
       ...overview,
       challenges: [
@@ -301,7 +301,7 @@ describe('acceptance components', () => {
         USD: { income: '10.00', expense: '2.00', count: 1 },
       },
     }, [], 'RUB', true);
-    expect(html).toContain('Валюты показаны отдельно');
+    expect(html).not.toContain('Валюты показаны отдельно');
     expect(html).toContain('+650 ₽');
     expect(html).toContain('+8 $');
   });

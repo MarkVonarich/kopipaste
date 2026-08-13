@@ -126,6 +126,23 @@ describe('Advanced Forecasting & Home Intelligence', () => {
     expect(html).toContain('data-action="spendable-open"');
   });
 
+  it('rounds Home money, hides unavailable comparison, and preserves amount nodes', () => {
+    const html = HomeScreen({
+      ...overview,
+      totals_by_currency: { RUB: { income: '30000.49', expense: '17271.40', count: 8 } },
+      result_comparison: { current: '12729.09', previous: '0.00', delta: '12729.09', pct: null, state: 'zero_baseline' },
+      spendable: { ...spendable, amount: '12728.60' },
+    }, [], 'RUB', true);
+
+    expect(html).toContain('<strong class="home-primary-amount">+12 729 ₽</strong>');
+    expect(html).toContain('<strong class="home-primary-amount">~12 729 ₽</strong>');
+    expect(html).toContain('<strong class="home-rounded-amount">30 000 ₽</strong>');
+    expect(html).toContain('<strong class="home-rounded-amount">17 271 ₽</strong>');
+    expect(html).not.toContain('Нет базы для сравнения');
+    expect(html).not.toContain(',09 ₽');
+    expect(html).toContain('data-action="forecast-feedback"');
+  });
+
   it('renders explicit unavailable Spendable without a fake zero', () => {
     const html = HomeScreen({ ...overview, workspace_scope: 'all', spendable: { available: false, code: 'workspace_all', title: 'Выберите пространство', description: 'Выберите пространство для прогноза.' } }, [], 'RUB', false);
     expect(html).toContain('Выберите пространство для прогноза.');
@@ -145,6 +162,8 @@ describe('Advanced Forecasting & Home Intelligence', () => {
     const html = HomeScreen(overview, [], 'RUB', true);
     expect(html).toContain('announcement-card compact');
     expect(html).toContain('data-action="announcement-open"');
+    expect(html).toContain('announcement-dots');
+    expect(html).toContain('data-action="carousel-dot"');
     expect(html).toContain('data-target="OPEN_HOME"');
     expect(html).not.toContain('>Открыть</button>');
   });
@@ -192,5 +211,19 @@ describe('Advanced Forecasting & Home Intelligence', () => {
     expect(html).toContain('Общий лимит');
     expect(html).not.toContain('Отпуск');
     expect(html.indexOf('Общий лимит')).toBeLessThan(html.indexOf('Интернет'));
+  });
+
+  it('renders Limits, Goals, and Reminders as one equal-class compact trio', () => {
+    const document = new DOMParser().parseFromString(HomeScreen(overview, [], 'RUB', true), 'text/html');
+    const row = document.querySelector('[data-testid="home-plans"]');
+    const cards = row?.querySelectorAll(':scope > .plan-home-card');
+
+    expect(row?.classList.contains('home-plans')).toBe(true);
+    expect(cards).toHaveLength(3);
+    expect(Array.from(cards || []).map((card) => card.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining('Лимиты'),
+      expect.stringContaining('Цели'),
+      expect.stringContaining('Напоминания'),
+    ]));
   });
 });

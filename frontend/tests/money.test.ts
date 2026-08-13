@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatMoneyString, normalizeMoneyText } from '../src/money';
+import { formatMoneyString, formatWholeMoneyString, normalizeMoneyText } from '../src/money';
 
 describe('money formatting', () => {
   it('formats decimal money from strings without binary floats', () => {
@@ -11,5 +11,11 @@ describe('money formatting', () => {
   it('keeps currency buckets separate', () => {
     expect(formatMoneyString('12.50', 'USD')).toBe('12,50 $');
     expect(formatMoneyString('12.50', 'EUR')).toBe('12,50 €');
+  });
+
+  it('rounds whole-unit presentation exactly without binary floats', () => {
+    expect(formatWholeMoneyString('12728.50', 'RUB')).toBe('12 729 ₽');
+    expect(formatWholeMoneyString('-4310.51', 'RUB')).toBe('-4 311 ₽');
+    expect(formatWholeMoneyString('-0.49', 'USD')).toBe('0 $');
   });
 });

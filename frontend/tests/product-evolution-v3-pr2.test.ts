@@ -113,6 +113,7 @@ describe('Product Evolution v3 PR2', () => {
     }, [], 'RUB', true);
     expect(html).toContain('data-action="announcement-dismiss"');
     expect(html).toContain('data-target="OPEN_HOME_SETTINGS"');
+    expect(html).toContain('class="active" type="button" role="tab" data-action="carousel-dot"');
     expect(html).not.toContain('autoplay');
   });
 

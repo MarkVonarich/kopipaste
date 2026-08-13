@@ -1,4 +1,4 @@
-import { formatMoneyString, subtractMoneyStrings } from '../money';
+import { formatMoneyString, formatWholeMoneyString, subtractMoneyStrings } from '../money';
 import type { GlobalFinancialFilters, HomeReminderSummary, Insight, InsightEvidence, Operation } from '../types';
 import type { Overview } from '../api';
 import { TransactionList } from './TransactionList';
@@ -8,18 +8,18 @@ import { SpendableCard } from './Forecasting';
 function resultLines(overview: Overview | null, fallbackCurrency = 'RUB'): string {
   const totals = overview?.totals_by_currency || {};
   const currencies = Object.keys(totals);
-  if (!currencies.length) return formatMoneyString('0.00', fallbackCurrency);
+  if (!currencies.length) return formatWholeMoneyString('0.00', fallbackCurrency);
   return currencies.map((currency) => {
     const result = subtractMoneyStrings(totals[currency].income, totals[currency].expense);
-    return `${result.startsWith('-') ? '' : '+'}${formatMoneyString(result, currency)}`;
+    return `${result.startsWith('-') ? '' : '+'}${formatWholeMoneyString(result, currency)}`;
   }).join(' · ');
 }
 
 function totalLines(overview: Overview | null, type: 'income' | 'expense', fallbackCurrency = 'RUB'): string {
   const totals = overview?.totals_by_currency || {};
   const currencies = Object.keys(totals);
-  if (!currencies.length) return formatMoneyString('0.00', fallbackCurrency);
-  return currencies.map((currency) => formatMoneyString(totals[currency][type], currency)).join(' · ');
+  if (!currencies.length) return formatWholeMoneyString('0.00', fallbackCurrency);
+  return currencies.map((currency) => formatWholeMoneyString(totals[currency][type], currency)).join(' · ');
 }
 
 function progressBar(percent?: number): string {
@@ -110,23 +110,33 @@ function focusCard(kind: 'limits' | 'goals', overview: Overview | null, index: n
 }
 
 function resultComparison(overview: Overview | null): string {
-  if (overview && !overview.aggregation_available) return 'Валюты показаны отдельно';
+  if (overview && !overview.aggregation_available) return '';
   const metric = overview?.result_comparison;
-  if (!metric || metric.pct === null || metric.pct === undefined || metric.state !== 'ok') return 'Нет базы для сравнения';
+  if (!metric || metric.pct === null || metric.pct === undefined || metric.state !== 'ok') return '';
   const value = Number(metric.pct);
   return `${value > 0 ? '+' : ''}${Math.round(value)}% к прошлому периоду`;
 }
 
+function announcementDots(total: number, index: number): string {
+  return `<div class="carousel-dots announcement-dots" role="tablist" aria-label="Новости">
+    ${Array.from({ length: total }, (_, dotIndex) => `<button class="${dotIndex === index ? 'active' : ''}" type="button" role="tab" data-action="carousel-dot" data-carousel="announcement" data-index="${dotIndex}" aria-label="Новость ${dotIndex + 1} из ${total}" aria-selected="${dotIndex === index}"></button>`).join('')}
+  </div>`;
+}
+
 function announcementCard(overview: Overview | null, index: number): string {
   const items = overview?.announcements || [];
-  const current = items[Math.max(0, Math.min(index, items.length - 1))];
+  const currentIndex = Math.max(0, Math.min(index, items.length - 1));
+  const current = items[currentIndex];
   if (!current) return '';
-  return `<article class="announcement-card compact" data-carousel="announcement" data-index="${index}" data-announcement-target="${esc(current.action.type)}" tabindex="0">
-    <button class="announcement-dismiss" type="button" data-action="announcement-dismiss" data-id="${esc(current.id)}" aria-label="Скрыть">×</button>
-    <button class="announcement-card-action" type="button" data-action="announcement-open" data-target="${esc(current.action.type)}">
-      <span class="eyebrow">Новое в КопиPaste</span><strong>${esc(current.title)}</strong><p>${esc(current.description)}</p>
-    </button>
-  </article>`;
+  return `<section class="announcement-carousel" aria-label="Новое в КопиPaste">
+    <article class="announcement-card compact" data-carousel="announcement" data-index="${currentIndex}" data-announcement-target="${esc(current.action.type)}" tabindex="0">
+      <button class="announcement-dismiss" type="button" data-action="announcement-dismiss" data-id="${esc(current.id)}" aria-label="Скрыть">×</button>
+      <button class="announcement-card-action" type="button" data-action="announcement-open" data-target="${esc(current.action.type)}">
+        <span class="eyebrow">Новое в КопиPaste</span><strong>${esc(current.title)}</strong><p>${esc(current.description)}</p>
+      </button>
+    </article>
+    ${announcementDots(items.length, currentIndex)}
+  </section>`;
 }
 
 type HomeIndices = { challenge?: number; focus?: number; goal?: number; limit?: number; reminder?: number; announcement?: number };
@@ -137,16 +147,17 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
   const reminder = (overview?.reminders || [overview?.reminder]).filter(Boolean)[indices.reminder || 0] as HomeReminderSummary | undefined;
   const announcement = announcementCard(overview, indices.announcement || 0);
   const shopping = overview?.shopping;
+  const comparison = resultComparison(overview);
   const emptyAction = canWrite ? `<button class="button primary" data-action="open-add" data-kind="expense">${icon('expense')}Добавить первую операцию</button>` : '';
   return `<section class="screen home-screen">
     ${activityStrip(overview)}
     <div class="home-summary-row" data-testid="home-summary-row">
-      <article class="summary-card result-card"><span>Итог</span><strong>${esc(resultLines(overview, fallbackCurrency))}</strong><small>${esc(resultComparison(overview))}</small></article>
+      <article class="summary-card result-card"><span>Итог</span><strong class="home-primary-amount">${esc(resultLines(overview, fallbackCurrency))}</strong>${comparison ? `<small>${esc(comparison)}</small>` : ''}</article>
       ${SpendableCard(overview?.spendable)}
     </div>
     <section class="home-income-expense" data-testid="income-expense-columns">
-      <div class="home-column income" data-testid="income-column"><div class="metric-line income"><span>Доходы</span><strong>${esc(totalLines(overview, 'income', fallbackCurrency))}</strong></div><button class="button secondary" data-action="open-add" data-kind="income" ${canWrite ? '' : 'disabled'}>${icon('income')}Добавить доход</button></div>
-      <div class="home-column expense" data-testid="expense-column"><div class="metric-line expense"><span>Расходы</span><strong>${esc(totalLines(overview, 'expense', fallbackCurrency))}</strong></div><button class="button primary" data-action="open-add" data-kind="expense" ${canWrite ? '' : 'disabled'}>${icon('expense')}Добавить расход</button></div>
+      <div class="home-column income" data-testid="income-column"><div class="metric-line income"><span>Доходы</span><strong class="home-rounded-amount">${esc(totalLines(overview, 'income', fallbackCurrency))}</strong></div><button class="button secondary" data-action="open-add" data-kind="income" ${canWrite ? '' : 'disabled'}>${icon('income')}Добавить доход</button></div>
+      <div class="home-column expense" data-testid="expense-column"><div class="metric-line expense"><span>Расходы</span><strong class="home-rounded-amount">${esc(totalLines(overview, 'expense', fallbackCurrency))}</strong></div><button class="button primary" data-action="open-add" data-kind="expense" ${canWrite ? '' : 'disabled'}>${icon('expense')}Добавить расход</button></div>
     </section>
     ${announcement}
     <div class="home-plans" data-testid="home-plans">
