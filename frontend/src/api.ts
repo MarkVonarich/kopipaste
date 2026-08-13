@@ -289,7 +289,7 @@ export const api = {
     apiFetch<Overview>(`/miniapp/api/overview${query({ workspace_id: workspaceId, ...filters })}`),
   spendableForecast: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
     apiFetch<SpendableForecast>(`/miniapp/api/forecast/spendable${query({ workspace_id: workspaceId, ...filters })}`),
-  canSpend: (payload: { workspace_id: number | 'all' | null; currency: string; period: string; start_date?: string; end_date?: string; amount: string; category?: string; purchase_date?: string }) =>
+  canSpend: (payload: { workspace_id: number | 'all' | null; currency: string; period: string; start_date?: string; end_date?: string; amount: string; category?: string }) =>
     apiFetch<CanSpendResult>('/miniapp/api/forecast/can-spend', { method: 'POST', body: JSON.stringify(payload) }),
   forecastFeedback: (fingerprint: string, workspace_id: number | 'all' | null, feedback_type: 'useful' | 'not_useful') =>
     apiFetch<{ recorded: boolean; feedback_type: string }>(`/miniapp/api/forecast/${encodeURIComponent(fingerprint)}/feedback`, { method: 'POST', body: JSON.stringify({ workspace_id, feedback_type }) }),

@@ -182,6 +182,6 @@ Before deploying Advanced Forecasting & Home Intelligence:
 6. Verify concrete-workspace/current-period Spendable, aggregate unavailable state, can-spend, fixed Home settings, category-limit edit and goal archive/restore.
 7. Confirm `advanced-forecasting-home-v1.released_on` matches the actual production release date before restart.
 
-No new Python or npm production dependency is introduced. Model artifacts are not part of the repository or frontend bundle. A future artifact deployment must use a trusted local model directory, registry checksum and matching `forecast-features-v1` metadata.
+No new Python or npm production dependency is introduced. Model artifacts are not part of the repository or frontend bundle. Set `FORECAST_MODEL_DIR` to an existing trusted local directory only when a validated registry champion should be eligible online; missing configuration keeps the personal fallback. Offline snapshot training requires `--from-snapshots --execute`. A non-test DSN additionally requires both `--allow-production` and `FORECAST_PRODUCTION_TRAINING_ENABLED=true`. Training never runs in HTTP handling or the scheduler.
 
 Rollback application code first and leave the additive migration in place. Dropping forecast tables or category-limit columns is a separate destructive operation and must use the migration's manual rollback notes only after retention review. Invalidated/deleted-history snapshots must not be restored as authoritative outcomes.

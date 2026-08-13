@@ -76,3 +76,7 @@ POSTHOG_EXPORT_MAX_EVENT_AGE_DAYS = int(os.getenv("POSTHOG_EXPORT_MAX_EVENT_AGE_
 
 # Optional Telegram Mini App public entry point.
 MINIAPP_PUBLIC_URL = os.getenv("MINIAPP_PUBLIC_URL", "").strip()
+
+# Trusted local forecast artifacts. An empty directory disables registered-model inference.
+FORECAST_MODEL_DIR = os.getenv("FORECAST_MODEL_DIR", "").strip()
+FORECAST_PRODUCTION_TRAINING_ENABLED = _parse_bool("FORECAST_PRODUCTION_TRAINING_ENABLED", False)

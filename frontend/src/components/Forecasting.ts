@@ -65,7 +65,6 @@ export function SpendableDetail(forecast: SpendableForecast, categories: Array<{
       <form class="form-grid" data-action="can-spend">
         <label class="field">Сумма<input class="input amount-input" name="amount" inputmode="decimal" required /></label>
         <label class="field">Категория, необязательно<select class="select" name="category"><option value="">Без категории</option>${categoryOptions}</select></label>
-        <label class="field">Дата покупки<input class="input" name="purchase_date" type="date" /></label>
         ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
         <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Проверить</button>
       </form>

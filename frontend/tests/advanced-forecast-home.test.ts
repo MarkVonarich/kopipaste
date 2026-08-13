@@ -162,6 +162,8 @@ describe('Advanced Forecasting & Home Intelligence', () => {
     expect(html).toContain('Защищено на цели');
     expect(html).toContain('forecast-band');
     expect(html).toContain('Сколько я могу потратить?');
+    expect(html).not.toContain('Дата покупки');
+    expect(html).not.toContain('purchase_date');
     expect(html).toContain('По вашей истории');
     expect(html).toContain('Этот доход не включён в свободную сумму');
   });

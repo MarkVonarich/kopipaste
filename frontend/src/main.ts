@@ -2998,7 +2998,6 @@ function wireEvents(): void {
         end_date: activeFilters().end_date,
         amount: normalizeMoneyText(String(data.get('amount') || '0')),
         category: String(data.get('category') || '').trim() || undefined,
-        purchase_date: String(data.get('purchase_date') || '') || undefined,
       });
       state.sheet = 'can-spend-result';
       state.saving = false;

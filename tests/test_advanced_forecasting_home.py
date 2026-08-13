@@ -11,7 +11,9 @@ from services.experiments import assign_variant, exposure_properties
 from services.forecast_models import (
     BacktestMetrics,
     BacktestResult,
+    CalibrationResult,
     ForecastObservation,
+    PooledQuantileGBDTModel,
     QuantilePrediction,
     RobustRemainderModel,
     apply_calibration,
@@ -25,7 +27,15 @@ from services.forecast_models import (
     save_model_artifact,
     select_champion,
 )
-from services.forecast_training import extract_training_observations, finalize_forecast_outcomes, synthetic_observations
+from services.forecast_training import (
+    backtest_candidates,
+    ensure_safe_training_dsn,
+    extract_training_observations,
+    finalize_forecast_outcomes,
+    register_model,
+    synthetic_observations,
+    train_from_snapshots,
+)
 from services.forecasting import (
     ForecastInputs,
     ForecastPeriod,
@@ -33,12 +43,17 @@ from services.forecasting import (
     GoalContribution,
     HistoricalRemainder,
     KnownCommitment,
+    RegisteredChampion,
     calculate_spendable,
     can_spend,
     comparable_periods,
     deduplicate_commitments,
     explain_forecast_change,
     record_forecast_feedback,
+    forecast_source_fingerprint,
+    operation_is_deterministic,
+    operation_matches_snapshot_currency,
+    safe_identity_hash,
 )
 from services.insights import (
     CategoryAggregate,
@@ -191,6 +206,14 @@ def test_can_spend_is_honest_when_history_is_insufficient():
     assert can_spend(model_inputs, calculate_spendable(model_inputs), Decimal("10"))["verdict"] == "insufficient_data"
 
 
+def test_can_spend_api_rejects_removed_purchase_date(monkeypatch):
+    api = MiniAppAPI()
+    monkeypatch.setattr(api, "_check_write_rate", lambda _req: None)
+    with pytest.raises(Exception) as raised:
+        api.forecast_can_spend(api.request(42), {"purchase_date": "2026-08-20"})
+    assert getattr(raised.value, "code", None) == "unsupported_forecast_purchase_date"
+
+
 def test_category_limit_constrains_only_category_can_spend():
     model_inputs = inputs(
         realized_income=Decimal("100"), realized_expense=Decimal("0"),
@@ -218,26 +241,118 @@ def test_commitment_dedup_keeps_two_explicit_payments_but_suppresses_detected_du
     values = (
         KnownCommitment("reminder", "1", due, Decimal("100"), "RUB", "future", "Платёж"),
         KnownCommitment("reminder", "2", due, Decimal("100"), "RUB", "future", "Платёж"),
-        KnownCommitment("subscription", "s1", due, Decimal("100"), "RUB", "future", "Платёж", True),
-        KnownCommitment("recurring", "r1", due, Decimal("100"), "RUB", "future", "Платёж", True),
+        KnownCommitment("subscription", "s1", due, Decimal("100"), "RUB", "future", "Платёж", "merchant", "a" * 64),
+        KnownCommitment("recurring", "r1", due, Decimal("100"), "RUB", "future", "Платёж", "merchant", "a" * 64),
     )
     selected = deduplicate_commitments(values)
     assert [item.source_key for item in selected] == ["1", "2"]
-    assert [item.baseline_overlap for item in selected] == [True, False]
 
 
-def test_recurring_commitment_is_not_counted_again_inside_historical_variable_reserve():
+def test_variable_baseline_is_already_decomposed_and_commitment_is_reserved_once():
     recurring = KnownCommitment(
-        "subscription", "s1", date(2026, 8, 20), Decimal("100"), "RUB", "recurring", "Платёж", True,
+        "subscription", "s1", date(2026, 8, 20), Decimal("100"), "RUB", "recurring", "Платёж", "merchant", "a" * 64,
     )
     model_inputs = inputs(
         commitments=(recurring,),
-        historical=(history("100", 0), history("100", 1), history("100", 2)),
+        historical=(history("0", 0), history("0", 1), history("0", 2)),
     )
     forecast = calculate_spendable(model_inputs)
     assert forecast.known_commitments == Decimal("100.00")
     assert forecast.variable_reserve == Decimal("0.00")
     assert forecast.amount == Decimal("700.00")
+
+
+def test_historical_recurring_rent_and_current_reminder_are_reserved_exactly_once():
+    rent = KnownCommitment(
+        "reminder", "rent", date(2026, 8, 20), Decimal("30000"), "RUB",
+        "future_expense_reminder", "Будущий платёж", "category", safe_identity_hash("category", "Жильё"),
+    )
+    model_inputs = inputs(
+        realized_income=Decimal("100000"),
+        realized_expense=Decimal("0"),
+        commitments=(rent,),
+        historical=(history("5000", 0), history("5000", 1), history("5000", 2)),
+    )
+    forecast = calculate_spendable(model_inputs)
+    assert forecast.known_commitments == Decimal("30000.00")
+    assert forecast.variable_reserve == Decimal("5000.00")
+    assert forecast.amount == Decimal("65000.00")
+
+
+def test_snapshot_commitment_fact_excludes_only_exact_deterministic_payment():
+    fact = {
+        "source": "reminder",
+        "source_id": "7",
+        "due_date": "2026-08-20",
+        "amount": "30000.00",
+        "currency": "RUB",
+        "identity_kind": "category",
+        "identity_hash": safe_identity_hash("category", "Жильё"),
+    }
+    operation = {
+        "op_date": date(2026, 8, 20), "amount": "30000", "currency": "RUB",
+        "category": "Жильё", "comment": "", "source": "text", "goal_linked": False,
+    }
+    assert operation_is_deterministic(operation, [fact]) is True
+    assert operation_is_deterministic({**operation, "amount": "29999"}, [fact]) is False
+    assert operation_is_deterministic({**operation, "source": "reminder"}, [], allow_source_markers=False) is False
+
+
+def test_goal_linked_expense_is_not_a_variable_training_target():
+    operation = {
+        "op_date": date(2026, 8, 20), "amount": "1000", "currency": "RUB",
+        "category": "Накопления", "comment": "", "source": "text", "goal_linked": True,
+    }
+    assert operation_is_deterministic(operation, []) is True
+
+
+@pytest.mark.parametrize(
+    ("operation_currency", "snapshot_currency", "default_currency", "included"),
+    [
+        (None, "RUB", "RUB", True),
+        (None, "USD", "RUB", False),
+        ("USD", "USD", "RUB", True),
+        ("USD", "RUB", "RUB", False),
+        ("RUB", "RUB", "RUB", True),
+        ("RUB", "USD", "RUB", False),
+    ],
+)
+def test_outcome_currency_uses_canonical_legacy_default_only(operation_currency, snapshot_currency, default_currency, included):
+    assert operation_matches_snapshot_currency(operation_currency, snapshot_currency, default_currency) is included
+
+
+def test_historical_features_stop_at_as_of_while_target_uses_future_days(monkeypatch):
+    rows = [
+        (date(2026, 7, 5), Decimal("100"), 2, 2),
+        (date(2026, 7, 20), Decimal("900"), 20, 20),
+        (date(2026, 7, 21), Decimal("0"), 0, 1),
+    ]
+    monkeypatch.setattr("services.forecasting.pg_fetchall", lambda *_args, **_kwargs: rows)
+    period = ForecastPeriod("current_month", date(2026, 8, 1), date(2026, 8, 31), date(2026, 8, 13))
+    july = ForecastRepository()._history(42, 10, "RUB", "RUB", period)[-1]
+    assert july.as_of == date(2026, 7, 13)
+    assert july.input_operation_count == 2
+    assert july.input_tracked_days == 1
+    assert july.input_variable_expense == Decimal("100.00")
+    assert july.remainder == Decimal("900.00")
+    assert july.target_tracked_days == 2
+
+
+def test_historical_remainder_sql_excludes_authoritative_deterministic_sources(monkeypatch):
+    captured = {}
+
+    def fake(sql, params=()):
+        captured["sql"] = " ".join(sql.split())
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr("services.forecasting.pg_fetchall", fake)
+    ForecastRepository()._history(42, 10, "RUB", "RUB", PERIOD)
+    assert "COALESCE(o.source,'')='reminder'" in captured["sql"]
+    assert "public.goal_movements" in captured["sql"]
+    assert "public.subscription_patterns" in captured["sql"]
+    assert "public.recurring_spend_patterns" in captured["sql"]
+    assert "AND NOT" in captured["sql"]
 
 
 def test_commitment_query_excludes_paid_expired_wrong_scope_and_wrong_currency(monkeypatch):
@@ -351,6 +466,120 @@ def test_champion_can_select_better_safe_challenger():
     assert select_champion([robust, safe]).family == "seasonal_temporal"
 
 
+class FixedRegisteredModel:
+    def predict(self, _observation):
+        return QuantilePrediction(Decimal("11"), Decimal("22"), Decimal("33"), "artifact", "artifact-v1")
+
+
+def test_registered_valid_gbdt_champion_is_used_and_reported_exactly():
+    champion = RegisteredChampion(
+        FixedRegisteredModel(), "pooled_quantile_gbdt", "gbdt-production-v7",
+        CalibrationResult("insufficient", (Decimal("0"),) * 3, 3, None, None),
+    )
+    forecast = calculate_spendable(inputs(registered_champion=champion))
+    assert (forecast.variable_q50, forecast.variable_q80, forecast.variable_q90) == (
+        Decimal("11.00"), Decimal("22.00"), Decimal("33.00"),
+    )
+    assert forecast.model_family == "pooled_quantile_gbdt"
+    assert forecast.model_version == "gbdt-production-v7"
+    assert forecast.calibration_state == "insufficient"
+
+
+def test_missing_registered_champion_uses_truthful_personal_fallback():
+    forecast = calculate_spendable(inputs(historical=(history("10", 0), history("20", 1), history("30", 2))))
+    assert forecast.model_family == "personal_ensemble"
+    assert forecast.model_version == "personal-ensemble-v1"
+
+
+def test_registry_rejects_bad_checksum_schema_and_risk_policy(monkeypatch, tmp_path):
+    monkeypatch.setattr("settings.FORECAST_MODEL_DIR", str(tmp_path))
+    path = tmp_path / "champion.joblib"
+    metadata = {
+        "feature_schema": "forecast-features-v1",
+        "risk_policy": "downside-q80-v1",
+        "model_family": "pooled_quantile_gbdt",
+        "model_version": "v7",
+    }
+    checksum = save_model_artifact(FixedRegisteredModel(), path, metadata)
+    base = (
+        "pooled_quantile_gbdt", "v7", str(path), checksum, "forecast-features-v1",
+        "downside-q80-v1", TODAY, {"guardrail_eligible": True, "folds": 12},
+        {"state": "insufficient", "sample_count": 3},
+    )
+    repository = ForecastRepository()
+    monkeypatch.setattr("services.forecasting.pg_fetchall", lambda *_args, **_kwargs: [{"unused": True}] and [base])
+    assert repository._registered_champion(TODAY) is not None
+    monkeypatch.setattr("services.forecasting.pg_fetchall", lambda *_args, **_kwargs: [[*base[:3], "0" * 64, *base[4:]]])
+    assert repository._registered_champion(TODAY) is None
+    monkeypatch.setattr("services.forecasting.pg_fetchall", lambda *_args, **_kwargs: [[*base[:4], "wrong-schema", *base[5:]]])
+    assert repository._registered_champion(TODAY) is None
+    monkeypatch.setattr("services.forecasting.pg_fetchall", lambda *_args, **_kwargs: [[*base[:5], "wrong-policy", *base[6:]]])
+    assert repository._registered_champion(TODAY) is None
+
+
+def test_real_backtest_candidates_are_rolling_origin_and_include_gbdt():
+    evaluated = backtest_candidates(synthetic_observations(24))
+    families = {evaluated["champion"].family, *(item.family for item in evaluated["challengers"])}
+    assert families == {"robust_remainder", "seasonal_temporal", "pooled_quantile_gbdt"}
+    assert all(item.metrics.folds == 18 for item in (evaluated["champion"], *evaluated["challengers"]))
+
+
+def test_training_dsn_rejects_unsafe_database_by_default(monkeypatch):
+    monkeypatch.delenv("FORECAST_PRODUCTION_TRAINING_ENABLED", raising=False)
+    with pytest.raises(RuntimeError, match="unsafe_forecast_training_dsn"):
+        ensure_safe_training_dsn("postgresql://db/finuchet")
+    ensure_safe_training_dsn("postgresql://localhost/finuchet_test")
+
+
+def test_failed_artifact_write_does_not_demote_working_champion(monkeypatch, tmp_path):
+    statements = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, params=()): statements.append(" ".join(sql.split()))
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("db.database.get_conn", lambda: Connection())
+    monkeypatch.setattr("services.forecast_training.acquire_training_lock", lambda _cur: True)
+    monkeypatch.setattr("services.forecast_training.extract_training_observations", lambda *_args, **_kwargs: synthetic_observations(24))
+    monkeypatch.setattr("services.forecast_training.save_model_artifact", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        train_from_snapshots(
+            limit=24,
+            model_directory=tmp_path,
+            database_url="postgresql://localhost/finuchet_test",
+        )
+    assert not any("UPDATE public.forecast_model_registry" in sql for sql in statements)
+
+
+def test_registering_challenger_never_demotes_champion(monkeypatch):
+    statements = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, params=()): statements.append(" ".join(sql.split()))
+        def fetchone(self): return (True,)
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("db.database.get_conn", lambda: Connection())
+    assert register_model(
+        family="seasonal_temporal", version="candidate-v1", status="challenger",
+        artifact_path="", artifact_sha256="", training_cutoff=TODAY,
+        metrics={"guardrail_eligible": True}, calibration={"state": "insufficient"},
+    ) is True
+    assert not any("SET status='challenger'" in sql for sql in statements)
+
+
 def test_calibration_is_honest_when_insufficient():
     prediction = QuantilePrediction(Decimal("10"), Decimal("20"), Decimal("30"), "x", "v1")
     calibration = calibrate_quantiles([prediction], [Decimal("15")])
@@ -414,10 +643,13 @@ def test_outcome_finalization_is_bounded_and_skip_locked(monkeypatch):
     captured = {}
 
     class Cursor:
-        rowcount = 3
+        rowcount = 0
         def __enter__(self): return self
         def __exit__(self, *_args): return False
-        def execute(self, sql, params): captured.update(sql=" ".join(sql.split()), params=params)
+        def execute(self, sql, params):
+            captured.update(sql=" ".join(sql.split()), params=params)
+            self.rowcount = 0
+        def fetchall(self): return []
     class Connection:
         def cursor(self): return Cursor()
         def commit(self): pass
@@ -425,9 +657,96 @@ def test_outcome_finalization_is_bounded_and_skip_locked(monkeypatch):
         def close(self): pass
 
     monkeypatch.setattr("db.database.get_conn", lambda: Connection())
-    assert finalize_forecast_outcomes(9999) == {"finalized": 3}
+    assert finalize_forecast_outcomes(9999) == {"finalized": 0}
     assert "FOR UPDATE SKIP LOCKED" in captured["sql"]
     assert captured["params"] == (1000,)
+
+
+def test_finalized_variable_target_excludes_forecast_commitment_and_goal(monkeypatch):
+    updates = []
+    fact = {
+        "due_date": "2026-08-20", "amount": "30000", "currency": "RUB",
+        "identity_kind": "category", "identity_hash": safe_identity_hash("category", "Жильё"),
+    }
+    candidate = (1, 42, 10, "RUB", "RUB", date(2026, 8, 1), date(2026, 8, 31), date(2026, 8, 13), [fact], [{"goal_id": 9}])
+    operations = [
+        (1, date(2026, 8, 20), "Расходы", Decimal("30000"), "RUB", "text", "", "Жильё", False),
+        (2, date(2026, 8, 21), "Расходы", Decimal("1000"), "RUB", "text", "", "Накопления", True),
+        (3, date(2026, 8, 22), "Расходы", Decimal("500"), "RUB", "text", "", "Еда", False),
+    ]
+
+    class Cursor:
+        rowcount = 0
+        result = []
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, params):
+            compact = " ".join(sql.split())
+            if compact.startswith("SELECT id, user_id"):
+                self.result = [candidate]
+            elif compact.startswith("SELECT o.id"):
+                self.result = operations
+                assert "o.currency=%s OR (o.currency IS NULL AND %s=%s)" in compact
+            elif compact.startswith("UPDATE public.forecast_snapshots"):
+                updates.append(params)
+                self.rowcount = 1
+        def fetchall(self): return self.result
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("db.database.get_conn", lambda: Connection())
+    monkeypatch.setattr("services.user_time.user_local_date", lambda *_args, **_kwargs: date(2026, 9, 1))
+    assert finalize_forecast_outcomes() == {"finalized": 1}
+    assert updates[0][0] == Decimal("500.00")
+
+
+def test_outcome_finalization_waits_for_user_local_period_end(monkeypatch):
+    candidate = (1, 42, 10, "RUB", "RUB", date(2026, 8, 1), TODAY, date(2026, 8, 5), [], [])
+    calls = []
+
+    class Cursor:
+        rowcount = 0
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, params): calls.append(" ".join(sql.split()))
+        def fetchall(self): return [candidate]
+    class Connection:
+        def cursor(self): return Cursor()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr("db.database.get_conn", lambda: Connection())
+    monkeypatch.setattr("services.user_time.user_local_date", lambda *_args, **_kwargs: TODAY)
+    assert finalize_forecast_outcomes(now_utc=datetime(2026, 8, 13, 23, tzinfo=timezone.utc)) == {"finalized": 0}
+    assert len(calls) == 1
+
+
+def test_source_fingerprint_changes_for_financially_relevant_inputs():
+    base = inputs(
+        commitments=(KnownCommitment("reminder", "1", date(2026, 8, 20), Decimal("100"), "RUB", "future", "Платёж"),),
+        goal_contributions=(GoalContribution(1, date(2026, 8, 25), Decimal("50")),),
+        general_budget_amount=Decimal("1000"),
+        category_limits={"food": (Decimal("500"), Decimal("100"))},
+        grouped_budgets=(("daily", ("food",), Decimal("800"), Decimal("200")),),
+    )
+    original = forecast_source_fingerprint(base)
+    variants = (
+        replace(base, realized_income=Decimal("1001")),
+        replace(base, realized_expense=Decimal("201")),
+        replace(base, current_operation_count=11),
+        replace(base, tracked_days=11),
+        replace(base, commitments=()),
+        replace(base, goal_contributions=()),
+        replace(base, general_budget_amount=Decimal("999")),
+        replace(base, category_limits={"food": (Decimal("501"), Decimal("100"))}),
+        replace(base, grouped_budgets=()),
+        replace(base, currency="USD"),
+    )
+    assert all(forecast_source_fingerprint(value) != original for value in variants)
 
 
 def test_model_artifact_round_trip_and_checksum(tmp_path):
@@ -623,6 +942,12 @@ def test_migration_is_additive_idempotent_and_privacy_safe():
     source = open("/root/bot_finuchet/migrations/20260813_024_advanced_forecasting_home.sql", encoding="utf-8").read()
     assert "ADD COLUMN IF NOT EXISTS display_name" in source
     assert "CREATE TABLE IF NOT EXISTS public.forecast_snapshots" in source
+    assert "known_commitment_facts JSONB" in source
+    assert "goal_reserve_facts JSONB" in source
+    assert "legacy_default_currency TEXT" in source
+    assert "timezone_name TEXT" in source
+    assert "target_tracked_days INTEGER" in source
+    assert "target_coverage_ratio NUMERIC" in source
     assert "q50 <= q80 AND q80 <= q90" in source
     assert "raw_text" not in source and "comment" not in source and "initData" not in source
     assert "COMMIT;" in source and "Rollback" in source

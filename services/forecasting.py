@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Iterable
@@ -13,6 +13,7 @@ from psycopg2.extras import Json
 
 from db.database import get_conn, pg_fetchall
 from services.forecast_models import (
+    CalibrationResult,
     ForecastObservation,
     QuantilePrediction,
     RobustRemainderModel,
@@ -21,11 +22,14 @@ from services.forecast_models import (
     bootstrap_scenarios,
     calibrate_quantiles,
     money,
+    monotonic_prediction,
     quantile,
     rolling_origin_backtest,
     select_champion,
+    load_trusted_model_artifact,
 )
 from services.goal_planning import ScheduleConfig, occurrences_between
+from services.merchant_intelligence import merchant_key_sql, normalize_merchant_key
 
 
 log = logging.getLogger(__name__)
@@ -56,7 +60,8 @@ class KnownCommitment:
     currency: str
     reason_code: str
     public_label: str
-    baseline_overlap: bool = False
+    identity_kind: str | None = None
+    identity_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,9 +77,20 @@ class HistoricalRemainder:
     end: date
     as_of: date
     remainder: Decimal
-    operation_count: int
-    tracked_days: int
-    coverage_ratio: Decimal
+    input_operation_count: int
+    input_tracked_days: int
+    input_coverage_ratio: Decimal
+    target_tracked_days: int = 1
+    target_coverage_ratio: Decimal = Decimal("0.01")
+    input_variable_expense: Decimal = Decimal("0.00")
+
+
+@dataclass(frozen=True)
+class RegisteredChampion:
+    model: Any
+    family: str
+    version: str
+    calibration: CalibrationResult
 
 
 @dataclass(frozen=True)
@@ -96,6 +112,10 @@ class ForecastInputs:
     grouped_budgets: tuple[tuple[str, tuple[str, ...], Decimal, Decimal], ...] = ()
     current_operation_count: int = 0
     tracked_days: int = 0
+    realized_variable_expense: Decimal = Decimal("0.00")
+    default_currency: str = "RUB"
+    timezone_name: str = "UTC"
+    registered_champion: RegisteredChampion | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +177,99 @@ def unavailable(code: str) -> ForecastUnavailable:
     return ForecastUnavailable(False, code, title, description)
 
 
+def safe_identity_hash(kind: str, value: str | None) -> str | None:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return None
+    return hashlib.sha256(f"{kind}:{normalized}".encode("utf-8")).hexdigest()
+
+
+def commitment_facts(items: Iterable[KnownCommitment]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": item.source,
+            "source_id": item.source_key[:180],
+            "due_date": item.due_date.isoformat(),
+            "amount": str(money(item.amount)),
+            "currency": item.currency,
+            "identity_kind": item.identity_kind,
+            "identity_hash": item.identity_hash,
+        }
+        for item in items
+    ]
+
+
+def goal_reserve_facts(items: Iterable[GoalContribution]) -> list[dict[str, Any]]:
+    return [
+        {
+            "goal_id": item.goal_id,
+            "due_date": item.due_date.isoformat(),
+            "amount": str(money(item.amount)),
+        }
+        for item in items
+    ]
+
+
+def operation_is_deterministic(
+    operation: dict[str, Any],
+    known_facts: Iterable[dict[str, Any]],
+    *,
+    allow_source_markers: bool = True,
+) -> bool:
+    if bool(operation.get("goal_linked")):
+        return True
+    if allow_source_markers and (str(operation.get("source") or "") == "reminder" or bool(operation.get("pattern_linked"))):
+        return True
+    op_date = operation.get("op_date")
+    op_currency = str(operation.get("currency") or "").upper()
+    op_amount = money(operation.get("amount") or 0)
+    merchant_hash = safe_identity_hash("merchant", normalize_merchant_key(str(operation.get("comment") or "")))
+    category_hash = safe_identity_hash("category", str(operation.get("category") or ""))
+    for fact in known_facts:
+        try:
+            due_date = date.fromisoformat(str(fact.get("due_date")))
+        except (TypeError, ValueError):
+            continue
+        if due_date != op_date or str(fact.get("currency") or "").upper() != op_currency or money(fact.get("amount") or 0) != op_amount:
+            continue
+        identity_hash = str(fact.get("identity_hash") or "")
+        identity_kind = str(fact.get("identity_kind") or "")
+        if identity_hash and (
+            (identity_kind == "merchant" and identity_hash == merchant_hash)
+            or (identity_kind == "category" and identity_hash == category_hash)
+        ):
+            return True
+    return False
+
+
+def operation_matches_snapshot_currency(operation_currency: str | None, snapshot_currency: str, default_currency: str) -> bool:
+    if operation_currency is None:
+        return str(default_currency).upper() == str(snapshot_currency).upper()
+    return str(operation_currency).upper() == str(snapshot_currency).upper()
+
+
+def _calibration_from_metadata(raw: Any) -> CalibrationResult:
+    values = raw if isinstance(raw, dict) else {}
+    offsets = values.get("offsets")
+    sample_count = int(values.get("sample_count") or 0)
+    if (
+        values.get("state") != "calibrated"
+        or sample_count < 12
+        or not isinstance(offsets, (list, tuple))
+        or len(offsets) != 3
+        or values.get("empirical_coverage_80") is None
+        or values.get("empirical_coverage_90") is None
+    ):
+        return CalibrationResult("insufficient", (Decimal("0.00"),) * 3, sample_count, None, None)
+    return CalibrationResult(
+        "calibrated",
+        tuple(money(value) for value in offsets),
+        sample_count,
+        Decimal(str(values["empirical_coverage_80"])) if values.get("empirical_coverage_80") is not None else None,
+        Decimal(str(values["empirical_coverage_90"])) if values.get("empirical_coverage_90") is not None else None,
+    )
+
+
 def comparable_periods(period: ForecastPeriod, count: int = 18) -> tuple[tuple[date, date, date], ...]:
     out: list[tuple[date, date, date]] = []
     elapsed = max(0, (period.as_of - period.start).days)
@@ -182,7 +295,12 @@ def comparable_periods(period: ForecastPeriod, count: int = 18) -> tuple[tuple[d
 
 
 def _quality(inputs: ForecastInputs, calibration_state: str = "insufficient") -> tuple[str, str]:
-    valid = [row for row in inputs.historical if row.coverage_ratio >= Decimal("0.35") and row.operation_count > 0]
+    valid = [
+        row for row in inputs.historical
+        if row.input_coverage_ratio >= Decimal("0.35")
+        and row.input_operation_count > 0
+        and row.target_tracked_days > 0
+    ]
     if calibration_state == "calibrated" and len(valid) >= 8:
         return "calibrated", "Калиброванный прогноз"
     if len(valid) >= 6 and inputs.current_operation_count >= 8:
@@ -195,19 +313,24 @@ def _quality(inputs: ForecastInputs, calibration_state: str = "insufficient") ->
 
 
 def _forecast_observations(inputs: ForecastInputs) -> list[ForecastObservation]:
-    rows = [row for row in inputs.historical if row.coverage_ratio >= Decimal("0.35") and row.operation_count > 0]
+    rows = [
+        row for row in inputs.historical
+        if row.input_coverage_ratio >= Decimal("0.35")
+        and row.input_operation_count > 0
+        and row.target_tracked_days > 0
+    ]
     return [
         ForecastObservation(
             snapshot_key=f"{inputs.workspace_id}:{inputs.currency}:{row.start.isoformat()}:{row.as_of.isoformat()}",
             as_of_ordinal=row.as_of.toordinal(),
             horizon_days=max(0, (row.end - row.as_of).days),
             elapsed_ratio=Decimal((row.as_of - row.start).days + 1) / Decimal(max(1, (row.end - row.start).days + 1)),
-            realized_expense=Decimal("0.00"),
-            recent_daily_pace=Decimal("0.00"),
+            realized_expense=money(row.input_variable_expense),
+            recent_daily_pace=money(row.input_variable_expense / Decimal(max(1, row.input_tracked_days))),
             weekday=row.as_of.weekday(),
             cycle_day=(row.as_of - row.start).days + 1,
-            operation_count=row.operation_count,
-            coverage_ratio=row.coverage_ratio,
+            operation_count=row.input_operation_count,
+            coverage_ratio=row.input_coverage_ratio,
             target_remainder=money(row.remainder),
         )
         for row in rows
@@ -217,21 +340,29 @@ def _forecast_observations(inputs: ForecastInputs) -> list[ForecastObservation]:
 def _prediction(inputs: ForecastInputs) -> tuple[QuantilePrediction, str]:
     observations = _forecast_observations(inputs)
     values = [row.target_remainder for row in observations]
-    if not values:
-        return QuantilePrediction(Decimal("0.00"), Decimal("0.00"), Decimal("0.00"), "known_only", "known-v1"), "insufficient"
     target = ForecastObservation(
         snapshot_key="current",
         as_of_ordinal=inputs.period.as_of.toordinal(),
         horizon_days=inputs.period.horizon_days,
         elapsed_ratio=Decimal((inputs.period.as_of - inputs.period.start).days + 1) / Decimal(max(1, (inputs.period.end - inputs.period.start).days + 1)),
-        realized_expense=money(inputs.realized_expense),
-        recent_daily_pace=money(inputs.realized_expense / Decimal(max(1, inputs.tracked_days))),
+        realized_expense=money(inputs.realized_variable_expense),
+        recent_daily_pace=money(inputs.realized_variable_expense / Decimal(max(1, inputs.tracked_days))),
         weekday=inputs.period.as_of.weekday(),
         cycle_day=(inputs.period.as_of - inputs.period.start).days + 1,
         operation_count=inputs.current_operation_count,
         coverage_ratio=Decimal(inputs.tracked_days) / Decimal(max(1, (inputs.period.as_of - inputs.period.start).days + 1)),
         target_remainder=Decimal("0.00"),
     )
+    if not values:
+        if inputs.registered_champion is not None:
+            champion = inputs.registered_champion
+            try:
+                registered = champion.model.predict(target)
+                registered = QuantilePrediction(registered.q50, registered.q80, registered.q90, champion.family, champion.version)
+                return apply_calibration(registered, champion.calibration), champion.calibration.state
+            except Exception as exc:
+                log.info("forecast_registered_model_fallback reason=%s", type(exc).__name__)
+        return QuantilePrediction(Decimal("0.00"), Decimal("0.00"), Decimal("0.00"), "known_only", "known-v1"), "insufficient"
     champion_model = RobustRemainderModel().fit(observations)
     backtest = None
     if len(observations) >= 7:
@@ -267,6 +398,15 @@ def _prediction(inputs: ForecastInputs) -> tuple[QuantilePrediction, str]:
         calibration = calibrate_quantiles(list(backtest.predictions), list(backtest.actuals), minimum_samples=8)
         blended = apply_calibration(blended, calibration)
         calibration_state = calibration.state
+    if inputs.registered_champion is not None:
+        champion = inputs.registered_champion
+        try:
+            registered = champion.model.predict(target)
+            registered = QuantilePrediction(registered.q50, registered.q80, registered.q90, champion.family, champion.version)
+            registered = apply_calibration(registered, champion.calibration)
+            return registered, champion.calibration.state
+        except Exception as exc:
+            log.info("forecast_registered_model_fallback reason=%s", type(exc).__name__)
     return blended, calibration_state
 
 
@@ -277,12 +417,45 @@ def _fingerprint(inputs: ForecastInputs, prediction: QuantilePrediction, amount:
         "currency": inputs.currency,
         "period": [inputs.period.start.isoformat(), inputs.period.end.isoformat(), inputs.period.as_of.isoformat()],
         "realized": [str(money(inputs.realized_income)), str(money(inputs.realized_expense))],
-        "commitments": [(item.source, item.source_key, item.due_date.isoformat(), str(money(item.amount)), item.baseline_overlap) for item in inputs.commitments],
+        "commitments": commitment_facts(inputs.commitments),
         "goals": [(item.goal_id, item.due_date.isoformat(), str(money(item.amount))) for item in inputs.goal_contributions],
-        "history": [(item.start.isoformat(), str(money(item.remainder)), item.operation_count) for item in inputs.historical],
+        "history": [(
+            item.start.isoformat(), str(money(item.remainder)), item.input_operation_count,
+            item.input_tracked_days, str(item.input_coverage_ratio), item.target_tracked_days,
+            str(item.target_coverage_ratio), str(money(item.input_variable_expense)),
+        ) for item in inputs.historical],
+        "counts": [inputs.current_operation_count, inputs.tracked_days],
+        "variable_realized": str(money(inputs.realized_variable_expense)),
+        "general_budget": [str(money(inputs.general_budget_amount)) if inputs.general_budget_amount is not None else None, str(money(inputs.general_budget_spent))],
+        "category_limits": sorted((key, str(money(value[0])), str(money(value[1]))) for key, value in inputs.category_limits.items()),
+        "grouped_budgets": sorted((name, sorted(categories), str(money(total)), str(money(spent))) for name, categories, total, spent in inputs.grouped_budgets),
         "model": [prediction.family, prediction.version],
         "amount": str(money(amount)),
+        "feature_schema": FEATURE_SCHEMA_VERSION,
         "risk": RISK_POLICY_VERSION,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def forecast_source_fingerprint(inputs: ForecastInputs) -> str:
+    payload = {
+        "scope": [inputs.user_id, inputs.workspace_id, inputs.currency, inputs.default_currency, inputs.timezone_name],
+        "period": [inputs.period.key, inputs.period.start.isoformat(), inputs.period.end.isoformat(), inputs.period.as_of.isoformat()],
+        "realized": [str(money(inputs.realized_income)), str(money(inputs.realized_expense)), str(money(inputs.realized_variable_expense))],
+        "coverage": [inputs.current_operation_count, inputs.tracked_days],
+        "commitments": commitment_facts(inputs.commitments),
+        "goals": goal_reserve_facts(inputs.goal_contributions),
+        "history": [(
+            item.start.isoformat(), item.end.isoformat(), item.as_of.isoformat(),
+            str(money(item.remainder)), item.input_operation_count, item.input_tracked_days,
+            str(item.input_coverage_ratio), item.target_tracked_days, str(item.target_coverage_ratio),
+            str(money(item.input_variable_expense)),
+        ) for item in inputs.historical],
+        "budget": [str(money(inputs.general_budget_amount)) if inputs.general_budget_amount is not None else None, str(money(inputs.general_budget_spent))],
+        "category_limits": sorted((key, str(money(total)), str(money(spent))) for key, (total, spent) in inputs.category_limits.items()),
+        "grouped_budgets": sorted((name, sorted(categories), str(money(total)), str(money(spent))) for name, categories, total, spent in inputs.grouped_budgets),
+        "feature_schema": FEATURE_SCHEMA_VERSION,
+        "risk_policy": RISK_POLICY_VERSION,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -305,18 +478,15 @@ def _trajectory(inputs: ForecastInputs, prediction: QuantilePrediction) -> tuple
 
 
 def calculate_spendable(inputs: ForecastInputs, *, calibration_state: str | None = None) -> SpendableForecast:
-    gross_prediction, measured_calibration_state = _prediction(inputs)
+    prediction, measured_calibration_state = _prediction(inputs)
+    prediction = monotonic_prediction(
+        (max(Decimal("0.00"), prediction.q50), max(Decimal("0.00"), prediction.q80), max(Decimal("0.00"), prediction.q90)),
+        prediction.family,
+        prediction.version,
+    )
     calibration_state = calibration_state or measured_calibration_state
     current_result = money(inputs.realized_income - inputs.realized_expense)
     commitments = money(sum((item.amount for item in inputs.commitments), Decimal("0.00")))
-    baseline_overlap = money(sum((item.amount for item in inputs.commitments if item.baseline_overlap), Decimal("0.00")))
-    prediction = QuantilePrediction(
-        money(max(Decimal("0.00"), gross_prediction.q50 - baseline_overlap)),
-        money(max(Decimal("0.00"), gross_prediction.q80 - baseline_overlap)),
-        money(max(Decimal("0.00"), gross_prediction.q90 - baseline_overlap)),
-        gross_prediction.family,
-        gross_prediction.version,
-    )
     goals = money(sum((item.amount for item in inputs.goal_contributions), Decimal("0.00")))
     variable_reserve = money(max(Decimal("0.00"), prediction.q80))
     raw_spendable = money(current_result - commitments - goals - variable_reserve)
@@ -369,7 +539,7 @@ def calculate_spendable(inputs: ForecastInputs, *, calibration_state: str | None
         model_version=prediction.version,
         risk_policy_version=RISK_POLICY_VERSION,
         calibration_state=calibration_state,
-        history_periods=len([item for item in inputs.historical if item.operation_count > 0]),
+        history_periods=len([item for item in inputs.historical if item.input_operation_count > 0 and item.target_tracked_days > 0]),
         reasons=tuple(reasons[:4]),
         trajectory=_trajectory(inputs, prediction),
         fingerprint=fingerprint,
@@ -458,16 +628,88 @@ def deduplicate_commitments(items: Iterable[KnownCommitment]) -> tuple[KnownComm
             and money(existing.amount) == money(item.amount)
             and priority.get(existing.source, 9) < priority.get(item.source, 9)
         ]
-        if matching_higher_priority:
-            if item.baseline_overlap:
-                index = matching_higher_priority[0]
-                selected[index] = replace(selected[index], baseline_overlap=True)
-        else:
+        if not matching_higher_priority:
             selected.append(item)
     return tuple(sorted(selected, key=lambda item: (item.due_date, item.source, item.source_key)))
 
 
 class ForecastRepository:
+    def _deterministic_expense_sql(self, alias: str = "o") -> str:
+        merchant = merchant_key_sql(f"{alias}.comment")
+        return f"""(
+            COALESCE({alias}.source,'')='reminder'
+            OR EXISTS (
+                SELECT 1 FROM public.goal_movements gm
+                 WHERE gm.linked_operation_id={alias}.id
+                   AND gm.movement_type IN ('initial','contribution')
+            )
+            OR EXISTS (
+                SELECT 1 FROM public.subscription_patterns sp
+                 WHERE sp.user_id={alias}.user_id
+                   AND sp.workspace_id IS NOT DISTINCT FROM {alias}.workspace_id
+                   AND sp.currency={alias}.currency
+                   AND (sp.last_operation_id={alias}.id OR (
+                       sp.normalized_merchant={merchant}
+                       AND sp.amount IS NOT NULL AND sp.amount={alias}.amount
+                   ))
+            )
+            OR EXISTS (
+                SELECT 1 FROM public.recurring_spend_patterns rp
+                 WHERE rp.user_id={alias}.user_id
+                   AND rp.workspace_id IS NOT DISTINCT FROM {alias}.workspace_id
+                   AND rp.currency={alias}.currency
+                   AND rp.status IN ('detected','subscription')
+                   AND rp.normalized_merchant={merchant}
+                   AND lower(rp.category)=lower(COALESCE({alias}.category,''))
+                   AND rp.average_amount={alias}.amount
+            )
+        )"""
+
+    def _registered_champion(self, as_of: date) -> RegisteredChampion | None:
+        from settings import FORECAST_MODEL_DIR
+
+        if not FORECAST_MODEL_DIR:
+            return None
+        try:
+            rows = pg_fetchall(
+                """
+                SELECT model_family, model_version, artifact_path, artifact_sha256,
+                       feature_schema_version, risk_policy_version, training_cutoff,
+                       metrics, calibration
+                  FROM public.forecast_model_registry
+                 WHERE status='champion'
+                 ORDER BY updated_at DESC, id DESC LIMIT 1
+                """
+            )
+            if not rows:
+                return None
+            family, version, artifact_path, checksum, feature_schema, risk_policy, cutoff, metrics, calibration = rows[0]
+            metric_values = metrics if isinstance(metrics, dict) else {}
+            if (
+                feature_schema != FEATURE_SCHEMA_VERSION
+                or risk_policy != RISK_POLICY_VERSION
+                or cutoff is None
+                or cutoff > as_of
+                or not metric_values.get("guardrail_eligible")
+                or int(metric_values.get("folds") or 0) < 1
+            ):
+                log.info("forecast_registered_model_fallback reason=registry_incompatible")
+                return None
+            model, metadata = load_trusted_model_artifact(
+                FORECAST_MODEL_DIR,
+                artifact_path,
+                str(checksum),
+                expected_feature_schema=FEATURE_SCHEMA_VERSION,
+            )
+            if metadata.get("risk_policy") != RISK_POLICY_VERSION or metadata.get("model_family") != family or metadata.get("model_version") != version:
+                raise ValueError("model_artifact_metadata_mismatch")
+            return RegisteredChampion(model, str(family), str(version), _calibration_from_metadata(calibration))
+        except errors.UndefinedTable:
+            return None
+        except Exception as exc:
+            log.info("forecast_registered_model_fallback reason=%s", type(exc).__name__)
+            return None
+
     def _scope(self, user_id: int, workspace_id: int | None) -> tuple[str, tuple[Any, ...]]:
         if workspace_id is None:
             return "o.workspace_id IS NULL AND o.user_id=%s", (int(user_id),)
@@ -482,19 +724,23 @@ class ForecastRepository:
         currency: str,
         period: ForecastPeriod,
         default_currency: str,
+        timezone_name: str = "UTC",
     ) -> ForecastInputs:
         scope, scope_params = self._scope(user_id, workspace_id)
+        deterministic = self._deterministic_expense_sql("o")
         current = pg_fetchall(
             f"""
-            SELECT COALESCE(SUM(o.amount) FILTER (WHERE o.type='Доходы'),0),
-                   COALESCE(SUM(o.amount) FILTER (WHERE o.type='Расходы'),0),
-                   COUNT(*) FILTER (WHERE o.type IN ('Доходы','Расходы')),
-                   COUNT(DISTINCT o.op_date)
+            SELECT COALESCE(SUM(o.amount) FILTER (WHERE o.type='Доходы' AND COALESCE(o.category,'')<>'Без операций'),0),
+                   COALESCE(SUM(o.amount) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций'),0),
+                   COUNT(*) FILTER (WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций' AND NOT {deterministic}),
+                   COUNT(DISTINCT o.op_date),
+                   COALESCE(SUM(o.amount) FILTER (
+                       WHERE o.type='Расходы' AND COALESCE(o.category,'')<>'Без операций' AND NOT {deterministic}
+                   ),0)
               FROM public.operations o
              WHERE {scope}
                AND o.op_date BETWEEN %s AND %s
                AND COALESCE(o.currency,%s)=%s
-               AND COALESCE(o.category,'')<>'Без операций'
             """,
             (*scope_params, period.start, period.as_of, default_currency, currency),
         )[0]
@@ -521,37 +767,65 @@ class ForecastRepository:
             grouped_budgets=grouped,
             current_operation_count=int(current[2] or 0),
             tracked_days=int(current[3] or 0),
+            realized_variable_expense=money(current[4]),
+            default_currency=default_currency,
+            timezone_name=timezone_name,
+            registered_champion=self._registered_champion(period.as_of),
         )
 
     def _history(self, user_id: int, workspace_id: int | None, currency: str, default_currency: str, period: ForecastPeriod) -> tuple[HistoricalRemainder, ...]:
         periods = comparable_periods(period)
         scope, params = self._scope(user_id, workspace_id)
+        deterministic = self._deterministic_expense_sql("o")
         rows = pg_fetchall(
             f"""
             SELECT o.op_date,
-                   COALESCE(SUM(o.amount) FILTER (WHERE o.type='Расходы'),0),
-                   COUNT(*) FILTER (WHERE o.type='Расходы')
+                   COALESCE(SUM(o.amount) FILTER (
+                       WHERE o.type='Расходы'
+                         AND COALESCE(o.category,'')<>'Без операций'
+                         AND NOT {deterministic}
+                   ),0),
+                   COUNT(*) FILTER (
+                       WHERE o.type='Расходы'
+                         AND COALESCE(o.category,'')<>'Без операций'
+                         AND NOT {deterministic}
+                   ),
+                   COUNT(*)
               FROM public.operations o
              WHERE {scope}
                AND o.op_date BETWEEN %s AND %s
                AND COALESCE(o.currency,%s)=%s
-               AND COALESCE(o.category,'')<>'Без операций'
              GROUP BY o.op_date
              ORDER BY o.op_date
             """,
             (*params, periods[0][0], periods[-1][1], default_currency, currency),
         )
-        daily = {row[0]: (money(row[1]), int(row[2] or 0)) for row in rows}
+        daily = {row[0]: (money(row[1]), int(row[2] or 0), int(row[3] or 0)) for row in rows}
         values = []
         for start, end, as_of in periods:
+            input_days = [day for day in daily if start <= day <= as_of]
             future_days = [day for day in daily if as_of < day <= end]
-            all_days = [day for day in daily if start <= day <= end]
             remainder = sum((daily[day][0] for day in future_days), Decimal("0.00"))
-            count = sum(daily[day][1] for day in all_days)
-            tracked = len(all_days)
+            input_variable = sum((daily[day][0] for day in input_days), Decimal("0.00"))
+            input_count = sum(daily[day][1] for day in input_days)
+            input_tracked = len([day for day in input_days if daily[day][2] > 0])
+            target_tracked = len([day for day in future_days if daily[day][2] > 0])
             elapsed_days = max(1, (as_of - start).days + 1)
-            coverage = min(Decimal("1"), Decimal(tracked) / Decimal(elapsed_days))
-            values.append(HistoricalRemainder(start, end, as_of, money(remainder), count, tracked, coverage))
+            horizon_days = max(1, (end - as_of).days)
+            input_coverage = min(Decimal("1"), Decimal(input_tracked) / Decimal(elapsed_days))
+            target_coverage = min(Decimal("1"), Decimal(target_tracked) / Decimal(horizon_days))
+            values.append(HistoricalRemainder(
+                start,
+                end,
+                as_of,
+                money(remainder),
+                input_count,
+                input_tracked,
+                input_coverage,
+                target_tracked,
+                target_coverage,
+                money(input_variable),
+            ))
         return tuple(values)
 
     def _commitments(self, user_id: int, workspace_id: int | None, workspace_kind: str, currency: str, period: ForecastPeriod) -> tuple[tuple[KnownCommitment, ...], Decimal]:
@@ -581,7 +855,11 @@ class ForecastRepository:
                 continue
             if rem_type != "Расходы":
                 continue
-            items.append(KnownCommitment("reminder", str(rid), due, money(amount), row_currency, "future_expense_reminder", "Будущий платёж"))
+            items.append(KnownCommitment(
+                "reminder", str(rid), due, money(amount), row_currency,
+                "future_expense_reminder", "Будущий платёж",
+                "category", safe_identity_hash("category", str(category or "")),
+            ))
         pattern_rows = pg_fetchall(
             """
             SELECT 'subscription', id, next_expected_on, amount, currency, normalized_merchant
@@ -605,7 +883,11 @@ class ForecastRepository:
         for source, pid, due, amount, row_currency, merchant_key in pattern_rows:
             if amount is None or due is None:
                 continue
-            items.append(KnownCommitment(source, f"{source}:{pid}:{merchant_key}", due, money(amount), row_currency, "recurring_commitment", "Регулярный платёж", True))
+            items.append(KnownCommitment(
+                source, f"{source}:{pid}", due, money(amount), row_currency,
+                "recurring_commitment", "Регулярный платёж",
+                "merchant", safe_identity_hash("merchant", str(merchant_key or "")),
+            ))
         return deduplicate_commitments(items), money(expected_income)
 
     def _goals(self, user_id: int, workspace_id: int | None, currency: str, period: ForecastPeriod) -> tuple[GoalContribution, ...]:
@@ -709,17 +991,20 @@ class ForecastRepository:
         features = {
             "realized_income": str(inputs.realized_income),
             "realized_expense": str(inputs.realized_expense),
+            "realized_variable_expense": str(inputs.realized_variable_expense),
             "operation_count": inputs.current_operation_count,
             "tracked_days": inputs.tracked_days,
             "elapsed_days": max(1, (inputs.period.as_of - inputs.period.start).days + 1),
             "elapsed_ratio": str(Decimal((inputs.period.as_of - inputs.period.start).days + 1) / Decimal(max(1, (inputs.period.end - inputs.period.start).days + 1))),
             "cycle_day": (inputs.period.as_of - inputs.period.start).days + 1,
-            "recent_daily_pace": str(money(inputs.realized_expense / Decimal(max(1, inputs.tracked_days)))),
+            "recent_daily_pace": str(money(inputs.realized_variable_expense / Decimal(max(1, inputs.tracked_days)))),
             "history_periods": forecast.history_periods,
             "commitment_count": forecast.known_commitment_count,
             "horizon_days": inputs.period.horizon_days,
         }
-        source_fingerprint = hashlib.sha256(json.dumps(features, sort_keys=True).encode("utf-8")).hexdigest()
+        source_fingerprint = forecast_source_fingerprint(inputs)
+        known_facts = commitment_facts(inputs.commitments)
+        goal_facts = goal_reserve_facts(inputs.goal_contributions)
         conn = get_conn()
         try:
             with conn.cursor() as cur:
@@ -727,13 +1012,21 @@ class ForecastRepository:
                     """
                     INSERT INTO public.forecast_snapshots
                       (user_id, workspace_id, currency, period_key, period_start, period_end,
-                       as_of_date, horizon_days, feature_schema_version, features, source_fingerprint)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       as_of_date, horizon_days, legacy_default_currency, timezone_name,
+                       feature_schema_version, features, known_commitment_facts,
+                       goal_reserve_facts, source_fingerprint)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (user_id, workspace_scope_key, currency, period_start, period_end, as_of_date, source_fingerprint)
                     DO UPDATE SET updated_at=now()
                     RETURNING id
                     """,
-                    (inputs.user_id, inputs.workspace_id, inputs.currency, inputs.period.key, inputs.period.start, inputs.period.end, inputs.period.as_of, inputs.period.horizon_days, FEATURE_SCHEMA_VERSION, Json(features), source_fingerprint),
+                    (
+                        inputs.user_id, inputs.workspace_id, inputs.currency, inputs.period.key,
+                        inputs.period.start, inputs.period.end, inputs.period.as_of,
+                        inputs.period.horizon_days, inputs.default_currency, inputs.timezone_name,
+                        FEATURE_SCHEMA_VERSION, Json(features), Json(known_facts), Json(goal_facts),
+                        source_fingerprint,
+                    ),
                 )
                 snapshot_id = int(cur.fetchone()[0])
                 cur.execute(

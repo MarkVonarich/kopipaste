@@ -24,6 +24,8 @@ Every forecast is scoped to authenticated user, one concrete workspace, one curr
 
 Commitments reuse active future expense reminders, confirmed/detected subscriptions, and sufficiently confident recurring-spend patterns. Scope, currency, due-date and recorded-reminder filters are applied in SQL. Cross-source same-date/currency/amount matches prefer explicit reminders, while distinct explicit reminders remain distinct. Expected income reminders are separated.
 
+The decomposition is canonical: `future total expense = deterministic commitments + ordinary variable expense`. Reminder-created operations, goal-linked contribution operations, exact canonical subscription/recurring pattern matches, and exact forecast-time commitment-fact matches are deterministic and excluded from `V`. Historical remainders aggregate only the remaining variable operations. Snapshot outcomes use the facts persisted with that prediction rather than reconstructing commitments from mutable current state. No current commitment total is subtracted from an unrelated historical distribution.
+
 Goal reserve reuses the existing goal schedule engine. Only active same-workspace/same-currency goals with deterministic occurrences inside the horizon contribute. Paused, achieved, archived, deleted or unscheduled goals do not.
 
 The general budget may cap Spendable. Existing category limits and category budget groups remain authoritative for can-spend constraints. Their values are not subtracted as expenses.
@@ -56,11 +58,15 @@ Migration `20260813_024_advanced_forecasting_home.sql` adds:
 - `forecast_feedback`: one useful/not-useful decision per user/workspace/fingerprint;
 - additive category-limit `display_name` and `alerts_enabled` columns.
 
-Overview calculation writes an idempotent current snapshot. The scheduler finalizes at most 200 completed outcomes per run with `FOR UPDATE SKIP LOCKED`. `forecast_backfill.py` is dry-run by default. `forecast_backtest.py` and `forecast_train.py --synthetic` provide safe synthetic validation. Production training is not invoked by HTTP or scheduler.
+Overview calculation writes an idempotent current snapshot. Forecast-time snapshots also preserve privacy-safe commitment/goal facts, canonical legacy-default currency, and timezone. Input-side operation count, tracked days, coverage, and variable pace stop at historical `as_of`; target-side tracking evidence only gates target quality and never enters model features.
+
+The scheduler finalizes at most 200 candidates per run with `FOR UPDATE SKIP LOCKED` and checks the user-local date before writing outcomes. NULL-currency operations belong only to the snapshot's canonical default currency. `forecast_backfill.py` is dry-run by default. `forecast_backtest.py` and `forecast_train.py --synthetic` provide safe synthetic validation. `--from-snapshots --execute --limit N` enables the bounded finalized-snapshot pipeline behind advisory locking and DSN safety gates; it is never invoked by HTTP or scheduler.
+
+Online inference first builds one current observation and a personal robust/seasonal fallback. It may replace that fallback only with the registered champion when schema, risk policy, training cutoff, guardrail metrics, trusted-directory path, artifact metadata, and SHA-256 all validate. Stored calibration is accepted only with at least 12 rolling out-of-sample residuals and empirical coverage metadata. Any registry or artifact failure returns the truthful personal fallback and its actual family/version.
 
 ## Can-Spend
 
-The backend recalculates consequences for an amount and optional category. It returns `fits`, `borderline`, `does_not_fit`, or `insufficient_data`, plus before/after Spendable, matching general/category/grouped controls, protected goal reserve and risk change. Expected income remains unavailable cash. The frontend never reproduces financial calculations.
+The backend recalculates consequences for an amount and optional category. It returns `fits`, `borderline`, `does_not_fit`, or `insufficient_data`, plus before/after Spendable, matching general/category/grouped controls, protected goal reserve and risk change. Purchase date is intentionally absent until the product has a defensible date-sensitive policy. Expected income remains unavailable cash. The frontend never reproduces financial calculations.
 
 ## Insights And Experiments
 

@@ -18,19 +18,37 @@ CREATE TABLE IF NOT EXISTS public.forecast_snapshots (
     period_end DATE NOT NULL,
     as_of_date DATE NOT NULL,
     horizon_days INTEGER NOT NULL CHECK (horizon_days >= 0),
+    legacy_default_currency TEXT NOT NULL,
+    timezone_name TEXT NOT NULL,
     feature_schema_version TEXT NOT NULL,
     features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    known_commitment_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    goal_reserve_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
     source_fingerprint CHAR(64) NOT NULL,
     actual_variable_expense NUMERIC(18,2),
     actual_end_result NUMERIC(18,2),
+    target_operation_count INTEGER,
+    target_tracked_days INTEGER,
+    target_coverage_ratio NUMERIC(8,6),
     outcome_finalized_at TIMESTAMPTZ,
     invalidated_at TIMESTAMPTZ,
     invalidation_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT forecast_snapshots_period_valid CHECK (period_end >= period_start),
-    CONSTRAINT forecast_snapshots_features_object CHECK (jsonb_typeof(features) = 'object')
+    CONSTRAINT forecast_snapshots_features_object CHECK (jsonb_typeof(features) = 'object'),
+    CONSTRAINT forecast_snapshots_commitment_facts_array CHECK (jsonb_typeof(known_commitment_facts) = 'array'),
+    CONSTRAINT forecast_snapshots_goal_facts_array CHECK (jsonb_typeof(goal_reserve_facts) = 'array')
 );
+
+ALTER TABLE public.forecast_snapshots
+    ADD COLUMN IF NOT EXISTS legacy_default_currency TEXT NOT NULL DEFAULT 'RUB',
+    ADD COLUMN IF NOT EXISTS timezone_name TEXT NOT NULL DEFAULT 'Europe/Moscow',
+    ADD COLUMN IF NOT EXISTS known_commitment_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS goal_reserve_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS target_operation_count INTEGER,
+    ADD COLUMN IF NOT EXISTS target_tracked_days INTEGER,
+    ADD COLUMN IF NOT EXISTS target_coverage_ratio NUMERIC(8,6);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_forecast_snapshots_source
     ON public.forecast_snapshots(

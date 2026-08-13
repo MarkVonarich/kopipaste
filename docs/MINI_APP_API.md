@@ -223,7 +223,7 @@ Only safe coarse properties are accepted: `tab`, `period`, `scope`, `action`, `c
 
 `GET /miniapp/api/forecast/spendable` accepts the normal workspace, period/custom dates and currency filters. It returns the authoritative breakdown, q50/q80/q90 variable forecast, budget headroom, expected period-end result, forecast band, reason codes, model/risk-policy versions and quality/calibration state. Expected future income is explanatory only and is excluded from the primary number.
 
-`POST /miniapp/api/forecast/can-spend` accepts `workspace_id`, `currency`, period fields, positive `amount`, optional `category` and optional `purchase_date`. The server returns `fits`, `borderline`, `does_not_fit` or `insufficient_data` and the resulting Spendable/control impacts.
+`POST /miniapp/api/forecast/can-spend` accepts `workspace_id`, `currency`, period fields, positive `amount`, and optional `category`. Purchase date is not accepted because this release has no defensible date-sensitive decision policy. The server returns `fits`, `borderline`, `does_not_fit` or `insufficient_data` and the resulting Spendable/control impacts.
 
 `POST /miniapp/api/forecast/{fingerprint}/feedback` accepts `workspace_id` and `feedback_type=useful|not_useful`. Duplicate feedback is protected by user/workspace/fingerprint uniqueness. `POST /miniapp/api/forecast/exposure` records only a validated rendered surface and quality tier; it cannot alter forecast policy.
 

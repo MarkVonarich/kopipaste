@@ -1091,6 +1091,7 @@ class MiniAppAPI:
             currency=currency,
             period=period,
             default_currency=get_user_currency(req.user_id),
+            timezone_name=user_timezone_name(req.user_id, workspace_id)[0],
         )
         forecast = calculate_spendable(inputs)
         if persist:
@@ -1161,6 +1162,8 @@ class MiniAppAPI:
 
     def forecast_can_spend(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
         self._check_write_rate(req)
+        if "purchase_date" in body:
+            raise MiniAppError(400, "unsupported_forecast_purchase_date", "Дата покупки пока не используется в расчёте.")
         params = {
             "workspace_id": body.get("workspace_id"),
             "period": body.get("period") or "current_month",
@@ -1176,14 +1179,6 @@ class MiniAppAPI:
             category = str(body.get("category") or "").strip() or None
             if category:
                 category = self._validate_category(req, inputs.workspace_id, "Расходы", category)
-            purchase_date_raw = str(body.get("purchase_date") or "").strip()
-            if purchase_date_raw:
-                try:
-                    purchase_date = date.fromisoformat(purchase_date_raw)
-                except ValueError as exc:
-                    raise MiniAppError(400, "bad_forecast_purchase_date", "Проверьте дату покупки.") from exc
-                if purchase_date < inputs.period.as_of or purchase_date > inputs.period.end:
-                    raise MiniAppError(400, "bad_forecast_purchase_date", "Дата покупки должна быть внутри оставшейся части периода.")
             result = calculate_can_spend(inputs, forecast, amount, category)
         except MoneyParseError as exc:
             raise MiniAppError(400, "bad_forecast_amount", "Проверьте сумму покупки.") from exc
