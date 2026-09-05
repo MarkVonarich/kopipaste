@@ -355,21 +355,24 @@ describe('main plan handlers', () => {
     delete window.Telegram;
   });
 
-  it('keeps only three primary Home filters and applies secondary filters from Еще', async () => {
+  it('keeps the same three primary filters on every tab and applies secondary filters from Еще', async () => {
     const api = installAppMocks();
     await import('../src/main');
     await flush();
 
-    const primary = document.querySelector('.home-primary-filters');
-    expect(primary?.children).toHaveLength(3);
-    expect(primary?.querySelector('[aria-label="Пространство"]')).not.toBeNull();
-    expect(primary?.querySelector('[aria-label="Период"]')).not.toBeNull();
-    expect(primary?.querySelector('[data-action="home-filters-open"]')?.textContent).toContain('Еще');
-    expect(primary?.querySelector('[data-action="global-currency"]')).toBeNull();
-    expect(primary?.querySelector('[data-action="operation-type"]')).toBeNull();
-    expect(primary?.querySelector('[data-action="category-filter"]')).toBeNull();
+    const expectCompactFilters = () => {
+      const primary = document.querySelector('.primary-filter-strip');
+      expect(primary?.children).toHaveLength(3);
+      expect(primary?.querySelector('[aria-label="Пространство"]')).not.toBeNull();
+      expect(primary?.querySelector('[aria-label="Период"]')).not.toBeNull();
+      expect(primary?.querySelector('[data-action="global-filters-open"]')?.textContent).toContain('Еще');
+      expect(primary?.querySelector('[data-action="global-currency"]')).toBeNull();
+      expect(primary?.querySelector('[data-action="operation-type"]')).toBeNull();
+      expect(primary?.querySelector('[data-action="category-filter"]')).toBeNull();
+    };
+    expectCompactFilters();
 
-    document.querySelector<HTMLButtonElement>('[data-action="home-filters-open"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="global-filters-open"]')?.click();
     expect(document.querySelector('[data-sheet]')?.getAttribute('aria-label')).toBe('Еще');
     expect(document.querySelector('[data-action="global-currency"]')).not.toBeNull();
     expect(document.querySelector('[data-action="operation-type"]')).not.toBeNull();
@@ -389,6 +392,12 @@ describe('main plan handlers', () => {
     expect(document.querySelector('[data-sheet]')).toBeNull();
     expect(document.querySelector<HTMLSelectElement>('[aria-label="Пространство"]')?.value).toBe('10');
     expect(document.querySelector<HTMLSelectElement>('[aria-label="Период"]')?.value).toBe('current_month');
+
+    for (const tab of ['analytics', 'operations', 'plans', 'profile']) {
+      document.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`)?.click();
+      await flush(8);
+      expectCompactFilters();
+    }
   });
 
   it('opens escaped OPEN_DETAIL copy in a sheet, stays on Home, and closes with Telegram Back', async () => {
@@ -541,8 +550,10 @@ describe('main plan handlers', () => {
       currency: 'RUB',
     }));
     expect(document.querySelector<HTMLSelectElement>('[data-action="period"]')?.value).toBe('current_month');
+    document.querySelector<HTMLButtonElement>('[data-action="global-filters-open"]')?.click();
     expect(document.querySelector<HTMLSelectElement>('[data-action="operation-type"]')?.value).toBe('all');
     expect(document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')?.value).toBe('all');
+    document.querySelector<HTMLButtonElement>('[data-action="close-sheet"]')?.click();
 
     backHandler?.();
     await flush(8);
@@ -693,6 +704,27 @@ describe('main plan handlers', () => {
     document.querySelector<HTMLSelectElement>('[data-action="period"]')?.dispatchEvent(new Event('change'));
     await flush(8);
     expect(document.querySelector<HTMLButtonElement>('[data-action="forecast-feedback"]')?.dataset.fingerprint).toBe(newFingerprint);
+  });
+
+  it('keeps useful insight feedback resolved when a revisited overview response is stale', async () => {
+    const api = installAppMocks([homeInsight()]);
+    await import('../src/main');
+    await flush();
+
+    document.querySelector<HTMLButtonElement>('[data-action="home-insight-feedback"][data-feedback="useful"]')?.click();
+    await flush(8);
+    expect(api.insightFeedback).toHaveBeenCalledWith('a'.repeat(64), 10, 'useful');
+    expect(document.querySelector('[data-action="home-insight-feedback"]')).toBeNull();
+    expect(document.body.textContent).toContain('Спасибо');
+
+    document.querySelector<HTMLButtonElement>('[data-tab="analytics"]')?.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-tab="home"]')?.click();
+    await flush(8);
+
+    expect(api.overview).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[data-action="home-insight-feedback"]')).toBeNull();
+    expect(document.body.textContent).toContain('Спасибо');
   });
 
   it('keeps What’s New fixed even when legacy preferences disabled it', async () => {
@@ -1023,7 +1055,7 @@ describe('main plan handlers', () => {
     await import('../src/main');
     await flush();
 
-    document.querySelector<HTMLButtonElement>('[data-action="home-filters-open"]')?.click();
+    document.querySelector<HTMLButtonElement>('[data-action="global-filters-open"]')?.click();
     const categoryFilter = document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')!;
     categoryFilter.value = 'Food';
     categoryFilter.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1043,6 +1075,7 @@ describe('main plan handlers', () => {
 
     expect(api.deleteCategory).toHaveBeenCalledWith('food', { workspace_id: 10, type: 'expense', transfer_to: 'Other' });
     expect(document.querySelector('[data-action="category-open"][data-token="food"]')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-action="global-filters-open"]')?.click();
     expect(document.querySelector<HTMLSelectElement>('[data-action="category-filter"]')?.value).toBe('all');
   });
 

@@ -606,7 +606,7 @@ export type AppState = {
   formDraft?: Partial<Operation>;
   confirmDeleteId?: number;
   dirty: boolean;
-  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'activity-detail' | 'spendable-detail' | 'can-spend-result' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'vacation' | 'privacy-history' | 'privacy-account' | 'home-settings' | 'home-filters' | 'shopping-list';
+  sheet: null | 'add-expense' | 'add-income' | 'actions' | 'insight-detail' | 'announcement-detail' | 'activity-detail' | 'spendable-detail' | 'can-spend-result' | 'goal-create' | 'goal-detail' | 'goal-edit' | 'goal-contribution' | 'limit-create' | 'limit-edit' | 'reminder-create' | 'reminder-edit' | 'reminder-detail' | 'reminder-workspace-select' | 'category-budget-create' | 'category-budget-edit' | 'category-detail' | 'category-create' | 'category-rename' | 'category-delete' | 'premium' | 'export' | 'menu' | 'profile-name' | 'profile-currency' | 'profile-timezone' | 'profile-workspace' | 'quiet-hours' | 'vacation' | 'privacy-history' | 'privacy-account' | 'home-settings' | 'global-filters' | 'shopping-list';
   spendableForecast?: SpendableForecast;
   canSpendResult?: CanSpendResult;
   profileAccordion?: ProfileSection | null;

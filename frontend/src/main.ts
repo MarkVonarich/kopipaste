@@ -57,6 +57,7 @@ let homeScreenCheckSeq = 0;
 const impressedInsightIds = new Set<string>();
 const impressedAnnouncementIds = new Set<string>();
 const rejectedInsightIds = new Set<string>();
+const resolvedInsightFeedback = new Map<string, NonNullable<Insight['feedback']>>();
 const impressedForecasts = new Set<string>();
 let suppressPlanningCategoryClick = '';
 let cancelPlanningDrag: (() => void) | null = null;
@@ -253,26 +254,42 @@ function planningPayload(form: HTMLFormElement, kind: PlanningPayload['kind']): 
   };
 }
 
-function renderSecondaryFilters(surface: 'toolbar' | 'sheet'): string {
+function insightFeedbackKey(workspaceId: number | 'all' | null, insightId: string): string {
+  return `${workspaceId ?? 'personal'}:${insightId}`;
+}
+
+function rememberInsightFeedback(workspaceId: number | 'all' | null, insightId: string, feedback: NonNullable<Insight['feedback']>): void {
+  resolvedInsightFeedback.set(insightFeedbackKey(workspaceId, insightId), feedback);
+}
+
+function restoreInsightFeedback(workspaceId: number | 'all' | null, insight: Insight): Insight {
+  const key = insightFeedbackKey(workspaceId, insight.id);
+  if (insight.feedback) {
+    resolvedInsightFeedback.set(key, insight.feedback);
+    return insight;
+  }
+  const feedback = resolvedInsightFeedback.get(key);
+  return feedback ? { ...insight, feedback } : insight;
+}
+
+function renderSecondaryFilters(): string {
   const filters = activeFilters();
   const currencies = Array.from(new Set([state.boot?.user.currency || 'RUB', ...(profile?.available_currencies || []), 'RUB', 'USD', 'EUR']));
   const categoryOptionsHtml = [
     `<option value="all" ${filters.category === 'all' ? 'selected' : ''}>Все категории</option>`,
     ...globalCategoryOptions.map((category) => `<option value="${esc(category.name)}" ${filters.category === category.name ? 'selected' : ''}>${esc(category.name)}</option>`)
   ].join('');
-  const fieldClass = surface === 'sheet' ? 'field' : 'toolbar-field';
-  const controlClass = surface === 'sheet' ? 'select' : 'select compact';
   return `
-      <label class="${fieldClass}"><span>Валюта</span><select class="${controlClass}" data-action="global-currency" aria-label="Валюта">
+      <label class="field"><span>Валюта</span><select class="select" data-action="global-currency" aria-label="Валюта">
         ${currencies.map((currency) => `<option value="${esc(currency)}" ${filters.currency === currency || (!filters.currency && state.boot?.user.currency === currency) ? 'selected' : ''}>${esc(currency)}</option>`).join('')}
       </select></label>
-      <label class="${fieldClass}"><span>Тип</span><select class="${controlClass}" data-action="operation-type" aria-label="Тип операции">
+      <label class="field"><span>Тип</span><select class="select" data-action="operation-type" aria-label="Тип операции">
         <option value="all" ${filters.operation_type === 'all' ? 'selected' : ''}>Все операции</option>
         <option value="expense" ${filters.operation_type === 'expense' ? 'selected' : ''}>Расходы</option>
         <option value="income" ${filters.operation_type === 'income' ? 'selected' : ''}>Доходы</option>
       </select></label>
-      <label class="${fieldClass}"><span>Категория</span><select class="${controlClass}" data-action="category-filter" aria-label="Категория">${categoryOptionsHtml}</select></label>
-      ${surface === 'sheet' && filters.period === 'custom' ? `
+      <label class="field"><span>Категория</span><select class="select" data-action="category-filter" aria-label="Категория">${categoryOptionsHtml}</select></label>
+      ${filters.period === 'custom' ? `
         <label class="field"><span>Начало</span><input class="input" type="date" data-action="start-date" value="${esc(filters.start_date || '')}" /></label>
         <label class="field"><span>Конец</span><input class="input" type="date" data-action="end-date" value="${esc(filters.end_date || '')}" /></label>
       ` : ''}
@@ -296,21 +313,9 @@ function renderTopbar(): string {
       ${periodOptions.map(([key, label]) => `<option value="${key}" ${filters.period === key ? 'selected' : ''}>${label}</option>`).join('')}
     </select></label>`;
 
-  if (state.tab === 'home') {
-    return `<div class="toolbar global-filter-strip home-primary-filters" aria-label="Фильтры">${primary}
-      <button class="toolbar-more-filter" type="button" data-action="home-filters-open" aria-label="Еще"><span>Еще</span><span aria-hidden="true">•••</span></button>
-    </div>`;
-  }
-
-  return `
-    <div class="toolbar global-filter-strip" aria-label="Фильтры">${primary}${renderSecondaryFilters('toolbar')}</div>
-    ${filters.period === 'custom' ? `
-      <div class="toolbar custom-period">
-        <label class="toolbar-field"><span>Начало</span><input class="input compact" type="date" data-action="start-date" value="${esc(filters.start_date || '')}" /></label>
-        <label class="toolbar-field"><span>Конец</span><input class="input compact" type="date" data-action="end-date" value="${esc(filters.end_date || '')}" /></label>
-      </div>
-    ` : ''}
-  `;
+  return `<div class="toolbar global-filter-strip primary-filter-strip" aria-label="Фильтры">${primary}
+    <button class="toolbar-more-filter" type="button" data-action="global-filters-open" aria-label="Еще"><span>Еще</span><span aria-hidden="true">•••</span></button>
+  </div>`;
 }
 
 function renderNav(): string {
@@ -545,8 +550,8 @@ function renderSheet(): string {
   if (state.sheet === 'can-spend-result' && state.canSpendResult && state.spendableForecast) {
     return BottomSheet('Сколько я могу потратить?', CanSpendView(state.canSpendResult, state.spendableForecast.currency));
   }
-  if (state.sheet === 'home-filters') {
-    return BottomSheet('Еще', `<div class="form-grid home-filter-sheet">${renderSecondaryFilters('sheet')}</div>`);
+  if (state.sheet === 'global-filters') {
+    return BottomSheet('Еще', `<div class="form-grid global-filter-sheet">${renderSecondaryFilters()}</div>`);
   }
   if (state.sheet === 'home-settings') {
     const preferences = profile?.home_preferences || (overview?.home_widgets && overview.home_preferences ? { widgets: overview.home_widgets, ...overview.home_preferences } : null);
@@ -803,10 +808,12 @@ async function loadScreen(): Promise<void> {
     if (state.tab === 'home') {
       overview = await api.overview(state.workspaceId, filters);
       const insightValues = overview.insights?.length ? overview.insights : overview.insight ? [overview.insight] : [];
-      const visibleInsights = insightValues.filter((insight) => !rejectedInsightIds.has(`${state.workspaceId ?? 'personal'}:${insight.id}`));
+      const visibleInsights = insightValues
+        .map((insight) => restoreInsightFeedback(state.workspaceId, insight))
+        .filter((insight) => !rejectedInsightIds.has(insightFeedbackKey(state.workspaceId, insight.id)));
       overview = { ...overview, insights: visibleInsights, insight: visibleInsights[0] || null };
       for (const insight of visibleInsights) {
-        const impressionKey = `${state.workspaceId ?? 'personal'}:${insight.id}`;
+        const impressionKey = insightFeedbackKey(state.workspaceId, insight.id);
         if (impressedInsightIds.has(impressionKey)) continue;
         impressedInsightIds.add(impressionKey);
         void api.insightImpression(insight.id, state.workspaceId).catch(() => impressedInsightIds.delete(impressionKey));
@@ -1420,8 +1427,8 @@ function wireEvents(): void {
     await api.track('mini_app_workspace_changed', { scope: String(state.workspaceId) });
     await loadScreen();
   });
-  app.querySelector<HTMLButtonElement>('[data-action="home-filters-open"]')?.addEventListener('click', () => {
-    state.sheet = 'home-filters';
+  app.querySelector<HTMLButtonElement>('[data-action="global-filters-open"]')?.addEventListener('click', () => {
+    state.sheet = 'global-filters';
     render();
   });
   app.querySelector<HTMLSelectElement>('[data-action="global-currency"]')?.addEventListener('change', async (event) => {
@@ -1879,9 +1886,11 @@ function wireEvents(): void {
       render();
       try {
         const insightId = selectedInsight.id;
-        await api.insightFeedback(insightId, state.workspaceId, feedback);
+        const workspaceId = state.workspaceId;
+        await api.insightFeedback(insightId, workspaceId, feedback);
+        rememberInsightFeedback(workspaceId, insightId, feedback);
         if (feedback === 'not_useful') {
-          rejectedInsightIds.add(`${state.workspaceId ?? 'personal'}:${insightId}`);
+          rejectedInsightIds.add(insightFeedbackKey(workspaceId, insightId));
           state.sheet = null;
           selectedInsight = null;
           state.saving = false;
@@ -1908,8 +1917,10 @@ function wireEvents(): void {
       state.saving = true;
       render();
       try {
-        await api.insightFeedback(insightId, state.workspaceId, feedback);
-        if (feedback === 'not_useful') rejectedInsightIds.add(`${state.workspaceId ?? 'personal'}:${insightId}`);
+        const workspaceId = state.workspaceId;
+        await api.insightFeedback(insightId, workspaceId, feedback);
+        rememberInsightFeedback(workspaceId, insightId, feedback);
+        if (feedback === 'not_useful') rejectedInsightIds.add(insightFeedbackKey(workspaceId, insightId));
         if (overview) {
           const updated: Insight[] = (overview.insights || []).map((item) => item.id === insightId ? { ...item, feedback: feedback as Insight['feedback'] } : item);
           overview = { ...overview, insights: updated, insight: updated[0] || null };
