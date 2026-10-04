@@ -192,6 +192,7 @@ export function HomeScreen(overview: Overview | null, recent: Operation[], fallb
       <article class="summary-card result-card"><span>Итог</span><strong class="home-primary-amount">${esc(resultLines(overview, fallbackCurrency))}</strong>${comparison ? `<small>${esc(comparison)}</small>` : ''}</article>
       ${SpendableCard(overview?.spendable)}
     </div>
+    <button class="button secondary" type="button" data-action="cashflow-open">${icon('analytics')}Деньги до даты</button>
     <section class="home-income-expense" data-testid="income-expense-columns">
       <div class="home-column income" data-testid="income-column"><div class="metric-line income"><span>Доходы</span><strong class="home-rounded-amount">${esc(totalLines(overview, 'income', fallbackCurrency))}</strong></div><button class="button secondary" data-action="open-add" data-kind="income" ${canWrite ? '' : 'disabled'}>${icon('income')}Добавить доход</button></div>
       <div class="home-column expense" data-testid="expense-column"><div class="metric-line expense"><span>Расходы</span><strong class="home-rounded-amount">${esc(totalLines(overview, 'expense', fallbackCurrency))}</strong></div><button class="button primary" data-action="open-add" data-kind="expense" ${canWrite ? '' : 'disabled'}>${icon('expense')}Добавить расход</button></div>

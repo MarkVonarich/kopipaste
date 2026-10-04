@@ -2,6 +2,7 @@ import { formatMoneyString } from '../money';
 import type { BudgetLimit, CategoryBudgetGroup, CategoryOption, GeneralSpendingLimit, Goal, GoalPlanPreview, PlanningEstimate, Reminder } from '../types';
 import { canonicalCategoryKey, dedupePlanningCategories } from '../planningSelection';
 import { EmptyPanel, ProgressBar, SectionHeader, esc, icon } from './ui';
+import { CategoryAppearance, CategoryBadge } from './CategoryAppearance';
 
 type PlansData = {
   all_scope_note?: string | null;
@@ -147,7 +148,7 @@ function categoryRow(category: CategoryOption): string {
   ].join('');
   return `
     <button class="settings-row category-row" data-action="category-open" data-token="${esc(category.token || category.normalized_name)}">
-      <span><strong>${esc(category.name)}</strong>${markers}</span>
+      <span class="category-label">${CategoryBadge(category)}<span><strong>${esc(category.name)}</strong>${markers}</span></span>
       <em>${icon('chevron')}</em>
     </button>
   `;
@@ -201,6 +202,7 @@ export function CategoryDetail(category: CategoryOption, type: 'expense' | 'inco
   const auto = (refs?.aliases || 0) + (refs?.ml_observations || 0);
   return `
     <div class="detail-grid" data-category-token="${esc(category.token || category.normalized_name)}">
+      <div class="category-preview">${CategoryBadge(category)}<strong>${esc(category.name)}</strong></div>
       <div class="detail-row"><span>Тип</span><strong>${type === 'income' ? 'Доходы' : 'Расходы'}</strong></div>
       <div class="detail-row"><span>Операции</span><strong>${refs?.operations ?? category.operation_count}</strong></div>
       <div class="detail-row"><span>Лимиты</span><strong>${refs?.category_limits || 0}</strong></div>
@@ -220,7 +222,7 @@ export function CategoryDetail(category: CategoryOption, type: 'expense' | 'inco
     </div>` : ''}
     ${category.protected ? '<p class="caption">Системную категорию нельзя переименовать или удалить.</p>' : ''}
     ${canWrite && !category.protected ? `<div class="actions">
-      <button class="button secondary" data-action="category-rename" data-token="${esc(category.token || category.normalized_name)}">Переименовать</button>
+      <button class="button secondary" data-action="category-rename" data-token="${esc(category.token || category.normalized_name)}">Изменить категорию</button>
       <button class="button danger" data-action="category-delete" data-token="${esc(category.token || category.normalized_name)}">Удалить</button>
     </div>` : ''}
   `;
@@ -249,11 +251,13 @@ export function GoalDetail(goal: Goal, canWrite: boolean): string {
   `;
 }
 
-export function CategoryForm(category: CategoryOption | null, type: 'expense' | 'income', saving = false, error = ''): string {
+export function CategoryForm(category: CategoryOption | null, type: 'expense' | 'income', saving = false, error = '', draft?: Partial<CategoryOption>): string {
+  const values = draft || category || {};
   return `
     <form class="form-grid" data-action="${category ? 'save-category' : 'create-category'}" ${category ? `data-token="${esc(category.token || category.normalized_name)}"` : ''}>
       <input type="hidden" name="type" value="${esc(type)}" />
-      <label class="field">Название<input class="input" name="name" maxlength="64" value="${esc(category?.name || '')}" required /></label>
+      <label class="field">Название<input class="input" name="name" maxlength="64" value="${esc(values.name || '')}" required /></label>
+      ${CategoryAppearance(values)}
       ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
       <button class="button primary" type="submit" ${saving ? 'disabled' : ''}>Сохранить</button>
     </form>

@@ -78,8 +78,14 @@ def ensure_user(user_id: int) -> bool:
                 ON CONFLICT (user_id) DO NOTHING
             """, (user_id,))
             created = (cur.rowcount == 1)
+            if created:
+                from services.category_catalog import seed_new_user_categories_cur
+                seed_new_user_categories_cur(cur, user_id)
         conn.commit()
         return created
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

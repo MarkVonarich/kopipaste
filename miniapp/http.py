@@ -105,6 +105,8 @@ def application(environ, start_response):
             return _json_response(start_response, 200, api.overview(req, params))
         if method == "GET" and path == "/miniapp/api/forecast/spendable":
             return _json_response(start_response, 200, api.spendable_forecast(req, params))
+        if method == "POST" and path == "/miniapp/api/forecast/cashflow":
+            return _json_response(start_response, 200, api.cashflow_preview(req, body))
         if method == "POST" and path == "/miniapp/api/forecast/can-spend":
             return _json_response(start_response, 200, api.forecast_can_spend(req, body))
         if method == "POST" and path == "/miniapp/api/forecast/exposure":

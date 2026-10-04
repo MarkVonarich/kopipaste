@@ -413,6 +413,28 @@ textarea:disabled {
   gap: var(--space-3);
 }
 
+.category-label, .category-preview { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.category-label > span:last-child, .category-preview strong { min-width: 0; overflow-wrap: anywhere; }
+.category-badge { display: inline-grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; border-radius: 8px; color: var(--category-color); background: var(--surface-secondary); }
+.appearance-options { border: 0; padding: 0; margin: 0; min-width: 0; }
+.appearance-options legend { margin-bottom: 8px; font-size: 14px; }
+.appearance-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.appearance-choice { position: relative; width: 44px; height: 44px; display: grid; place-items: center; border: 2px solid var(--divider); border-radius: 8px; cursor: pointer; }
+.appearance-choice input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.appearance-choice:has(input:checked) { border-color: var(--text); }
+.appearance-choice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.color-choice span { width: 26px; height: 26px; border-radius: 50%; background: var(--category-color); }
+.cashflow-result { display: grid; gap: 16px; margin-top: 24px; }
+[data-cashflow-date][hidden] { display: none; }
+.cashflow-amount { font-size: 28px; line-height: 1.2; overflow-wrap: anywhere; }
+.cashflow-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+.cashflow-table th, .cashflow-table td { padding: 8px 4px; text-align: right; border-bottom: 1px solid var(--divider); overflow-wrap: anywhere; }
+.cashflow-table th:first-child, .cashflow-table td:first-child { text-align: left; width: 27%; }
+.cashflow-result details summary { cursor: pointer; font-weight: 600; }
+.cashflow-result .detail-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; }
+.cashflow-result .detail-row strong { white-space: nowrap; font-size: 14px; }
+.cashflow-result .detail-row small { display: block; font-size: 12px; color: var(--text-secondary); }
+
 .toolbar-field {
   display: grid;
   gap: var(--space-1);

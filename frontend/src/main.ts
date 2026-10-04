@@ -23,6 +23,8 @@ import { ShoppingList } from './components/ShoppingList';
 import { LoadingState, ErrorState } from './components/States';
 import { TransactionForm } from './components/TransactionForm';
 import { canonicalCategoryKey, togglePlanningCategory } from './planningSelection';
+import { CategoryBadge } from './components/CategoryAppearance';
+import { CashflowForm, type CashflowDraft, type CashflowResult } from './components/Cashflow';
 
 const appRoot = document.querySelector<HTMLDivElement>('#app');
 if (!appRoot) throw new Error('Missing app root');
@@ -61,6 +63,8 @@ const resolvedInsightFeedback = new Map<string, NonNullable<Insight['feedback']>
 const impressedForecasts = new Set<string>();
 let suppressPlanningCategoryClick = '';
 let cancelPlanningDrag: (() => void) | null = null;
+let cashflowDraft: CashflowDraft = { balance: '', reserve: '0', horizon: 'month_end', end_date: '' };
+let cashflowResult: CashflowResult | null = null;
 
 function pointerIsOverElement(event: PointerEvent, element: HTMLElement): boolean {
   const rect = element.getBoundingClientRect();
@@ -520,6 +524,9 @@ function announcementKindLabel(kind: Announcement['kind']): string {
 }
 
 function renderSheet(): string {
+  if (state.sheet === 'cashflow') {
+    return BottomSheet('Деньги до даты', CashflowForm(activeFilters().currency || state.boot?.user.currency || 'RUB', cashflowDraft, cashflowResult, state.saving, state.saveError));
+  }
   if (state.confirmDeleteId && selectedOperation) {
     return ConfirmDialog(state.confirmDeleteId, `${selectedOperation.category} · ${operationAmount(selectedOperation)}`);
   }
@@ -633,10 +640,10 @@ function renderSheet(): string {
     return BottomSheet(selectedCategory.name, CategoryDetail(selectedCategory, state.categoryType || 'expense', canWrite() && !plans?.categories_read_only));
   }
   if (state.sheet === 'category-create') {
-    return BottomSheet('Новая категория', CategoryForm(null, state.categoryType || 'expense', state.saving, state.saveError));
+    return BottomSheet('Новая категория', CategoryForm(null, state.categoryType || 'expense', state.saving, state.saveError, state.categoryDraft));
   }
   if (state.sheet === 'category-rename' && selectedCategory) {
-    return BottomSheet('Переименовать категорию', CategoryForm(selectedCategory, state.categoryType || 'expense', state.saving, state.saveError));
+    return BottomSheet('Изменить категорию', CategoryForm(selectedCategory, state.categoryType || 'expense', state.saving, state.saveError, state.categoryDraft));
   }
   if (state.sheet === 'category-delete' && selectedCategory) {
     return BottomSheet('Удалить категорию', CategoryDeleteForm(selectedCategory, state.categoryType || 'expense', plans?.categories || [], state.saving, state.saveError));
@@ -778,6 +785,8 @@ function safeError(error: unknown): string {
     reminder_stale_occurrence: 'Напоминание уже изменилось. Обновите экран.',
     budget_not_found: 'Бюджет не найден.',
     budget_invalid_categories: 'Выберите категории из списка.',
+    bad_cashflow_request: 'Проверьте остаток, резерв и дату (не дальше года). Выберите личное пространство.',
+    forecast_workspace_required: 'Выберите одно личное пространство для прогноза.',
     budget_access_denied: 'Нет доступа к бюджету.',
     categories_required: 'Выберите хотя бы одну категорию для расчёта.',
     bad_planning_request: 'Проверьте параметры расчёта.',
@@ -1007,6 +1016,14 @@ async function bootstrap(): Promise<void> {
 }
 
 function closeSheet(): void {
+  if (state.sheet === 'cashflow') {
+    state.sheet = null;
+    cashflowResult = null;
+    state.saving = false;
+    state.saveError = undefined;
+    render();
+    return;
+  }
   if (state.privacyStage === 'deleted') {
     getTelegramWebApp()?.close?.();
     return;
@@ -1311,6 +1328,7 @@ function wireEvents(): void {
   app.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => {
     button.addEventListener('click', async () => {
       const tab = button.dataset.tab as AppState['tab'];
+      cashflowResult = null;
       hapticSelection();
       state.tab = tab;
       state.reportReturnContext = undefined;
@@ -1682,6 +1700,54 @@ function wireEvents(): void {
     } catch (error) {
       state.saving = false;
       state.error = safeError(error);
+      render();
+    }
+  });
+  app.querySelector<HTMLButtonElement>('[data-action="cashflow-open"]')?.addEventListener('click', () => {
+    cashflowDraft = { balance: '', reserve: '0', horizon: 'month_end', end_date: '' };
+    cashflowResult = null;
+    state.saveError = undefined;
+    state.sheet = 'cashflow';
+    render();
+  });
+  const cashflowForm = app.querySelector<HTMLFormElement>('[data-action="cashflow-preview"]');
+  cashflowForm?.querySelector<HTMLSelectElement>('[name="horizon"]')?.addEventListener('change', (event) => {
+    const custom = (event.target as HTMLSelectElement).value === 'date';
+    cashflowForm.querySelector<HTMLElement>('[data-cashflow-date]')!.hidden = !custom;
+    cashflowForm.querySelector<HTMLInputElement>('[name="end_date"]')!.required = custom;
+  });
+  cashflowForm?.addEventListener('input', () => {
+    const values = new FormData(cashflowForm);
+    cashflowDraft = {
+      balance: String(values.get('balance') || ''), reserve: String(values.get('reserve') || '0'),
+      horizon: String(values.get('horizon')) as CashflowDraft['horizon'], end_date: String(values.get('end_date') || ''),
+    };
+    cashflowResult = null;
+    app.querySelector('.cashflow-result')?.remove();
+  });
+  cashflowForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.saving) return;
+    const data = new FormData(cashflowForm);
+    cashflowDraft = {
+      balance: String(data.get('balance') || '').trim().replace(',', '.'),
+      reserve: String(data.get('reserve') || '0').trim().replace(',', '.'),
+      horizon: String(data.get('horizon')) as CashflowDraft['horizon'],
+      end_date: String(data.get('end_date') || ''),
+    };
+    const submitted = cashflowDraft;
+    const workspaceId = state.workspaceId;
+    state.saving = true;
+    state.saveError = undefined;
+    cashflowResult = null;
+    render();
+    try {
+      const result = await api.cashflowPreview(workspaceId, activeFilters().currency || state.boot?.user.currency || 'RUB', submitted);
+      if (state.sheet === 'cashflow' && submitted === cashflowDraft && workspaceId === state.workspaceId) cashflowResult = result;
+    } catch (error) {
+      if (state.sheet === 'cashflow') state.saveError = safeError(error);
+    } finally {
+      state.saving = false;
       render();
     }
   });
@@ -2311,6 +2377,7 @@ function wireEvents(): void {
     });
   });
   app.querySelector<HTMLButtonElement>('[data-action="category-create"]')?.addEventListener('click', () => {
+    state.categoryDraft = undefined;
     selectedCategory = null;
     state.sheet = 'category-create';
     state.saveError = undefined;
@@ -2328,6 +2395,7 @@ function wireEvents(): void {
   });
   app.querySelectorAll<HTMLButtonElement>('[data-action="category-rename"]').forEach((button) => {
     button.addEventListener('click', () => {
+      state.categoryDraft = undefined;
       const token = button.dataset.token || '';
       selectedCategory = (plans?.categories || []).find((item) => (item.token || item.normalized_name) === token) || null;
       if (!selectedCategory) return;
@@ -3232,27 +3300,38 @@ function wireEvents(): void {
     }
   });
 
-  app.querySelector<HTMLFormElement>('form[data-action="create-category"], form[data-action="save-category"]')?.addEventListener('submit', async (event) => {
+  const categoryForm = app.querySelector<HTMLFormElement>('form[data-action="create-category"], form[data-action="save-category"]');
+  categoryForm?.addEventListener('input', () => {
+    const values = new FormData(categoryForm);
+    state.categoryDraft = { name: String(values.get('name') || ''), icon: String(values.get('icon') || 'operations'), color: String(values.get('color') || '#187568') };
+    const preview = categoryForm.querySelector('.category-preview');
+    if (preview) preview.innerHTML = `${CategoryBadge(state.categoryDraft)}<strong>${esc(state.categoryDraft.name || 'Новая категория')}</strong>`;
+  });
+  categoryForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (state.saving) return;
     const form = event.currentTarget as HTMLFormElement;
     const data = new FormData(form);
     const type = String(data.get('type') || state.categoryType || 'expense') as 'expense' | 'income';
+    state.categoryDraft = { name: String(data.get('name') || ''), icon: String(data.get('icon') || 'operations'), color: String(data.get('color') || '#187568') };
     state.saving = true;
     state.saveError = undefined;
     render();
     try {
       const name = String(data.get('name') || '').trim();
+      const appearance = { icon: String(data.get('icon') || 'operations'), color: String(data.get('color') || '#187568') };
       if (form.dataset.action === 'save-category') {
-        await api.renameCategory(form.dataset.token || '', { workspace_id: state.workspaceId, type, name });
-        showToast('Категория переименована');
+        await api.renameCategory(form.dataset.token || '', { workspace_id: state.workspaceId, type, name, ...appearance });
+        showToast('Категория обновлена');
       } else {
-        await api.createCategory({ workspace_id: state.workspaceId, type, name });
+        await api.createCategory({ workspace_id: state.workspaceId, type, name, ...appearance });
         showToast('Категория добавлена');
       }
+      state.dirty = false;
       closeSheet();
       state.categoryType = type;
       state.plansMode = 'categories';
+      await loadFilterCategories();
       await loadScreen();
     } catch (error) {
       state.saving = false;

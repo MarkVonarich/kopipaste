@@ -8,6 +8,7 @@ from psycopg2 import errors
 from db.database import get_conn, pg_fetchall
 from services.product_events import ProductEvent, track_product_event
 from utils.text import norm_text
+from services.category_catalog import category_appearance, DEFAULT_ICON, DEFAULT_COLOR
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,8 @@ class ManagedCategory:
     source: str = "operation"
     operation_count: int = 0
     has_budget: bool = False
+    icon: str = DEFAULT_ICON
+    color: str = DEFAULT_COLOR
 
 
 @dataclass(frozen=True)
@@ -398,7 +401,7 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
                 scope, params = _scope_clause(workspace_id)
                 cur.execute(
                     f"""
-                    SELECT id, name, normalized_name
+                    SELECT id, name, normalized_name, icon, color
                       FROM public.custom_categories
                      WHERE {scope}
                        AND type=%s
@@ -409,13 +412,20 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
                     """,
                     (*params, op_type, user_id, workspace_id, int(limit)),
                 )
-                for category_id, name, normalized in cur.fetchall():
+                for row in cur.fetchall():
+                    category_id, name, normalized = row[:3]
+                    try:
+                        icon, color = category_appearance(*row[3:5])
+                    except ValueError:
+                        icon, color = DEFAULT_ICON, DEFAULT_COLOR
                     found[str(normalized)] = ManagedCategory(
                         category_id=int(category_id),
                         name=name,
                         normalized_name=str(normalized),
                         op_type=op_type,
                         source="custom",
+                        icon=icon,
+                        color=color,
                     )
 
             op_columns = _table_columns(cur, "operations")
@@ -445,6 +455,8 @@ def list_managed_categories(*, user_id: int, workspace_id: int | None, op_type: 
                         op_type=op_type,
                         source=current.source if current else "operation",
                         operation_count=int(op_count or 0),
+                        icon=current.icon if current else DEFAULT_ICON,
+                        color=current.color if current else DEFAULT_COLOR,
                     )
 
             limit_columns = _table_columns(cur, "category_limits")
@@ -1202,11 +1214,14 @@ def rename_category(
     source: str,
     destination: str,
     shared_workspace: bool | None = None,
+    appearance: tuple[str, str] | None = None,
 ) -> CategoryRenameResult:
     source_name = normalize_category_name(source)
     destination_name = normalize_category_name(destination)
     source_key = normalized_category_key(source_name)
     destination_key = normalized_category_key(destination_name)
+    if appearance is not None:
+        appearance = category_appearance(*appearance)
     if is_protected_category(source_name):
         raise ValueError("protected_category")
 
@@ -1221,6 +1236,25 @@ def rename_category(
                 name=source_name,
                 shared_workspace=shared_workspace,
             )
+            if source_name == destination_name and appearance is not None:
+                cur.execute(
+                    """UPDATE public.custom_categories SET icon=%s, color=%s, updated_at=now()
+                       WHERE workspace_id IS NOT DISTINCT FROM %s AND type=%s
+                         AND normalized_name=%s AND archived_at IS NULL
+                         AND (user_id=%s OR %s::boolean) RETURNING id""",
+                    (*appearance, workspace_id, op_type, source_key, user_id, _is_shared_scope(workspace_id, shared_workspace)),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute(
+                        """INSERT INTO public.custom_categories
+                           (workspace_id,user_id,type,name,normalized_name,icon,color)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                        (workspace_id, user_id, op_type, source_name, source_key, *appearance),
+                    )
+                    row = cur.fetchone()
+                conn.commit()
+                return CategoryRenameResult(source_name, destination_name, op_type, CategoryReferenceCounts(), int(row[0]), True)
             if source_key != destination_key and _category_exists(
                 cur,
                 user_id=user_id,
@@ -1416,6 +1450,21 @@ def rename_category(
                 )
                 row = cur.fetchone()
                 category_id = int(row[0]) if row else None
+
+            if appearance is not None:
+                if category_id is None:
+                    cur.execute(
+                        """INSERT INTO public.custom_categories
+                        (workspace_id, user_id, type, name, normalized_name, icon, color)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                        (workspace_id, user_id, op_type, destination_name, destination_key, *appearance),
+                    )
+                    category_id = int(cur.fetchone()[0])
+                else:
+                    cur.execute(
+                        "UPDATE public.custom_categories SET icon=%s, color=%s, updated_at=now() WHERE id=%s",
+                        (*appearance, category_id),
+                    )
 
             counts = CategoryReferenceCounts(**{**before.as_dict(), **changed})
         conn.commit()
@@ -1693,9 +1742,11 @@ def get_or_create_custom_category(
     user_id: int,
     op_type: str,
     name: str,
+    appearance: tuple[str, str] | None = None,
 ) -> CategoryResult:
     display_name = normalize_category_name(name)
     key = normalized_category_key(display_name)
+    icon, color = category_appearance(*(appearance or (None, None)))
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -1718,11 +1769,11 @@ def get_or_create_custom_category(
                 return CategoryResult(name=row[1], normalized_name=key, created=False, category_id=int(row[0]))
             cur.execute(
                 """
-                INSERT INTO public.custom_categories (workspace_id, user_id, type, name, normalized_name)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO public.custom_categories (workspace_id, user_id, type, name, normalized_name, icon, color)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (workspace_id, user_id, op_type, display_name, key),
+                (workspace_id, user_id, op_type, display_name, key, icon, color),
             )
             category_id = int(cur.fetchone()[0])
         conn.commit()

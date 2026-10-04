@@ -38,6 +38,7 @@ from routers.commands import (
     cmd_admin_posthog_test_event,
 )
 from routers.callbacks import callback_handler
+from routers.cashflow import cmd_forecast
 from routers.messages import handle_text, handle_location, handle_photo, handle_voice
 from jobs.scheduler import register_jobs
 
@@ -76,6 +77,7 @@ def main():
     app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("app", cmd_app))
+    app.add_handler(CommandHandler("forecast", cmd_forecast))
     app.add_handler(CommandHandler("delete_my_data", cmd_delete_my_data))
     app.add_handler(CommandHandler("delete", cmd_delete_my_data))
     app.add_handler(CommandHandler("budget", cmd_budget))

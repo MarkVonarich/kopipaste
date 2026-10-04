@@ -536,7 +536,7 @@ def test_categories_endpoint_uses_managed_categories(monkeypatch):
     api = _api(monkeypatch)
     monkeypatch.setattr(api, "_read_scope", lambda _req, _workspace_id: ([10], False))
     monkeypatch.setattr("miniapp.api.list_managed_categories", lambda **_kwargs: [
-        type("Cat", (), {"name": "Food", "normalized_name": "food", "op_type": "Расходы", "source": "custom", "operation_count": 3, "has_budget": True})()
+        type("Cat", (), {"name": "Food", "normalized_name": "food", "op_type": "Расходы", "source": "custom", "operation_count": 3, "has_budget": True, "icon": "empty", "color": "#187568"})()
     ])
 
     data = api.categories(api.request(42), {"workspace_id": 10, "type": "expense"})["data"]

@@ -30,6 +30,8 @@ from services.budgeting import (
     update_category_budget_group,
 )
 from services.categories import list_managed_categories, normalized_category_key
+from services.category_catalog import category_appearance
+from services.cashflow import CashflowRepository, cash_amount
 from services.categories import (
     CategoryReferenceCounts,
     category_reference_counts_many,
@@ -447,6 +449,8 @@ class MiniAppAPI:
                 "operation_count": item.operation_count,
                 "has_budget": item.has_budget,
                 "protected": is_protected_category(item.name),
+                "icon": item.icon,
+                "color": item.color,
             }
             if include_references:
                 counts = reference_counts.get(item.normalized_name) or CategoryReferenceCounts()
@@ -501,7 +505,8 @@ class MiniAppAPI:
         if not op_type:
             raise MiniAppError(400, "bad_type", "Invalid operation type.")
         try:
-            result = get_or_create_custom_category(workspace_id=ctx.workspace_id, user_id=req.user_id, op_type=op_type, name=str(body.get("name") or ""))
+            appearance = category_appearance(body.get("icon"), body.get("color"))
+            result = get_or_create_custom_category(workspace_id=ctx.workspace_id, user_id=req.user_id, op_type=op_type, name=str(body.get("name") or ""), appearance=appearance)
         except ValueError as exc:
             raise MiniAppError(400, "bad_category_name", "Invalid category name.") from exc
         self._track(req, "mini_app_category_created", workspace_id=ctx.workspace_id, properties={"source": "mini_app", "type": "income" if op_type == "Доходы" else "expense"})
@@ -547,6 +552,7 @@ class MiniAppAPI:
                 source=current["name"],
                 destination=str(body.get("name") or ""),
                 shared_workspace=ctx.kind not in {"personal", "legacy_personal"},
+                appearance=category_appearance(body.get("icon", current.get("icon")), body.get("color", current.get("color"))),
             )
         except ValueError as exc:
             raise MiniAppError(400, "category_rename_failed", "Category could not be renamed.") from exc
@@ -1149,6 +1155,30 @@ class MiniAppAPI:
         except Exception as exc:
             log.info("miniapp_forecast_overview_unavailable reason=%s", type(exc).__name__)
             return {"available": False, "code": "temporarily_unavailable", "title": "Прогноз пока недоступен", "description": "Попробуйте обновить экран позже."}
+
+    def cashflow_preview(self, req: MiniAppRequest, body: dict[str, Any]) -> dict:
+        self._check_write_rate(req)
+        workspace_ids, all_scope = self._read_scope(req, body.get("workspace_id"))
+        if all_scope:
+            raise MiniAppError(400, "forecast_workspace_required", "Выберите одно личное пространство.")
+        workspace_id = workspace_ids[0]
+        ctx = self._workspace_detail(req, workspace_id) if workspace_id is not None else None
+        try:
+            balance = None if body.get("balance") in (None, "") else cash_amount(body["balance"])
+            reserve = cash_amount(body.get("reserve") or "0")
+            if reserve < 0:
+                raise ValueError("invalid_reserve")
+            result = CashflowRepository().preview(
+                user_id=req.user_id, workspace_id=workspace_id,
+                workspace_kind=ctx.kind if ctx else "legacy_personal",
+                currency=self._validated_currency(body.get("currency") or get_user_currency(req.user_id)),
+                default_currency=get_user_currency(req.user_id), today=user_local_date(req.user_id, workspace_id),
+                horizon=str(body.get("horizon") or "month_end"), end_date=body.get("end_date"),
+                balance=balance, reserve=reserve,
+            )
+        except ValueError as exc:
+            raise MiniAppError(400, "bad_cashflow_request", "Проверьте остаток, дату и личное пространство.") from exc
+        return success(result, request_id=req.request_id)
 
     def spendable_forecast(self, req: MiniAppRequest, params: dict[str, Any]) -> dict:
         try:

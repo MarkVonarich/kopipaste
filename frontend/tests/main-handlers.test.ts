@@ -248,6 +248,12 @@ function installAppMocks(homeInsights: any[] = [], workspaces: any[] = [{ worksp
     insightFeedback: vi.fn(async (_id, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
     forecastFeedback: vi.fn(async (_fingerprint, _workspace, feedbackType) => ({ recorded: true, feedback_type: feedbackType })),
     forecastExposure: vi.fn(async () => ({ recorded: true })),
+    cashflowPreview: vi.fn(async (_workspace, _currency, _draft): Promise<any> => ({
+      currency: 'RUB', as_of: '2026-10-04', end_date: '2026-10-31', current_balance: '10000',
+      protected_reserve: '0', goal_reserve: '0', planned_expense: '0', expected_income: '0',
+      ordinary_expense: '2800', can_spend: '7200', daily_allowance: '357.14', daily_pace: '100',
+      exhaustion_without_income: null, missing: [], overdue_income_count: 0, trajectory: [], events: [],
+    })),
     spendableForecast: vi.fn(async () => ({})),
     track: vi.fn(async (_name: string, _properties: Record<string, any> = {}) => undefined),
     exportInfo: vi.fn(async () => ({ available: true, status: 'ready', presets: [], privacy_note: '' })),
@@ -353,6 +359,64 @@ describe('main plan handlers', () => {
     vi.restoreAllMocks();
     vi.doUnmock('../src/api');
     delete window.Telegram;
+  });
+
+  it('calculates a cash scenario and discards the confirmed balance when reopened', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="cashflow-open"]')!.click();
+    const form = document.querySelector<HTMLFormElement>('[data-action="cashflow-preview"]')!;
+    form.querySelector<HTMLInputElement>('[name="balance"]')!.value = '10000';
+    form.requestSubmit();
+    await flush(8);
+    expect(api.cashflowPreview).toHaveBeenCalledWith(10, 'RUB', expect.objectContaining({ balance: '10000', horizon: 'month_end' }));
+    expect(document.querySelector('.cashflow-amount')?.textContent).toContain('7 200');
+    const back = (window.Telegram!.WebApp!.BackButton!.onClick as any).mock.calls[0][0];
+    back();
+    expect(document.querySelector('[data-action="cashflow-preview"]')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-action="cashflow-open"]')!.click();
+    expect(document.querySelector<HTMLInputElement>('[name="balance"]')!.value).toBe('');
+    expect(document.querySelector('.cashflow-result')).toBeNull();
+  });
+
+  it('does not show a stale cash scenario after inputs change during the request', async () => {
+    const api = installAppMocks();
+    let resolve: (result: any) => void = () => {};
+    api.cashflowPreview.mockImplementation(() => new Promise(done => { resolve = done; }));
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-action="cashflow-open"]')!.click();
+    document.querySelector<HTMLFormElement>('[data-action="cashflow-preview"]')!.requestSubmit();
+    const input = document.querySelector<HTMLInputElement>('[name="balance"]')!;
+    input.value = '50';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    resolve({ can_spend: '10000' });
+    await flush(8);
+    expect(document.querySelector('.cashflow-result')).toBeNull();
+    expect(document.querySelector<HTMLInputElement>('[name="balance"]')!.value).toBe('50');
+  });
+
+  it('previews category appearance and submits it with the name', async () => {
+    const api = installAppMocks();
+    await import('../src/main');
+    await flush();
+    document.querySelector<HTMLButtonElement>('[data-tab="plans"]')!.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="plans-mode"][data-mode="categories"]')!.click();
+    await flush(8);
+    document.querySelector<HTMLButtonElement>('[data-action="category-create"]')!.click();
+    const form = document.querySelector<HTMLFormElement>('[data-action="create-category"]')!;
+    const name = form.querySelector<HTMLInputElement>('[name="name"]')!;
+    name.value = 'Счета';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    form.querySelector<HTMLInputElement>('[name="icon"][value="home"]')!.click();
+    form.querySelector<HTMLInputElement>('[name="color"][value="#2563EB"]')!.click();
+    expect(form.querySelector('.category-preview')?.textContent).toBe('Счета');
+    expect(form.querySelector('.category-badge')?.getAttribute('style')).toContain('#2563EB');
+    form.requestSubmit();
+    await flush(8);
+    expect(api.createCategory).toHaveBeenCalledWith({ workspace_id: 10, type: 'expense', name: 'Счета', icon: 'home', color: '#2563EB' });
   });
 
   it('keeps the same three primary filters on every tab and applies secondary filters from Еще', async () => {

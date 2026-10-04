@@ -1,4 +1,5 @@
 import { initData } from './telegram';
+import type { CashflowDraft, CashflowResult } from './components/Cashflow';
 import type {
   Bootstrap,
   BudgetLimit,
@@ -283,6 +284,8 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  cashflowPreview: (workspace_id: number | 'all' | null, currency: string, draft: CashflowDraft) =>
+    apiFetch<CashflowResult>('/miniapp/api/forecast/cashflow', { method: 'POST', body: JSON.stringify({ workspace_id, currency, ...draft }) }),
   bootstrap: () => apiFetch<Bootstrap>('/miniapp/api/bootstrap'),
   workspaces: () => apiFetch<{ items: Workspace[] }>('/miniapp/api/workspaces'),
   overview: (workspaceId: number | 'all' | null, filters: GlobalFinancialFilters) =>
@@ -314,9 +317,9 @@ export const api = {
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories${query({ workspace_id: workspaceId, type, current_category: currentCategory })}`),
   managedCategories: (workspaceId: number | 'all' | null, type: 'expense' | 'income') =>
     apiFetch<{ items: CategoryOption[]; read_only: boolean; note?: string }>(`/miniapp/api/categories/manage${query({ workspace_id: workspaceId, type })}`),
-  createCategory: (payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
+  createCategory: (payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string; icon?: string; color?: string }) =>
     apiFetch<{ category: CategoryOption; created: boolean }>('/miniapp/api/categories', { method: 'POST', body: JSON.stringify(payload) }),
-  renameCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string }) =>
+  renameCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; name: string; icon?: string; color?: string }) =>
     apiFetch<{ category: CategoryOption; result: string }>(`/miniapp/api/categories/${categoryPathToken(token)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCategory: (token: string, payload: { workspace_id: number | 'all' | null; type: 'expense' | 'income'; transfer_to?: string }) =>
     apiFetch<{ deleted: boolean; references: Record<string, number> }>(`/miniapp/api/categories/${categoryPathToken(token)}`, { method: 'DELETE', body: JSON.stringify(payload) }),

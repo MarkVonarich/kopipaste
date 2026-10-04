@@ -2,12 +2,14 @@
 
 Telegram finance bot (Finuchet) with production deployment on Ubuntu VPS and process management via `systemd`.
 
-> Repository inventory note: in this workspace snapshot, application source modules are not present yet; this PR documents current operational process and expected structure for safe further development.
+The repository includes the Python Telegram bot, PostgreSQL domain services, the authenticated Mini App API in `miniapp/`, and the Vite/TypeScript Mini App in `frontend/`.
 
 ## What the bot does
 - Handles Telegram commands and user interactions for personal finance flows.
 - Persists business data in PostgreSQL.
 - Runs as long-lived service `finuchet.service` on VPS.
+- Shares operations, categories, goals, limits and reminders between chat and Mini App.
+- Supports manual cashflow scenarios and category presentation; see `docs/CASHFLOW_AND_CATEGORY_STARTER.md` for scope and local acceptance checks.
 
 ## Production runtime
 - Server path: `/root/bot_finuchet`

@@ -50,6 +50,7 @@ async def on_startup(app):
         BotCommand('start', 'Главное меню'),
         BotCommand('settings', 'Настройки'),
         BotCommand('help', 'Помощь'),
+        BotCommand('forecast', 'Деньги до даты'),
     ]
     if MINIAPP_PUBLIC_URL:
         public_commands.append(BotCommand('app', 'Mini App'))
